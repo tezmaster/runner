@@ -1011,6 +1011,7 @@ fn tab_and_mission_menus_have_the_trimmed_item_lists() {
         (Some("claude-code"), "claude.svg"),
         (Some("codex"), "openai.svg"),
         (Some("trae"), "trae.svg"),
+        (Some("muse"), "muse.svg"),
         (Some("copilot"), "copilot.svg"),
         (Some("pi"), "pi.svg"),
         (Some("antigravity"), "antigravity-icon.png"),

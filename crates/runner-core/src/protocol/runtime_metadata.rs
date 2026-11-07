@@ -635,6 +635,91 @@ pub mod trae {
         RuntimeCapabilities::default()
     }
 }
+pub mod muse {
+    use super::super::runtime_options::*;
+    use super::*;
+    pub static PERMISSIONS: Permissions = Permissions {
+        offered: &[PermissionMode::Default, PermissionMode::Bypass],
+        strip_flags: &[
+            ("--approval-mode", true),
+            ("--disable-approval", false),
+            ("--yolo", false),
+        ],
+        equals_on_bool: false,
+        variadic_flag: None,
+        args: permission_args,
+        matches: mode_matches,
+        mission_bypass: Some(&["--yolo"]),
+        strip_on_mission_resume: false,
+    };
+    fn permission_args(mode: PermissionMode) -> Vec<String> {
+        match mode {
+            PermissionMode::Bypass => strings(&["--approval-mode", "never"]),
+            _ => Vec::new(),
+        }
+    }
+    fn mode_matches(args: &[String], mode: PermissionMode) -> bool {
+        match mode {
+            PermissionMode::Bypass => {
+                args.iter()
+                    .any(|a| a == "--yolo" || a == "--disable-approval")
+                    || flag_value_matches(args, "--approval-mode", Some("never"))
+            }
+            _ => false,
+        }
+    }
+    pub fn catalog() -> Option<RuntimeCatalog> {
+        // Effort values verified against `muse exec --help`
+        // (none|minimal|low|medium|high|xhigh|max|ultra), 2026-11-07.
+        // Model IDs stay default-only until verified (follow-up).
+        let efforts = vec![
+            default_effort(),
+            option("none", "None", "No reasoning effort; fastest responses."),
+            option("minimal", "Minimal", "Minimal reasoning for trivial tasks."),
+            option("low", "Low", "Fast responses with lighter reasoning."),
+            option("medium", "Medium", "Balances speed and reasoning depth."),
+            option(
+                "high",
+                "High",
+                "Greater reasoning depth for complex problems.",
+            ),
+            option(
+                "xhigh",
+                "Extra high",
+                "Extra reasoning depth for complex problems.",
+            ),
+            option(
+                "max",
+                "Max",
+                "Maximum reasoning depth for the hardest problems.",
+            ),
+            option(
+                "ultra",
+                "Ultra",
+                "Maximum reasoning with automatic task delegation.",
+            ),
+        ];
+        Some(RuntimeCatalog {
+            name: Runtime::Muse,
+            display_name: Runtime::Muse.display_name(),
+            command: Runtime::Muse.command().unwrap(),
+            capabilities: capabilities(),
+            native_fork: false,
+            description: "Meta Muse Code",
+            install_url: "",
+            default_enabled: true,
+            models: vec![default_model_option()],
+            efforts,
+            skills_dirs: SKILL_DIRS,
+            update_args: &[],
+            npm_package: None,
+        })
+    }
+    pub const SKILL_DIRS: &[&str] = &[".agents/skills"];
+    pub fn capabilities() -> RuntimeCapabilities {
+        RuntimeCapabilities::default()
+    }
+}
 pub mod cursor_agent {
     use super::super::runtime_options::*;
     use super::*;
@@ -814,6 +899,7 @@ pub fn catalog_for(runtime: Runtime) -> Option<RuntimeCatalog> {
         Runtime::Cursor => cursor_agent::catalog(),
         Runtime::Grok => grok::catalog(),
         Runtime::OpenCode => opencode::catalog(),
+        Runtime::Muse => muse::catalog(),
         Runtime::Shell => None,
     }
 }
@@ -854,6 +940,7 @@ impl RuntimeMetadata {
             | Runtime::Cursor
             | Runtime::Grok
             | Runtime::OpenCode
+            | Runtime::Muse
             | Runtime::Shell => false,
         }
     }
@@ -868,6 +955,7 @@ impl RuntimeMetadata {
             Runtime::Cursor => &cursor_agent::PERMISSIONS,
             Runtime::Grok => &grok::PERMISSIONS,
             Runtime::OpenCode => &opencode::PERMISSIONS,
+            Runtime::Muse => &muse::PERMISSIONS,
             Runtime::Shell => &NO_PERMISSIONS,
         }
     }

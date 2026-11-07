@@ -446,6 +446,7 @@ mod tests {
             Runtime::Cursor,
             Runtime::Grok,
             Runtime::OpenCode,
+            Runtime::Muse,
         ];
         assert_eq!(
             definitions
@@ -454,7 +455,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
-        assert_eq!(&Runtime::ALL[..9], &expected);
+        assert_eq!(&Runtime::ALL[..10], &expected);
         assert_eq!(
             catalog
                 .iter()
@@ -579,6 +580,7 @@ mod tests {
             Runtime::Cursor,
             Runtime::Grok,
             Runtime::OpenCode,
+            Runtime::Muse,
         ];
         assert_eq!(
             filter_selectable_runtime_catalog(catalog.clone(), None)

@@ -6,6 +6,7 @@ pub(crate) mod copilot;
 pub(crate) mod cursor_agent;
 pub(crate) mod grok;
 mod helpers;
+pub(crate) mod muse;
 pub(crate) mod opencode;
 pub(crate) mod pi;
 mod status;
@@ -566,6 +567,7 @@ pub fn adapter(runtime: Runtime) -> &'static dyn RuntimeAdapter {
         Runtime::Pi => &pi::Pi,
         Runtime::Copilot => &copilot::Copilot,
         Runtime::Trae => &trae::Trae,
+        Runtime::Muse => &muse::Muse,
         Runtime::Cursor => &cursor_agent::CursorAgent,
         Runtime::Grok => &grok::Grok,
         Runtime::OpenCode => &opencode::OpenCode,

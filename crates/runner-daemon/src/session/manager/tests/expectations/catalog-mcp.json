@@ -342,6 +342,10 @@
       "client": "OpenCode"
     },
     {
+      "runtime": "muse",
+      "client": null
+    },
+    {
       "runtime": "shell",
       "client": null
     }

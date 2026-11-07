@@ -203,6 +203,17 @@
       "commands": []
     },
     {
+      "runtime": "muse",
+      "override_home": false,
+      "supported": false,
+      "source": {
+        "command": "/golden/agent",
+        "executable": null,
+        "config_home": null
+      },
+      "commands": []
+    },
+    {
       "runtime": "shell",
       "override_home": false,
       "supported": false,
@@ -403,6 +414,17 @@
         "command": "/golden/agent",
         "executable": null,
         "config_home": "<HOME>/.config/opencode"
+      },
+      "commands": []
+    },
+    {
+      "runtime": "muse",
+      "override_home": true,
+      "supported": false,
+      "source": {
+        "command": "/golden/agent",
+        "executable": null,
+        "config_home": null
       },
       "commands": []
     },

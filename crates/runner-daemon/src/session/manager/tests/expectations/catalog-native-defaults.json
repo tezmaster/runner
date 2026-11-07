@@ -54,6 +54,12 @@
     "effort": null
   },
   {
+    "runtime": "muse",
+    "seeded": false,
+    "model": null,
+    "effort": null
+  },
+  {
     "runtime": "shell",
     "seeded": false,
     "model": null,
@@ -109,6 +115,12 @@
   },
   {
     "runtime": "opencode",
+    "seeded": true,
+    "model": null,
+    "effort": null
+  },
+  {
+    "runtime": "muse",
     "seeded": true,
     "model": null,
     "effort": null

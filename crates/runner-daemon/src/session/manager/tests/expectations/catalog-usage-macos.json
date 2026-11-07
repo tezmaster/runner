@@ -96,6 +96,11 @@
     "commands": []
   },
   {
+    "runtime": "muse",
+    "supported": false,
+    "commands": []
+  },
+  {
     "runtime": "shell",
     "supported": false,
     "commands": []
