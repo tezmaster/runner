@@ -54,6 +54,12 @@
     "dist_tag": "latest"
   },
   {
+    "runtime": "muse",
+    "channel": null,
+    "package": null,
+    "dist_tag": "latest"
+  },
+  {
     "runtime": "shell",
     "channel": null,
     "package": null,
@@ -109,6 +115,12 @@
   },
   {
     "runtime": "opencode",
+    "channel": "latest",
+    "package": null,
+    "dist_tag": "latest"
+  },
+  {
+    "runtime": "muse",
     "channel": "latest",
     "package": null,
     "dist_tag": "latest"
@@ -174,6 +186,12 @@
     "dist_tag": "latest"
   },
   {
+    "runtime": "muse",
+    "channel": "stable",
+    "package": null,
+    "dist_tag": "latest"
+  },
+  {
     "runtime": "shell",
     "channel": "stable",
     "package": null,
@@ -229,6 +247,12 @@
   },
   {
     "runtime": "opencode",
+    "channel": "unknown",
+    "package": null,
+    "dist_tag": "latest"
+  },
+  {
+    "runtime": "muse",
     "channel": "unknown",
     "package": null,
     "dist_tag": "latest"

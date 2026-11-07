@@ -42,6 +42,7 @@ Use each provider's setup instructions, then run its CLI in a normal terminal to
 | Grok Build | `grok` | [Grok Build setup](https://docs.x.ai/build/overview); existing grok.com sign-in; updates itself |
 | OpenCode v2 | `opencode` | [OpenCode](https://opencode.ai); configure an available provider and model |
 | TRAE CLI | `trae` | Opt-in runtime; enable it in Settings → Agents after installing and configuring its CLI |
+| Muse Code | `muse` | Meta Muse; sign in through the `muse` CLI before starting it in Runner |
 
 All listed runtimes except TRAE are enabled by default when detected. The runtime name is Runner's identifier; it need not be the executable name. For example, Runner's Claude Code runtime is `claude-code`, while its executable is `claude`.
 
@@ -73,6 +74,8 @@ All listed runtimes except TRAE are enabled by default when detected. The runtim
 **OpenCode v2** supports chats, roles, crews, exact session identities, dynamic models and model variants, hook status, skills catalogs, MCP settings and the Runner skill. It has no chat fork, usage indicator, global skill toggle or update control. Backend/native-data checks cover replies, coordination and stop/resume; complete GUI and Windows checks remain unverified. Mission access uses its automatic permission mode.
 
 **TRAE CLI** remains opt-in. It has a skills catalog, MCP configuration and mission permission support. Do not assume feature or platform parity with the primary runtimes.
+
+**Muse Code** supports chats, roles, crews, mission permission bypass and saved-conversation resume via `muse resume`. Model selection stays on the CLI default; reasoning effort maps to `--reasoning-effort`. It has a skills catalog but no global skill toggle, MCP settings, usage indicator, fork or update control. Status uses terminal activity (no hooks or OSC 7501). macOS is the verified platform; Windows is unverified.
 
 ## Platform and resume notes
 

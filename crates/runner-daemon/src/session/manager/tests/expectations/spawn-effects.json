@@ -2746,6 +2746,284 @@
     }
   },
   {
+    "runtime": "muse",
+    "shape": "fresh",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "blank",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": null
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "resume",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID2>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": null
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "missing",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID2>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": null
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "direct-permission",
+    "mode": "default",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "direct-permission",
+    "mode": "accept_edits",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "direct-permission",
+    "mode": "auto",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "direct-permission",
+    "mode": "bypass",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_SESSION_CLI": "<TMP>/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "mission-member",
+    "mode": "bypass",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "MISSION_CWD": "<TMP>",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_CREW_ID": "c",
+        "RUNNER_EVENT_LOG": "<TMP>/events.ndjson",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_MISSION_ID": "<ID2>",
+        "RUNNER_SESSION_CLI": "<TMP>/missions/<ID2>/shims/tester/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
+    "runtime": "muse",
+    "shape": "mission-legacy-flag",
+    "mode": "bypass",
+    "spawn": {
+      "env": {
+        "CODEX_HOME": "<TMP>/.codex",
+        "COLORTERM": "truecolor",
+        "COPILOT_HOME": "<TMP>/.copilot",
+        "MISSION_CWD": "<TMP>",
+        "PI_CODING_AGENT_DIR": "<TMP>/.pi/agent",
+        "RUNNER_CREW_ID": "c",
+        "RUNNER_EVENT_LOG": "<TMP>/events.ndjson",
+        "RUNNER_HANDLE": "tester",
+        "RUNNER_MISSION_ID": "<ID2>",
+        "RUNNER_SESSION_CLI": "<TMP>/missions/<ID2>/shims/tester/bin/runner",
+        "RUNNER_SESSION_ID": "<ID1>",
+        "TERM": "xterm-256color"
+      },
+      "codex_pending_turn": null,
+      "watcher": null,
+      "interrupt": null,
+      "key_capture": {
+        "mechanism": "rollout-scan",
+        "sessions_root": "<HOME>/.local/share/muse/sessions"
+      },
+      "rollout": {
+        "sessions_root": "<HOME>/.local/share/muse/sessions",
+        "prompt_marker": "runner-muse-capture-<ID1>"
+      }
+    }
+  },
+  {
     "runtime": "shell",
     "shape": "fresh",
     "spawn": {
