@@ -1184,6 +1184,7 @@ mod tests {
             ("claude-code", "claude.svg"),
             ("codex", "openai.svg"),
             ("trae", "trae.svg"),
+            ("muse", "muse.svg"),
             ("copilot", "copilot.svg"),
             ("pi", "pi.svg"),
             ("antigravity", "antigravity-icon.png"),

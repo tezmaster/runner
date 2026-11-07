@@ -644,5 +644,71 @@
         "description": "Use the agent's own default effort; no flag passed."
       }
     ]
+  },
+  {
+    "name": "muse",
+    "display_name": "Muse Code",
+    "command": "muse",
+    "native_fork": false,
+    "description": "Meta Muse Code",
+    "install_url": "",
+    "default_enabled": true,
+    "available": false,
+    "default_model": null,
+    "default_effort": null,
+    "models": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "Use the agent's own default model."
+      }
+    ],
+    "efforts": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "Use the agent's own default effort; no flag passed."
+      },
+      {
+        "value": "none",
+        "label": "None",
+        "description": "No reasoning effort; fastest responses."
+      },
+      {
+        "value": "minimal",
+        "label": "Minimal",
+        "description": "Minimal reasoning for trivial tasks."
+      },
+      {
+        "value": "low",
+        "label": "Low",
+        "description": "Fast responses with lighter reasoning."
+      },
+      {
+        "value": "medium",
+        "label": "Medium",
+        "description": "Balances speed and reasoning depth."
+      },
+      {
+        "value": "high",
+        "label": "High",
+        "description": "Greater reasoning depth for complex problems."
+      },
+      {
+        "value": "xhigh",
+        "label": "Extra high",
+        "description": "Extra reasoning depth for complex problems."
+      },
+      {
+        "value": "max",
+        "label": "Max",
+        "description": "Maximum reasoning depth for the hardest problems."
+      },
+      {
+        "value": "ultra",
+        "label": "Ultra",
+        "description": "Maximum reasoning with automatic task delegation."
+      }
+    ]
   }
 ]

@@ -92,6 +92,10 @@ pub(crate) fn runtime_ui(runtime: Runtime) -> RuntimeUi {
             ui.tint = gpui::rgb(0x32f08c).into();
             ui.skills_caption = crate::i18n::text(TRAE_CAPTION);
         }
+        Runtime::Muse => {
+            ui.icon = "muse.svg";
+            ui.tint = gpui::rgb(0x0866ff).into();
+        }
         Runtime::Cursor => {
             ui.icon = "cursor.svg";
             ui.skills_caption = crate::i18n::text(CURSOR_CAPTION);

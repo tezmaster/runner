@@ -3559,6 +3559,7 @@ mod tests {
             "claude.svg"
         );
         assert_eq!(pane_identity_icon(Some("trae")).asset_path(), "trae.svg");
+        assert_eq!(pane_identity_icon(Some("muse")).asset_path(), "muse.svg");
         assert_eq!(
             pane_identity_icon(Some("copilot")).asset_path(),
             "copilot.svg"

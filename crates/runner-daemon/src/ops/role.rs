@@ -851,7 +851,7 @@ mod tests {
     }
 
     const SHELL_RUNTIME_ERROR: &str =
-        "unknown runtime 'shell' — valid runtimes: codex, claude-code, antigravity, pi, copilot, trae, cursor, grok, opencode";
+        "unknown runtime 'shell' — valid runtimes: codex, claude-code, antigravity, pi, copilot, trae, cursor, grok, opencode, muse";
 
     #[test]
     fn create_rejects_shell_runtime_with_the_slot_override_error() {

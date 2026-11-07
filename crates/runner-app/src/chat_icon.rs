@@ -114,6 +114,7 @@ mod tests {
                 ("claude-code", "claude.svg", gpui::rgb(0xd97757).into()),
                 ("codex", "openai.svg", theme::text()),
                 ("trae", "trae.svg", gpui::rgb(0x32f08c).into()),
+                ("muse", "muse.svg", gpui::rgb(0x0866ff).into()),
                 ("copilot", "copilot.svg", gpui::rgb(0x8534f3).into()),
                 ("pi", "pi.svg", theme::text()),
                 ("cursor", "cursor.svg", theme::text()),

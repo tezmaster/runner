@@ -459,6 +459,7 @@ mod tests {
                 (Runtime::Cursor, "Cursor", "cursor-agent"),
                 (Runtime::Grok, "Grok", "grok"),
                 (Runtime::OpenCode, "OpenCode", "opencode"),
+                (Runtime::Muse, "Muse Code", "muse"),
             ],
         );
     }
