@@ -7,6 +7,7 @@ Since 2026-09-01 a spec's number **is** its tracking issue number: file the issu
 ## Active
 
 - [559 — Command palette](./559-command-palette.md) — command mode over the existing keymap and quick-switcher overlay ([#559](https://github.com/yicheng47/runner/issues/559)).
+- [1229 — Remote link status](./1229-remote-link-status.md) — connection state and end-to-end latency in the footer of a window showing another computer ([#1229](https://github.com/yicheng47/runner/issues/1229)).
 
 0.19.0 shipped pane islands ([#1086](https://github.com/yicheng47/runner/issues/1086)), whose spec is retained in the [archive](archive/1086-pane-islands.md), and the launcher ([#1092](https://github.com/yicheng47/runner/issues/1092)), idle-only inbox delivery ([#1046](https://github.com/yicheng47/runner/issues/1046)) and host PIN setup ([#1044](https://github.com/yicheng47/runner/issues/1044)), whose specs are deleted; the [guide](../guide/README.md), the [delivery walkthrough](../tech/mission-message-delivery.md) and their validation records hold the current behavior.
 
