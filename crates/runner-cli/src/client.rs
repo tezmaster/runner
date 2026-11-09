@@ -36,6 +36,9 @@ pub struct ToolResponse {
     pub raw_json: String,
 }
 pub fn endpoint() -> Option<IpcEndpoint> {
+    if let Some(override_endpoint) = runner_core::app_paths::daemon_endpoint_override() {
+        return Some(override_endpoint);
+    }
     let debug = cfg!(debug_assertions);
     let data = runner_core::app_paths::app_data_dir(debug)?;
     Some(runner_core::app_paths::daemon_endpoint(&data, debug))
@@ -101,7 +104,13 @@ impl SocketClient {
             )
         })?;
         match Self::connect_endpoint(endpoint.clone()).await {
-            Err(ClientError::NotRunning) if std::env::var_os("SSH_CONNECTION").is_none() => {
+            // An explicitly-requested socket must never trigger a
+            // HOME-derived daemon spawn: the spawned daemon could not serve
+            // the requested endpoint and would squat the wrong socket.
+            Err(ClientError::NotRunning)
+                if std::env::var_os("SSH_CONNECTION").is_none()
+                    && runner_core::app_paths::daemon_endpoint_override().is_none() =>
+            {
                 let paths = runner_core::daemon_process::NativePaths::resolve()
                     .map_err(|error| ClientError::Protocol(error.to_string()))?;
                 let source = std::env::current_exe()
@@ -408,6 +417,27 @@ mod tests {
             connect_failure(std::io::ErrorKind::NotFound, false),
             ClientError::NotRunning
         );
+    }
+
+    #[test]
+    fn endpoint_honors_socket_override() {
+        // Only this test touches RUNNER_SOCKET, so set/restore here is safe.
+        let key = runner_core::app_paths::DAEMON_SOCKET_ENV_VAR;
+        let prior = std::env::var_os(key);
+        std::env::set_var(key, "/tmp/override-test/runnerd.sock");
+        assert_eq!(
+            endpoint(),
+            Some(IpcEndpoint(std::path::PathBuf::from(
+                "/tmp/override-test/runnerd.sock"
+            )))
+        );
+        std::env::set_var(key, "");
+        let empty_falls_through = endpoint();
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(endpoint(), empty_falls_through);
     }
 }
 
