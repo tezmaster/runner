@@ -1081,11 +1081,15 @@ async fn large_feed_pages_and_incremental_pushes_keep_the_shared_terminal_route_
     assert!(adapter.next(true).await.unwrap().is_none());
     adapter.in_flight(0);
     let mut probed = vec![];
-    while let Some(bytes) = adapter.next(true).await.unwrap() {
-        assert!(bytes.len() <= crate::companion::feed::MAX_BATCH_BYTES);
-        let c::HostMessage::FeedAppended(feed) = serde_json::from_slice(&bytes).unwrap() else {
-            panic!("feed batch expected")
+    while probed.len() < ids.len() {
+        let Some(bytes) = adapter.next(true).await.unwrap() else {
+            adapter.changed().await.unwrap();
+            continue;
         };
+        let c::HostMessage::FeedAppended(feed) = serde_json::from_slice(&bytes).unwrap() else {
+            continue;
+        };
+        assert!(bytes.len() <= crate::companion::feed::MAX_BATCH_BYTES);
         probed.extend(feed.entries.into_iter().map(|entry| entry.id));
     }
     assert_eq!(probed, ids);

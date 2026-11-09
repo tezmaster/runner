@@ -138,6 +138,81 @@ impl RemoteClient {
         )
         .into_any_element()
     }
+    pub(crate) fn render_link_status(&self, cx: &mut Context<NativeRoot>) -> Option<AnyElement> {
+        let remote = self.workspace.as_ref()?;
+        let zoom = self.settings(cx).app_zoom;
+        let status = {
+            let clients = state(&self.app_store, cx);
+            let clients = clients.read(cx);
+            link_status(
+                remote.connection,
+                clients.latency(&remote.computer.id),
+                clients.lacks_ping(&remote.computer.id),
+            )
+        };
+        let mark_box = || {
+            div()
+                .flex_none()
+                .w(px(18. * zoom))
+                .h(px(12. * zoom))
+                .flex()
+                .items_center()
+        };
+        let mark = match status.mark {
+            LinkMark::Bars(lit) => Some(
+                mark_box()
+                    .debug_selector(|| "SIDEBAR_LINK_BARS".into())
+                    .items_end()
+                    .gap(px(2. * zoom))
+                    .children([4., 6., 9., 12.].into_iter().enumerate().map(|(i, h)| {
+                        div().w(px(3. * zoom)).h(px(h * zoom)).rounded(px(zoom)).bg(
+                            if i < lit as usize {
+                                status.mark_color
+                            } else {
+                                theme::border_strong()
+                            },
+                        )
+                    }))
+                    .into_any_element(),
+            ),
+            LinkMark::Icon(path) => Some(
+                mark_box()
+                    .child(
+                        svg()
+                            .path(path)
+                            .size(px(12. * zoom))
+                            .text_color(status.mark_color),
+                    )
+                    .into_any_element(),
+            ),
+            LinkMark::None => None,
+        };
+        Some(
+            div()
+                .when(cfg!(test), |row| {
+                    row.debug_selector(|| "SIDEBAR_LINK_STATUS".into())
+                })
+                .min_w_0()
+                .h(px(32. * zoom))
+                .flex()
+                .items_center()
+                .gap(px(6. * zoom))
+                .px(px(10. * zoom))
+                .children(mark)
+                .child(
+                    div()
+                        .when(cfg!(test), |text| {
+                            text.debug_selector(|| "SIDEBAR_LINK_TEXT".into())
+                        })
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11. * zoom))
+                        .text_color(status.text_color)
+                        .child(status.text),
+                )
+                .into_any_element(),
+        )
+    }
     fn toggle_computer_picker(&mut self, window: &mut Window, cx: &mut Context<NativeRoot>) {
         self.ui.picker_open = !self.ui.picker_open;
         self.ui.picker_signed_in = self.app_store.read(cx).remote_signed_in();
@@ -206,7 +281,11 @@ impl RemoteClient {
                     .is_some_and(|remote| remote.computer.id == computer.id)
             };
             let (detail, detail_color) = match self.workspace.as_ref() {
-                Some(remote) if current => connection_subtitle(remote.connection, &computer.name),
+                Some(remote) if current => connection_subtitle(
+                    remote.connection,
+                    clients.read(cx).latency(&computer.id),
+                    &computer.name,
+                ),
                 _ => (computer_detail(computer), theme::faint()),
             };
             let attention = !current && clients.read(cx).needs_attention(&computer.id);
@@ -495,23 +574,96 @@ impl RemoteClient {
 pub(super) fn host_tone(connection: Connection) -> Hsla {
     match connection {
         Connection::Connected | Connection::Opening => theme::accent(),
-        Connection::Reconnecting | Connection::Unreachable => theme::warning(),
-        Connection::Revoked => theme::danger(),
+        Connection::Reconnecting => theme::warning(),
+        Connection::Unreachable | Connection::Revoked => theme::danger(),
         Connection::Forgotten => theme::muted(),
     }
 }
 
-pub(super) fn connection_subtitle(connection: Connection, computer: &str) -> (String, Hsla) {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum LinkMark {
+    Bars(u8),
+    Icon(&'static str),
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct LinkStatus {
+    pub(super) mark: LinkMark,
+    pub(super) text: String,
+    pub(super) mark_color: Hsla,
+    pub(super) text_color: Hsla,
+}
+
+pub(super) fn link_status(
+    connection: Connection,
+    latency: Option<u64>,
+    lacks_ping: bool,
+) -> LinkStatus {
+    let label = |mark, key, color| LinkStatus {
+        mark,
+        text: crate::i18n::text(key).into(),
+        mark_color: color,
+        text_color: color,
+    };
+    match (connection, latency) {
+        (Connection::Connected, Some(ms)) => {
+            let (lit, mark_color, text_color) = match ms {
+                0..=99 => (4, theme::accent(), theme::muted()),
+                100..=199 => (3, theme::accent(), theme::muted()),
+                200..=499 => (2, theme::warning(), theme::warning()),
+                _ => (1, theme::warning(), theme::warning()),
+            };
+            LinkStatus {
+                mark: LinkMark::Bars(lit),
+                text: crate::i18n::tf("client.link_latency", &[("ms", ms.to_string())]),
+                mark_color,
+                text_color,
+            }
+        }
+        (Connection::Connected, None) if lacks_ping => {
+            label(LinkMark::None, "client.link_connected", theme::muted())
+        }
+        (Connection::Connected | Connection::Opening, _) => label(
+            LinkMark::Icon("loader-circle.svg"),
+            "client.link_connecting",
+            theme::muted(),
+        ),
+        (Connection::Reconnecting, _) => label(
+            LinkMark::Icon("refresh-cw.svg"),
+            "client.link_reconnecting",
+            theme::warning(),
+        ),
+        (Connection::Unreachable, _) => label(
+            LinkMark::Icon("unplug.svg"),
+            "client.link_unreachable",
+            theme::danger(),
+        ),
+        (Connection::Revoked, _) => label(LinkMark::None, "client.link_revoked", theme::danger()),
+        (Connection::Forgotten, _) => {
+            label(LinkMark::None, "client.link_forgotten", theme::muted())
+        }
+    }
+}
+
+pub(super) fn connection_subtitle(
+    connection: Connection,
+    latency: Option<u64>,
+    computer: &str,
+) -> (String, Hsla) {
     let (key, color) = match connection {
         Connection::Connected => {
             return (
-                crate::i18n::text("client.connection_live").into(),
+                latency.map_or_else(
+                    || crate::i18n::text("client.connection_live").into(),
+                    |ms| crate::i18n::tf("client.connection_latency", &[("ms", ms.to_string())]),
+                ),
                 theme::faint(),
             )
         }
         Connection::Opening => ("client.connection_opening", theme::muted()),
         Connection::Reconnecting => ("client.connection_reconnecting", theme::warning()),
-        Connection::Unreachable => ("client.connection_unreachable", theme::warning()),
+        Connection::Unreachable => ("client.connection_unreachable", theme::danger()),
         Connection::Revoked => ("client.connection_revoked", theme::danger()),
         Connection::Forgotten => ("client.connection_forgotten", theme::muted()),
     };

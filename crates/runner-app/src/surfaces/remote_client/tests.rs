@@ -2106,10 +2106,14 @@ fn host_button_sits_in_the_footer_and_the_popup_puts_this_computer_first() {
     visual.run_until_parked();
     for remote in [false, true] {
         let footer = visual.debug_bounds("SIDEBAR_FOOTER_ROW").unwrap();
-        let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
+        let usage = visual.debug_bounds("SIDEBAR_USAGE");
+        let status = visual.debug_bounds("SIDEBAR_LINK_STATUS");
+        assert_eq!(usage.is_some(), !remote);
+        assert_eq!(status.is_some(), remote);
+        let left = usage.or(status).unwrap();
         let button = visual.debug_bounds("SIDEBAR_HOST_BUTTON").unwrap();
         let gear = visual.debug_bounds("SIDEBAR_SETTINGS").unwrap();
-        assert!(usage.right() <= button.left());
+        assert!(left.right() <= button.left());
         assert!(button.right() <= gear.left());
         assert_eq!(button.size, gear.size);
         assert_eq!(button.top(), gear.top());
@@ -2241,71 +2245,284 @@ fn popup_keeps_the_shown_computer_when_the_directory_drops_it() {
 }
 
 #[test]
-fn usage_settings_actions_in_a_remote_window_open_this_computers_agents_pane() {
-    use runner_core::protocol::claude_accounts::{ClaudeAccount, ClaudeAccounts};
+fn switching_to_another_computer_closes_the_usage_popover_for_good() {
     let _theme = crate::theme_snapshot::ThemeGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     let (store, _, _) = fixture(&mut cx, temp.path());
-    let window = add_window(&mut cx, &store, temp.path(), "remote-usage-settings");
+    let window = add_window(&mut cx, &store, temp.path(), "usage-closes-remote");
     window
         .update(&mut cx, |root, _, cx| {
-            root.usage_installed = vec![runner_core::protocol::model::Runtime::ClaudeCode];
+            root.usage_installed = vec![runner_core::protocol::model::Runtime::Codex];
             cx.notify();
         })
         .unwrap();
     let mut visual = VisualTestContext::from_window(window.into(), &cx);
     visual.simulate_resize(size(px(1200.), px(900.)));
     visual.run_until_parked();
-    for control in ["USAGE_AGENT_SETTINGS", "STYLED_SELECT_OPTION_0"] {
-        window
-            .update(&mut visual, |root, window, cx| {
-                choose_host(root, window, cx)
-            })
-            .unwrap();
-        visual.run_until_parked();
-        window
-            .read_with(&visual, |root, _| assert!(root.remote_client.is_active()))
-            .unwrap();
-        store.update(&mut visual, |store, _| {
-            store.claude_accounts = ClaudeAccounts {
-                accounts: ["native", "work"]
-                    .map(|id| ClaudeAccount {
-                        id: id.into(),
-                        name: id.into(),
-                        folder: format!("/tmp/{id}"),
-                        native: id == "native",
-                    })
-                    .into(),
-                main_id: "native".into(),
-                active_id: "native".into(),
-                ..Default::default()
-            };
-        });
-        let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
-        visual.simulate_click(usage.center(), Default::default());
-        visual.run_until_parked();
-        if control == "STYLED_SELECT_OPTION_0" {
-            let trigger = visual.debug_bounds("STYLED_SELECT_TRIGGER").unwrap();
-            visual.simulate_click(trigger.center(), Default::default());
-            visual.run_until_parked();
-        }
-        let target = visual.debug_bounds(control).unwrap();
-        visual.simulate_click(target.center(), Default::default());
-        visual.run_until_parked();
-        window
-            .read_with(&visual, |root, _| {
-                assert!(root.remote_client.is_local(), "{control}");
-                assert!(!root.usage_open, "{control}");
-                assert_eq!(root.route, AppRoute::Settings, "{control}");
-                assert_eq!(
-                    root.settings_page.pane,
-                    crate::surfaces::settings::page::SettingsPane::Agents,
-                    "{control}"
-                );
-            })
-            .unwrap();
+    let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
+    visual.simulate_click(usage.center(), Default::default());
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_some());
+    window
+        .update(&mut visual, |root, window, cx| {
+            choose_host(root, window, cx)
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_none());
+    assert!(window
+        .read_with(&visual, |root, _| !root.usage_open)
+        .unwrap());
+    window
+        .update(&mut visual, |root, window, cx| {
+            root.return_to_this_computer(window, cx)
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_USAGE").is_some());
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_none());
+}
+
+#[test]
+fn link_status_bars_and_colours_change_at_each_latency_boundary() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let (good, slow, text) = (theme::accent(), theme::warning(), theme::muted());
+    for (ms, bars, mark, label) in [
+        (1, 4, good, text),
+        (99, 4, good, text),
+        (100, 3, good, text),
+        (199, 3, good, text),
+        (200, 2, slow, slow),
+        (499, 2, slow, slow),
+        (500, 1, slow, slow),
+        (10_000, 1, slow, slow),
+    ] {
+        let status = picker::link_status(Connection::Connected, Some(ms), false);
+        assert_eq!(status.mark, picker::LinkMark::Bars(bars), "{ms}");
+        assert_eq!(status.mark_color, mark, "{ms}");
+        assert_eq!(status.text_color, label, "{ms}");
+        assert_eq!(status.text, format!("{ms} ms"));
+        assert_eq!(picker::host_tone(Connection::Connected), good, "{ms}");
     }
+}
+
+#[test]
+fn link_status_names_every_other_connection_state() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let (mid, warn, danger) = (theme::muted(), theme::warning(), theme::danger());
+    use picker::LinkMark::{Icon, None as NoMark};
+    let cases = [
+        (
+            Connection::Opening,
+            false,
+            Icon("loader-circle.svg"),
+            mid,
+            "Connecting",
+            "正在连接",
+        ),
+        (
+            Connection::Connected,
+            false,
+            Icon("loader-circle.svg"),
+            mid,
+            "Connecting",
+            "正在连接",
+        ),
+        (
+            Connection::Reconnecting,
+            false,
+            Icon("refresh-cw.svg"),
+            warn,
+            "Reconnecting",
+            "正在重新连接",
+        ),
+        (
+            Connection::Unreachable,
+            false,
+            Icon("unplug.svg"),
+            danger,
+            "Unreachable",
+            "无法连接",
+        ),
+        (
+            Connection::Revoked,
+            false,
+            NoMark,
+            danger,
+            "Not recognized",
+            "未被识别",
+        ),
+        (
+            Connection::Forgotten,
+            false,
+            NoMark,
+            mid,
+            "Forgotten",
+            "已忘记",
+        ),
+        (
+            Connection::Connected,
+            true,
+            NoMark,
+            mid,
+            "Connected",
+            "已连接",
+        ),
+    ];
+    for (locale, chinese) in [(Locale::English, false), (Locale::SimplifiedChinese, true)] {
+        with_locale(locale, || {
+            for (connection, lacks_ping, mark, color, english_text, chinese_text) in cases {
+                let status = picker::link_status(connection, None, lacks_ping);
+                assert_eq!(status.mark, mark);
+                assert_eq!((status.mark_color, status.text_color), (color, color));
+                assert_eq!(
+                    status.text,
+                    if chinese { chinese_text } else { english_text }
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn the_connected_row_shows_latency_once_a_sample_has_arrived() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for (locale, measured, unmeasured) in [
+        (
+            Locale::English,
+            "42 ms · relay · encrypted",
+            "Connected · relay · encrypted",
+        ),
+        (
+            Locale::SimplifiedChinese,
+            "42 ms · 中继 · 已加密",
+            "已连接 · 中继 · 已加密",
+        ),
+    ] {
+        with_locale(locale, || {
+            let row =
+                |latency| picker::connection_subtitle(Connection::Connected, latency, "Studio");
+            assert_eq!(row(Some(42)), (measured.to_owned(), theme::faint()));
+            assert_eq!(row(None), (unmeasured.to_owned(), theme::faint()));
+        });
+    }
+}
+
+#[test]
+fn latency_is_kept_per_computer_until_its_connection_leaves_connected() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (_store, fake, clients) = fixture(&mut cx, temp.path());
+    let latency = |cx: &TestAppContext, computer: &'static str| {
+        clients.read_with(cx, |clients, _| clients.latency(computer))
+    };
+    let connection = |state: &str| serde_json::json!({"computer":"host","state":state});
+    let sample = |ms: u64| serde_json::json!({"computer":"host","ms":ms});
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"other","ms":10}),
+    );
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "other"), None, "not connected yet");
+    fake.emit("remote/connection", connection("connected"));
+    fake.emit("remote/latency", sample(42));
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"other","state":"connected"}),
+    );
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"other","ms":7}),
+    );
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), Some(42));
+    assert_eq!(latency(&cx, "other"), Some(7));
+    fake.emit("remote/connection", connection("reconnecting"));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), None);
+    assert_eq!(latency(&cx, "other"), Some(7));
+    fake.emit("remote/latency", sample(11));
+    fake.emit("remote/connection", connection("connected"));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), None, "a reconnect starts again");
+    fake.emit("remote/latency", sample(50));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), Some(50));
+    fake.emit("daemon/disconnected", serde_json::json!({}));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), None);
+    assert_eq!(latency(&cx, "other"), None);
+}
+
+#[test]
+fn a_host_is_only_known_to_lack_ping_after_its_features_are_discovered() {
+    for (features, lacks) in [(vec!["overview", "ping"], false), (vec!["overview"], true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, clients) = fixture(&mut cx, temp.path());
+        fake.set_features(&features);
+        let window = add_window(&mut cx, &store, temp.path(), "ping-features");
+        assert!(!clients.read_with(&cx, |clients, _| clients.lacks_ping("host")));
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            clients.read_with(&cx, |clients, _| clients.lacks_ping("host")),
+            lacks,
+            "{features:?}"
+        );
+    }
+}
+
+#[test]
+fn the_link_mark_holds_its_space_so_the_text_stays_put_and_collapsing_hides_it() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview", "ping"]);
+    let window = add_window(&mut cx, &store, temp.path(), "link-mark-space");
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.usage_installed = vec![runner_core::protocol::model::Runtime::Codex];
+            choose_host(root, window, cx);
+        })
+        .unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.simulate_resize(size(px(1200.), px(900.)));
+    visual.run_until_parked();
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"host","ms":42}),
+    );
+    visual.run_until_parked();
+    let status = visual.debug_bounds("SIDEBAR_LINK_STATUS").unwrap();
+    let bars = visual.debug_bounds("SIDEBAR_LINK_BARS").unwrap();
+    let text = visual.debug_bounds("SIDEBAR_LINK_TEXT").unwrap();
+    assert_eq!(bars.size, size(px(18.), px(12.)));
+    assert_eq!(bars.left() - status.left(), px(10.));
+    assert_eq!(text.left() - bars.right(), px(6.));
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"host","state":"reconnecting"}),
+    );
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_LINK_BARS").is_none());
+    assert_eq!(
+        visual.debug_bounds("SIDEBAR_LINK_TEXT").unwrap().left(),
+        text.left()
+    );
+    window
+        .update(&mut visual, |root, _, cx| {
+            root.remote_client.set_sidebar_collapsed(true, cx);
+            root.sidebar_preview_open = true;
+            cx.notify();
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_LINK_STATUS").is_none());
+    assert!(visual.debug_bounds("SIDEBAR_USAGE").is_none());
+    assert!(visual.debug_bounds("SIDEBAR_HOST_BUTTON").is_some());
 }
 
 #[test]
@@ -2341,12 +2558,15 @@ fn every_connection_state_has_a_host_tone_and_a_row_label() {
         (Connection::Connected, theme::accent(), theme::faint()),
         (Connection::Opening, theme::accent(), theme::muted()),
         (Connection::Reconnecting, theme::warning(), theme::warning()),
-        (Connection::Unreachable, theme::warning(), theme::warning()),
+        (Connection::Unreachable, theme::danger(), theme::danger()),
         (Connection::Revoked, theme::danger(), theme::danger()),
         (Connection::Forgotten, theme::muted(), theme::muted()),
     ] {
         assert_eq!(picker::host_tone(connection), tone);
-        assert_eq!(picker::connection_subtitle(connection, "Studio").1, color);
+        assert_eq!(
+            picker::connection_subtitle(connection, None, "Studio").1,
+            color
+        );
     }
     for (locale, expected) in [
         (
@@ -2381,7 +2601,7 @@ fn every_connection_state_has_a_host_tone_and_a_row_label() {
                 Connection::Revoked,
                 Connection::Forgotten,
             ]
-            .map(|connection| picker::connection_subtitle(connection, "Studio").0);
+            .map(|connection| picker::connection_subtitle(connection, None, "Studio").0);
             assert_eq!(labels, expected);
         });
     }

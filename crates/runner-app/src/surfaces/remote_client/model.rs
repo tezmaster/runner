@@ -143,6 +143,7 @@ pub(crate) struct ClientState {
     connection_revisions: HashMap<String, u64>,
     loads: HashMap<String, LoadRevision>,
     pub(crate) connections: HashMap<String, Connection>,
+    latencies: HashMap<String, u64>,
     pub(crate) changed_identities: HashSet<String>,
     pub(crate) directory_error: bool,
     pub(crate) loading: bool,
@@ -181,6 +182,7 @@ impl ClientState {
                             "remote/overview"
                                 | "remote/session-status"
                                 | "remote/connection"
+                                | "remote/latency"
                                 | "remote/status"
                                 | "daemon/disconnected"
                         ) =>
@@ -227,6 +229,7 @@ impl ClientState {
             connection_revisions: HashMap::new(),
             loads: HashMap::new(),
             connections: HashMap::new(),
+            latencies: HashMap::new(),
             changed_identities: HashSet::new(),
             directory_error: false,
             loading: false,
@@ -306,6 +309,14 @@ impl ClientState {
     }
     pub(crate) fn connection(&self, computer: &str) -> Connection {
         self.connections.get(computer).copied().unwrap_or_default()
+    }
+    pub(crate) fn latency(&self, computer: &str) -> Option<u64> {
+        self.latencies.get(computer).copied()
+    }
+    pub(crate) fn lacks_ping(&self, computer: &str) -> bool {
+        self.capabilities
+            .get(computer)
+            .is_some_and(|access| access.lacks("ping"))
     }
     pub(super) fn apply(&mut self, update: Update) {
         match update {
@@ -399,6 +410,9 @@ impl ClientState {
                 }
             }
         }
+        let connections = &self.connections;
+        self.latencies
+            .retain(|computer, _| connections.get(computer) == Some(&Connection::Connected));
         self.sync_attention_follows();
     }
     fn load_data_is_current(&self, computer: &str, generation: u64) -> bool {
@@ -569,6 +583,11 @@ impl ClientState {
                     if let Some(row) = self.computers.iter_mut().find(|row| row.id == computer) {
                         row.paired = false;
                     }
+                }
+            }
+            "remote/latency" => {
+                if let Some(ms) = event.payload["ms"].as_u64() {
+                    self.latencies.insert(computer, ms);
                 }
             }
             _ => {}

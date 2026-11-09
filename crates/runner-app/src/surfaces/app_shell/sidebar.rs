@@ -265,7 +265,16 @@ impl NativeRoot {
         let brand = self.render_sidebar_brand(update, window, cx);
         let enabled = self.settings(cx).model_runtimes();
         let visible_usage_runtimes = visible_usage_runtimes(&self.usage_installed, &enabled);
-        let show_usage = !visible_usage_runtimes.is_empty() && !self.front_page_sidebar_collapsed();
+        let footer_status =
+            !visible_usage_runtimes.is_empty() && !self.front_page_sidebar_collapsed();
+        let remote = self.remote_client.is_active();
+        let show_usage = footer_status && !remote;
+        if remote {
+            self.usage_open = false;
+        }
+        let link_status = (footer_status && remote)
+            .then(|| self.remote_client.render_link_status(cx))
+            .flatten();
         let anchor_owner = cx.entity();
         let usage = show_usage.then(|| {
             let snapshot = self.app_store.read(cx).usage.clone();
@@ -330,6 +339,7 @@ impl NativeRoot {
                     .items_center()
                     .relative()
                     .children(usage)
+                    .children(link_status)
                     .child(div().flex_1())
                     .child(
                         div()

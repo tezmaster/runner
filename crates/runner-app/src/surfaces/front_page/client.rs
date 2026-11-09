@@ -61,6 +61,17 @@ impl RemoteAccess {
                 .is_some_and(|known| features.iter().all(|feature| known.contains(*feature)))
     }
 
+    /// Whether this host is known not to serve `feature`, unlike `supports`, which also says no
+    /// before the features are discovered.
+    pub(crate) fn lacks(&self, feature: &str) -> bool {
+        let state = self.state.read().unwrap();
+        state.valid
+            && state
+                .features
+                .as_ref()
+                .is_some_and(|known| !known.contains(feature))
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.state.read().unwrap().valid
     }
