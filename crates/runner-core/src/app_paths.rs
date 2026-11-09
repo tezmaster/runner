@@ -101,6 +101,22 @@ pub fn daemon_endpoint(app_data_dir: &Path, debug: bool) -> IpcEndpoint {
     }
 }
 
+/// Env var pointing a CLI at one specific daemon socket, bypassing the
+/// HOME-derived app-data lookup. The per-slot session shim exports it so
+/// worker shells (real HOME, custom daemon --app-data-dir) reach their
+/// own mission bus instead of the stock socket. Empty values are ignored.
+/// Daemon startup never reads this; the bind path comes from flags.
+pub const DAEMON_SOCKET_ENV_VAR: &str = "RUNNER_SOCKET";
+
+/// Explicit daemon endpoint from the environment, if set and non-empty.
+pub fn daemon_endpoint_override() -> Option<IpcEndpoint> {
+    let socket = std::env::var_os(DAEMON_SOCKET_ENV_VAR)?;
+    if socket.is_empty() {
+        return None;
+    }
+    Some(IpcEndpoint(socket.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
