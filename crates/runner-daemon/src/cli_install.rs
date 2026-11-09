@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use runner_core::command_install::{self, PathStyle};
 use runner_core::command_install::{RunnerCommandState, RunnerCommandStatus};
 
+use runner_core::app_paths;
 use runner_core::cli_install::{SessionShimConfig, AGENT_DEST_BIN_NAME, SESSION_SHIM_CONFIG_NAME};
 use runner_core::protocol::command::{CommandActionOutcome, CommandInstallInputs, CommandPlatform};
 use runner_core::protocol::SESSION_CLI_ENV;
@@ -83,6 +84,16 @@ pub fn install_session_runner_shim(
     if let Some(cwd) = mission_cwd {
         script.push_str(&format!("export MISSION_CWD='{}'\n", sh_escape(cwd)));
     }
+    // Point the CLI at this daemon's socket: worker shells run under the
+    // user's real HOME, so without this the CLI derives the stock socket
+    // and sees zero crew missions. Conventional endpoint location, same
+    // as the daemon's own default bind.
+    let socket = app_paths::daemon_endpoint(app_data_dir, cfg!(debug_assertions));
+    script.push_str(&format!(
+        "export {}='{}'\n",
+        app_paths::DAEMON_SOCKET_ENV_VAR,
+        sh_escape(&socket.0.to_string_lossy())
+    ));
     // The invocation has reached its slot's CLI; it must not hand off again (#1149).
     script.push_str(&format!("unset {SESSION_CLI_ENV}\n"));
     script.push_str(&format!(
@@ -109,6 +120,10 @@ pub fn install_session_runner_shim(
             (
                 "RUNNER_EVENT_LOG".to_owned(),
                 Some(event_log_str.into_owned()),
+            ),
+            (
+                app_paths::DAEMON_SOCKET_ENV_VAR.to_owned(),
+                Some(socket.0.to_string_lossy().into_owned()),
             ),
             (SESSION_CLI_ENV.to_owned(), None),
         ]);
@@ -1200,11 +1215,12 @@ mod tests {
         let runner_path = runner_path.to_string_lossy();
         #[cfg(windows)]
         let runner_path = runner_path.replace('\\', "/");
+        let socket = app_paths::daemon_endpoint(app_data.path(), cfg!(debug_assertions));
         assert_eq!(
             fs::read_to_string(shim_dir.join("runner")).unwrap(),
             format!(
-                "#!/bin/sh\n# Auto-generated session shim. See cli_install::install_session_runner_shim.\nexport RUNNER_CREW_ID='crew-1'\nexport RUNNER_MISSION_ID='mission-1'\nexport RUNNER_HANDLE='coder'\nexport RUNNER_EVENT_LOG='{}'\nexport MISSION_CWD='a'\\''b'\nunset RUNNER_SESSION_CLI\nexec '{}' \"$@\"\n",
-                event_log.display(), runner_path,
+                "#!/bin/sh\n# Auto-generated session shim. See cli_install::install_session_runner_shim.\nexport RUNNER_CREW_ID='crew-1'\nexport RUNNER_MISSION_ID='mission-1'\nexport RUNNER_HANDLE='coder'\nexport RUNNER_EVENT_LOG='{}'\nexport MISSION_CWD='a'\\''b'\nexport RUNNER_SOCKET='{}'\nunset RUNNER_SESSION_CLI\nexec '{}' \"$@\"\n",
+                event_log.display(), socket.0.display(), runner_path,
             ),
         );
         #[cfg(unix)]
@@ -1220,6 +1236,34 @@ mod tests {
             );
             assert!(!shim_dir.join("runner.cmd").exists());
         }
+    }
+
+    /// The shim must point the CLI at this daemon's socket file, not a
+    /// HOME-derived stock socket: worker shells run under the real HOME.
+    #[cfg(unix)]
+    #[test]
+    fn session_shim_exports_daemon_socket_path() {
+        let app_data = tempfile::tempdir().unwrap();
+        let event_log = app_data.path().join("events.ndjson");
+        let shim_dir = install_session_runner_shim(
+            app_data.path(),
+            Some("crew-1"),
+            "mission-1",
+            "coder",
+            &event_log,
+            None,
+        )
+        .unwrap();
+        let script = fs::read_to_string(shim_dir.join("runner")).unwrap();
+        let expected = format!(
+            "export {}='{}'",
+            app_paths::DAEMON_SOCKET_ENV_VAR,
+            app_data.path().join("runnerd.sock").display()
+        );
+        assert!(
+            script.contains(&expected),
+            "shim must export the daemon socket path: {script}"
+        );
     }
 
     #[cfg(windows)]
@@ -1238,6 +1282,7 @@ mod tests {
                 cwd,
             )
             .unwrap();
+            let socket = app_paths::daemon_endpoint(app_data.path(), cfg!(debug_assertions));
             let mut env = std::collections::BTreeMap::from([
                 ("RUNNER_CREW_ID".to_owned(), crew.map(str::to_owned)),
                 ("RUNNER_MISSION_ID".to_owned(), Some("mission-1".to_owned())),
@@ -1245,6 +1290,10 @@ mod tests {
                 (
                     "RUNNER_EVENT_LOG".to_owned(),
                     Some(event_log.display().to_string()),
+                ),
+                (
+                    app_paths::DAEMON_SOCKET_ENV_VAR.to_owned(),
+                    Some(socket.0.to_string_lossy().into_owned()),
                 ),
                 ("RUNNER_SESSION_CLI".to_owned(), None),
             ]);
