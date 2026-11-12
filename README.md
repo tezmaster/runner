@@ -19,6 +19,8 @@
   English · <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
+> **This is a fork of [yicheng47/runner](https://github.com/yicheng47/runner) that adds support for the Muse runtime.** It is rebased onto upstream and tracks it; everything else is upstream's work. Muse support lives in `crates/runner-daemon/src/runtimes/muse/`. The fork also carries a small `RUNNER_SOCKET` change. It is built from source and does not publish releases. For the official app, use [upstream](https://github.com/yicheng47/runner).
+
 <p align="center">
   <strong>Where terminal agents work together.</strong>
   <br />
