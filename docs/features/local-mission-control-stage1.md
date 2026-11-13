@@ -68,8 +68,11 @@ SQLite issue store, autopilot nor a second worktree system.
 3. Join adapter records with mission summaries, slots, feeds, pending questions
    and worktree facts in `runnerd`; make lane precedence explicit and tested.
 4. Add the native board route/surface and its navigation to Mission Workspace.
-   The approved design source is
-   `runner/desktop/specs/local-mission-control-stage1.pen` in `yeelinks_design`.
+   The private Pen repository is unavailable for this work; use AffectUI's
+   [agent components](https://www.affectui.com/category/agents) and
+   [design-system direction](https://www.affectui.com/design-system) only as
+   visual references. Preserve Runner's native GPUI patterns rather than
+   importing web components or reproducing their mutation controls.
 5. Update user guidance for the board's read-only evidence model and run the
    selected native checks.
 

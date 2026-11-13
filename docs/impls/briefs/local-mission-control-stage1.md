@@ -8,8 +8,9 @@ Implement the approved first slice from
 [`local-mission-control-stage1.md`](../../features/local-mission-control-stage1.md).
 The native board consumes one typed, read-only `runnerd` snapshot that joins
 project-local Markdown tickets and `.crew/triage/` with existing Runner mission
-state. Use the private design source
-`runner/desktop/specs/local-mission-control-stage1.pen` in `yeelinks_design`.
+state. The private Pen checkout is unavailable; use AffectUI's agent-component
+and design-system pages as visual direction only, while matching existing GPUI
+surfaces and retaining the board's strict read-only boundary.
 
 The coder owns the protocol, read-only adapter, daemon join, native route and
 focused automated tests. Do not add any workflow mutation, copied ticket text,
