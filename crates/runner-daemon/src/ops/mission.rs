@@ -1,7 +1,9 @@
+pub mod budget;
 pub mod feed;
 pub mod interrupt;
 pub mod link;
 pub mod report;
+pub mod review;
 pub mod roles;
 pub mod roster;
 
@@ -1256,6 +1258,7 @@ pub(crate) fn delete_archived(
 /// mission would surface as a direct chat.
 pub(crate) fn delete_rows(tx: &rusqlite::Transaction<'_>, ids: &[String]) -> Result<usize> {
     super::session::delete_rows(tx, &repo::session::ids_for_missions(tx, ids)?)?;
+    repo::mission_review::delete_for_missions(tx, ids)?;
     Ok(repo::mission::delete_many(tx, ids)?)
 }
 

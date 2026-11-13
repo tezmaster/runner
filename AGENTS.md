@@ -103,6 +103,8 @@ The checkout at the repository root stays on `main`. Every branch of work gets i
 
 Each worktree carries its own `target/` and pays for its own build. Do not point them at a shared `CARGO_TARGET_DIR`: Cargo takes an exclusive lock on the target directory, so concurrent worktrees would queue behind each other instead of building in parallel.
 
+Build hygiene: incremental caches under `target/*/incremental` regrow to tens of GB per day under crew builds. Prefer `cargo check -p <crate>` over full-workspace builds, watch the cost with `make cache-size`, and run `make prune` after build-heavy work (drops incremental caches only; the next build stays fast). Reach for `make clean` only when switching toolchains or reclaiming everything.
+
 Work stays inside its own worktree. When several are live at once, treat the others as another machine's checkout.
 
 ## Engineering Conventions

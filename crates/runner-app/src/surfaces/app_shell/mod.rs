@@ -1,9 +1,12 @@
 mod actions;
 mod notices;
+mod mission_usage;
 mod sidebar;
 mod usage;
 pub(crate) use sidebar::{sidebar_footer_contents, SidebarFooterControl};
+mod usage_timeline;
 
+pub(crate) use mission_usage::MissionUsageState;
 pub(crate) use usage::*;
 
 use gpui::{
@@ -57,6 +60,7 @@ pub(crate) enum AppRoute {
     NewCrew,
     CrewEditor(String),
     Mission(String),
+    Usage,
     ArchivedChat,
     Settings,
 }

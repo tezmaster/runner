@@ -127,6 +127,11 @@ impl UsageService {
             ..Self::default()
         }
     }
+    /// Whether this service runs the agent CLIs at all. Test cores do not, and
+    /// anything else that would run one on its own (budget readings) follows.
+    pub fn fetches(&self) -> bool {
+        self.fetch
+    }
     pub fn manage_client_lifetime(&self, isolated: bool) {
         self.transport_lifetime
             .store(true, std::sync::atomic::Ordering::Release);

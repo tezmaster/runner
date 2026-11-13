@@ -182,6 +182,7 @@ impl NativeRoot {
             AppRoute::Crews => self.open_crews(window, cx),
             AppRoute::NewCrew => self.open_create_crew(window, cx),
             AppRoute::CrewEditor(crew_id) => self.open_crew_editor(crew_id, window, cx),
+            AppRoute::Usage => self.open_usage(window, cx),
             AppRoute::Mission(mission_id) => self.open_mission(mission_id, window, cx),
             AppRoute::ArchivedChat => {
                 self.set_route(AppRoute::ArchivedChat, cx);

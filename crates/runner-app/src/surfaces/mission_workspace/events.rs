@@ -346,6 +346,7 @@ impl MissionWorkspace {
             return;
         };
         let generation = self.generation;
+        self.refresh_review(cx);
         self.refresh_generation += 1;
         let refresh_generation = self.refresh_generation;
         let core = self.core(cx).clone();

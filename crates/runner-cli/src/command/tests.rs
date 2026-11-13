@@ -1447,6 +1447,61 @@ async fn mission_lifecycle_uses_real_shapes_and_adds_the_crew_name() {
     }
 }
 
+
+#[tokio::test]
+async fn rating_and_usage_recording_are_for_the_person() {
+    let in_mission = BusContext::Mission(MissionEnv {
+        crew_id: Some("c".into()),
+        mission_id: "m".into(),
+        handle: "lead".into(),
+        event_log: "events.ndjson".into(),
+    });
+    let path = std::env::temp_dir().join(format!("usage-record-{}.json", std::process::id()));
+    std::fs::write(&path, r#"{"slots":[{"handle":"coder","input_tokens":5}]}"#).unwrap();
+    let path_arg = path.to_str().unwrap().to_owned();
+    for args in [
+        vec!["runner", "mission", "rate", "m", "up"],
+        vec!["runner", "mission", "usage-record", "m", "--file", path_arg.as_str()],
+    ] {
+        let cli = Cli::try_parse_from(&args).unwrap();
+        let client = RecordingClient::default();
+        let error = run_connected(&client, &cli, &in_mission, None)
+            .await
+            .expect_err("a crew member must not rate or record usage");
+        assert!(error.message.contains("for the person"), "{args:?}");
+        assert!(client.calls.into_inner().unwrap().is_empty());
+    }
+    let cli = Cli::try_parse_from([
+        "runner", "mission", "usage-record", "01M", "--file", path_arg.as_str(),
+    ])
+    .unwrap();
+    let client = RecordingClient::default();
+    run_connected(&client, &cli, &BusContext::OffBus, None).await.unwrap();
+    let calls = client.calls.into_inner().unwrap();
+    assert_eq!(calls.last().unwrap().0, "mission_usage_record");
+    assert_eq!(
+        calls.last().unwrap().1,
+        json!({"mission_id": "01M00000000000000000000000", "slots": [{"handle": "coder", "input_tokens": 5}]})
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn a_rating_needs_up_or_down_or_clear() {
+    for args in [
+        vec!["runner", "mission", "rate", "01M"],
+        vec!["runner", "mission", "rate", "01M", "sideways"],
+    ] {
+        let cli = Cli::try_parse_from(&args).unwrap();
+        let client = RecordingClient::default();
+        let error = run_connected(&client, &cli, &BusContext::OffBus, None)
+            .await
+            .expect_err("a rating needs a verdict");
+        assert!(error.message.contains("up or down"), "{args:?}: {}", error.message);
+    }
+    assert!(Cli::try_parse_from(["runner", "mission", "rate", "01M", "up", "--clear"]).is_err());
+}
+
 #[tokio::test]
 async fn every_remote_command_builds_the_expected_tool_calls_without_a_socket() {
     const MISSION_ID: &str = "01M00000000000000000000000";
@@ -1672,6 +1727,36 @@ async fn every_remote_command_builds_the_expected_tool_calls_without_a_socket() 
         (
             vec!["mission", "unlink", "01M"],
             vec!["mission_list", "mission_unlink"],
+            json!({"mission_id": MISSION_ID}),
+        ),
+        (
+            vec!["mission", "rate", "01M", "down", "--note", "two escapes"],
+            vec!["mission_list", "mission_rate"],
+            json!({"mission_id": MISSION_ID, "verdict": "down", "note": "two escapes"}),
+        ),
+        (
+            vec!["mission", "rate", "01M", "--clear"],
+            vec!["mission_list", "mission_rate"],
+            json!({"mission_id": MISSION_ID, "verdict": null, "note": ""}),
+        ),
+        (
+            vec!["mission", "review", "01M"],
+            vec!["mission_list", "mission_review_get"],
+            json!({"mission_id": MISSION_ID}),
+        ),
+        (
+            vec!["mission", "usage-backfill", "--days", "21"],
+            vec!["mission_usage_backfill"],
+            json!({"days": 21}),
+        ),
+        (
+            vec!["mission", "usage", "--days", "14"],
+            vec!["mission_usage_list"],
+            json!({"days": 14}),
+        ),
+        (
+            vec!["mission", "review", "01M", "--sample"],
+            vec!["mission_list", "mission_budget_sample", "mission_review_get"],
             json!({"mission_id": MISSION_ID}),
         ),
         (
@@ -1904,6 +1989,11 @@ async fn every_remote_command_builds_the_expected_tool_calls_without_a_socket() 
         "mission_set_project",
         "mission_link",
         "mission_unlink",
+        "mission_rate",
+        "mission_budget_sample",
+        "mission_review_get",
+        "mission_usage_list",
+        "mission_usage_backfill",
         "mission_post_impl",
         "mission_signal_impl",
         "session_list_with_activity",

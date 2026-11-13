@@ -19,6 +19,9 @@ pub enum View {
     Mission,
     MissionShow,
     MissionLink,
+    MissionReview,
+    MissionUsageList,
+    MissionBackfill,
     MissionFeed,
     SessionList,
     SessionShow,
@@ -93,6 +96,9 @@ fn render_default(view: View, value: &Value) -> Vec<String> {
         View::Mission => render_mission(value),
         View::MissionShow => render_mission_show(value),
         View::MissionLink => render_mission_link(value),
+        View::MissionReview => render_mission_review(value),
+        View::MissionUsageList => render_mission_usage_list(value),
+        View::MissionBackfill => render_mission_backfill(value),
         View::MissionFeed => render_mission_feed(value),
         View::SessionList => render_session_list(value),
         View::SessionShow => render_session_show(value),
@@ -358,6 +364,189 @@ fn linked_chat(mission: &Value) -> Value {
         text(chat.get("title")),
         text(chat.get("session_id")),
     ))
+}
+
+fn render_mission_backfill(value: &Value) -> Vec<String> {
+    let count = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+    vec![
+        format!("MEASURED  {}", count("measured")),
+        format!("SKIPPED   {}", count("skipped")),
+        "Measured against the week that is still open, from one reading taken now. A mission from an earlier week cannot be split: the allowance total at its end was never recorded. Skipped missions had nothing in this week or already had a measure.".to_owned(),
+    ]
+}
+
+fn render_mission_usage_list(value: &Value) -> Vec<String> {
+    let mut rows: Vec<&Value> = array(value).iter().collect();
+    // The largest share of the allowance first; missions with no figure last, newest first.
+    let high = |row: &Value| row.get("attributed_high").and_then(Value::as_f64);
+    rows.sort_by(|a, b| match (high(b), high(a)) {
+        (Some(y), Some(x)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => cell(b.get("started_at")).cmp(&cell(a.get("started_at"))),
+    });
+    let points = |row: &Value| match (
+        row.get("attributed_low").and_then(Value::as_f64),
+        row.get("attributed_high").and_then(Value::as_f64),
+    ) {
+        (Some(low), Some(high)) if (high - low).abs() < 0.005 => format!("{high:.2}"),
+        (Some(low), Some(high)) => format!("{low:.2} to {high:.2}"),
+        _ => "not measured".to_owned(),
+    };
+    let rating = |row: &Value| match row.get("verdict").and_then(Value::as_str) {
+        Some("up") => "up",
+        Some("down") => "down",
+        _ => "-",
+    };
+    let table_rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                cell(row.get("title")),
+                cell(row.get("runtime")),
+                points(row),
+                rating(row).to_owned(),
+                cell(row.get("status")),
+                cell(row.get("mission_id")),
+            ]
+        })
+        .collect();
+    let mut lines = table(&["MISSION", "RUNTIME", "POINTS", "RATING", "STATUS", "ID"], table_rows);
+    if !lines.is_empty() {
+        lines.push(String::new());
+        lines.push("Points of the weekly allowance, split by tokens: a range, since whether cached input counts against it is not known.".to_owned());
+    }
+    lines
+}
+
+fn render_mission_review(value: &Value) -> Vec<String> {
+    let rating = match value.get("rating").filter(|rating| !rating.is_null()) {
+        Some(rating) => {
+            let note = rating.get("note").and_then(Value::as_str).unwrap_or("");
+            let verdict = rating.get("verdict").and_then(Value::as_str).unwrap_or("?");
+            if note.is_empty() {
+                verdict.to_owned()
+            } else {
+                format!("{verdict}: {note}")
+            }
+        }
+        None => "not rated".to_owned(),
+    };
+    let mut lines = vec![
+        format!("MISSION  {}", cell(value.get("mission_id"))),
+        format!("RATING   {rating}"),
+    ];
+    for budget in array(value.get("budget").unwrap_or(&Value::Null)) {
+        let text = |key: &str| budget.get(key).and_then(Value::as_str).unwrap_or("?");
+        let percent = |key: &str| {
+            budget
+                .get(key)
+                .and_then(Value::as_f64)
+                .map_or("?".to_owned(), |p| format!("{p:.0}%"))
+        };
+        let others = budget.get("other_sessions").and_then(Value::as_u64).unwrap_or(0);
+        let shared = if others == 0 {
+            "no other Runner session overlapped".to_owned()
+        } else {
+            format!("{others} other Runner session(s) overlapped")
+        };
+        let figure = match budget.get("state").and_then(Value::as_str) {
+            Some("measured") => {
+                let points = budget.get("used_points").and_then(Value::as_f64).unwrap_or(0.0);
+                if points < 1.0 {
+                    format!("under 1 point ({} to {})", percent("first_percent"), percent("latest_percent"))
+                } else {
+                    format!("about {points:.0} points ({} to {})", percent("first_percent"), percent("latest_percent"))
+                }
+            }
+            Some("spanned_reset") => "no figure: the allowance reset during the mission".to_owned(),
+            _ => "not measured yet (needs a second reading)".to_owned(),
+        };
+        let number = |key: &str| budget.get(key).and_then(Value::as_f64);
+        let points = |value: f64| {
+            if value >= 10.0 {
+                format!("{value:.0}")
+            } else {
+                format!("{value:.1}")
+            }
+        };
+        if let (Some(low), Some(high)) = (number("attributed_low"), number("attributed_high")) {
+            let range = if (high - low).abs() < 0.05 {
+                format!("about {}", points(high))
+            } else {
+                format!("about {} to {}", points(low), points(high))
+            };
+            let margin = number("rounding_margin")
+                .map(|m| format!(" (plus or minus {})", points(m.max(0.05))))
+                .unwrap_or_default();
+            let total = number("window_points").map_or("?".to_owned(), |p| format!("{p:.0}"));
+            let share = match (number("share_low"), number("share_high")) {
+                (Some(a), Some(b)) => format!(
+                    "; {:.1}% to {:.1}% of this machine's tokens in the window",
+                    a * 100.0,
+                    b * 100.0
+                ),
+                _ => String::new(),
+            };
+            lines.push(format!(
+                "BUDGET   {} {}: {range} points{margin} of the {total}% used; split by tokens{share}; before/after readings: {figure}; as of {}",
+                text("runtime"),
+                text("window"),
+                text("latest_read_at")
+            ));
+        } else {
+            lines.push(format!(
+                "BUDGET   {} {}: {figure}; {shared}; as of {}",
+                text("runtime"),
+                text("window"),
+                text("latest_read_at")
+            ));
+        }
+    }
+    if !array(value.get("budget").unwrap_or(&Value::Null)).is_empty() {
+        lines.push(
+            "         Points are split by tokens from the runtime's logs on this machine, so parallel work is counted. The total is a whole percent. Use from another machine is not visible.".to_owned(),
+        );
+    }
+    let slots = array(value.get("slots").unwrap_or(&Value::Null));
+    if slots.is_empty() {
+        lines.push("USAGE    not recorded".to_owned());
+        return lines;
+    }
+    let count = |slot: &Value, key: &str| match slot.get(key).and_then(Value::as_i64) {
+        Some(n) => n.to_string(),
+        None => "-".to_owned(),
+    };
+    let rows = slots
+        .iter()
+        .map(|slot| {
+            let reason = slot
+                .get("not_recorded_reason")
+                .and_then(Value::as_str)
+                .map(|reason| format!("not recorded: {reason}"))
+                .unwrap_or_default();
+            vec![
+                cell(slot.get("handle")),
+                cell(slot.get("runtime")),
+                count(slot, "input_tokens"),
+                count(slot, "output_tokens"),
+                count(slot, "cached_tokens"),
+                count(slot, "reasoning_tokens"),
+                count(slot, "steps"),
+                reason,
+            ]
+        })
+        .collect();
+    lines.push(String::new());
+    lines.extend(table(
+        &["SLOT", "RUNTIME", "INPUT", "OUTPUT", "CACHED", "REASONING", "STEPS", "NOTE"],
+        rows,
+    ));
+    lines.push(
+        "Counts are per runtime and are not comparable across runtimes. '-' means not recorded, not zero."
+            .to_owned(),
+    );
+    lines
 }
 
 fn render_mission_link(value: &Value) -> Vec<String> {

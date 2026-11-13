@@ -682,6 +682,23 @@ impl AppSettings {
             .collect()
     }
 
+    /// The enabled runtimes that report a usage allowance. Not `model_runtimes`:
+    /// that list is the runtimes that discover models, and a runtime can report
+    /// usage without discovering models.
+    pub fn usage_runtimes(&self) -> Vec<Runtime> {
+        Runtime::ALL
+            .into_iter()
+            .filter(|runtime| {
+                runner_core::protocol::RuntimeCatalogEntry::for_runtime(*runtime)
+                    .is_some_and(|entry| entry.capabilities.usage)
+                    && self.is_agent_enabled(
+                        *runtime,
+                        runner_core::protocol::runtime_metadata::runtime_default_enabled(*runtime),
+                    )
+            })
+            .collect()
+    }
+
     pub fn is_agent_enabled(&self, name: Runtime, default_enabled: bool) -> bool {
         if self.disabled_agents.contains(name.key()) {
             return false;
@@ -1625,6 +1642,21 @@ mod tests {
             assert!(!settings.is_agent_enabled(runtime, default_enabled(runtime)));
         }
         assert!(settings.is_agent_enabled(Runtime::Trae, default_enabled(Runtime::Trae)));
+    }
+
+    #[test]
+    fn usage_runtimes_are_the_enabled_runtimes_that_report_usage() {
+        let mut settings = AppSettings::default();
+        let mut defaults = settings.usage_runtimes();
+        defaults.sort_by_key(|runtime| runtime.key());
+        assert_eq!(defaults, [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse]);
+        assert!(
+            !settings.model_runtimes().contains(&Runtime::Muse),
+            "Muse reports usage without discovering models"
+        );
+        settings.disabled_agents.insert(Runtime::Muse.key().into());
+        assert!(!settings.usage_runtimes().contains(&Runtime::Muse));
+        assert!(settings.usage_runtimes().contains(&Runtime::Codex));
     }
 
     #[test]

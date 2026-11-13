@@ -69,6 +69,12 @@ impl MissionWorkspace {
                 crate::i18n::message("ui.copy_mission_id"),
             )
         });
+        let meta_scroll = gpui::ScrollHandle::new();
+        let meta_scrollbar = {
+            let handle = meta_scroll.clone();
+            let owner = cx.entity_id();
+            cx.new(|_| Scrollbar::app(handle, owner))
+        };
         let feed_scrollbar_metrics = Rc::new(Cell::new(ScrollbarMetrics::default()));
         let read_metrics = feed_scrollbar_metrics.clone();
         let scroll_root = workspace.downgrade();
@@ -219,6 +225,9 @@ impl MissionWorkspace {
             session_statuses: BTreeMap::new(),
             session_observations: BTreeMap::new(),
             goal: None,
+            review: Default::default(),
+            meta_scroll,
+            meta_scrollbar,
             feed_blocks: Vec::new(),
             feed_rows: Vec::new(),
             feed_block_starts: Vec::new(),
@@ -324,6 +333,7 @@ impl MissionWorkspace {
         self.event_ids.clear();
         self.session_statuses.clear();
         self.goal = None;
+        self.review = Default::default();
         self.feed_blocks.clear();
         self.feed_rows.clear();
         self.feed_block_starts.clear();

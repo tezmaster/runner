@@ -1,7 +1,8 @@
 {
   "visible": [
     "codex",
-    "claude-code"
+    "claude-code",
+    "muse"
   ],
   "runtimes": [
     {
@@ -360,6 +361,46 @@
         },
         {
           "checking_spinner": "usage-codex-checking"
+        }
+      ],
+      "weekly_percent": 27.0
+    },
+    {
+      "runtime": "muse",
+      "unavailable": [
+        "Checking…",
+        "Sign in to Muse to see usage.",
+        "Runner was not allowed to read Claude Code's sign-in from the Keychain.",
+        "Couldn't read Claude Code's sign-in from the Keychain.",
+        "Couldn't reach Anthropic.",
+        "Codex didn't answer.",
+        "Muse didn't answer."
+      ],
+      "sections": [
+        {
+          "runtime": "muse",
+          "title": "Muse Code",
+          "refresh_spinner": "usage-muse-refreshing"
+        },
+        {
+          "window": "Week",
+          "label": "Week"
+        },
+        {
+          "window": "5 hours",
+          "label": "5 hours"
+        },
+        {
+          "window": "Opus · week",
+          "label": "Opus · week"
+        },
+        {
+          "runtime": "muse",
+          "title": "Muse Code",
+          "refresh_spinner": "usage-muse-refreshing"
+        },
+        {
+          "checking_spinner": "usage-muse-checking"
         }
       ],
       "weekly_percent": 27.0

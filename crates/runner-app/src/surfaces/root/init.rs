@@ -208,6 +208,8 @@ impl NativeRoot {
             AppRoute::Roles
         } else if route_path == "crews" {
             AppRoute::Crews
+        } else if route_path == "usage" {
+            AppRoute::Usage
         } else if route_path == "settings" {
             AppRoute::Settings
         } else if window_label == "main" {
@@ -295,7 +297,8 @@ impl NativeRoot {
             | AppRoute::RoleDetail(_)
             | AppRoute::Crews
             | AppRoute::NewCrew
-            | AppRoute::CrewEditor(_) => vec![RuntimeLocation::Entity(initial_route.clone())],
+            | AppRoute::CrewEditor(_)
+            | AppRoute::Usage => vec![RuntimeLocation::Entity(initial_route.clone())],
             _ => Vec::new(),
         };
         let runtime_navigation_index = (!runtime_navigation_history.is_empty()).then_some(0);
@@ -387,6 +390,7 @@ impl NativeRoot {
             usage_open: false,
             usage_refresh_task: None,
             usage_checked: None,
+            mission_usage: crate::surfaces::app_shell::MissionUsageState::new(cx),
             claude_account_picker: None,
             usage_anchor: None,
             usage_installed: crate::surfaces::app_shell::usage_installed(&core),
@@ -467,6 +471,10 @@ impl NativeRoot {
             }
             AppRoute::Crews => {
                 root.load_crew_page(cx);
+                window.focus(&root.root_focus, cx);
+            }
+            AppRoute::Usage => {
+                root.refresh_mission_usage(cx);
                 window.focus(&root.root_focus, cx);
             }
             AppRoute::CrewEditor(crew_id) => {

@@ -330,6 +330,7 @@ pub(crate) struct NativeRoot {
     pub(crate) settings_return_route: AppRoute,
     pub(crate) usage_open: bool,
     pub(crate) usage_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) mission_usage: crate::surfaces::app_shell::MissionUsageState,
     pub(crate) claude_account_picker: Option<Entity<runner_app::ui::select::StyledSelect>>,
     pub(crate) usage_anchor: Option<Bounds<Pixels>>,
     pub(crate) usage_installed: Vec<runner_core::protocol::model::Runtime>,

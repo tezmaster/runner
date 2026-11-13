@@ -78,7 +78,8 @@ impl NativeRoot {
             | AppRoute::RoleDetail(_)
             | AppRoute::Crews
             | AppRoute::NewCrew
-            | AppRoute::CrewEditor(_) => Some(RuntimeLocation::Entity(self.route.clone())),
+            | AppRoute::CrewEditor(_)
+            | AppRoute::Usage => Some(RuntimeLocation::Entity(self.route.clone())),
             _ => None,
         };
         let Some(location) = location else {

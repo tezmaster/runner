@@ -8,6 +8,8 @@ use runner_core::app_paths::home_dir as capture_home;
 use runner_core::protocol::runtime_metadata::muse::{PERMISSIONS, SKILL_DIRS};
 
 pub mod capture;
+pub(crate) mod history;
+pub(crate) mod usage;
 
 pub struct Muse;
 impl RuntimeAdapter for Muse {
@@ -21,6 +23,13 @@ impl RuntimeAdapter for Muse {
     fn start_rollout_capture(&self, request: RolloutCaptureRequest) {
         capture::spawn_capture(request);
     }
+    fn usage(&self) -> Option<&'static UsageSource> {
+        Some(&USAGE)
+    }
+    fn token_history(&self) -> Option<&'static TokenHistory> {
+        Some(&HISTORY)
+    }
+
     fn skills(&self) -> SkillSupport {
         SkillSupport {
             roots: SKILL_DIRS,
@@ -78,3 +87,11 @@ impl RuntimeAdapter for Muse {
 
 #[cfg(test)]
 mod tests;
+
+static USAGE: UsageSource = UsageSource {
+    fetch: |command, env, _denied| usage::fetch_muse(command, env),
+};
+
+static HISTORY: TokenHistory = TokenHistory {
+    read: history::read_since,
+};

@@ -72,6 +72,10 @@ use crate::error::Result;
 // 0028: optional mission crew provenance and explicit dependent-row cleanup.
 // 0029: a mission's linked chat and whether it reports there (#748).
 // 0030: the Files view's saved root on sessions and missions (#634).
+// 0031: a person's rating of a mission and per-slot usage, for reviewing runs.
+// 0032: readings of a runtime's plan allowance while a mission runs.
+// 0033: a mission's and the machine's token totals at each reading, to split the allowance.
+// 0034: each model call of a mission, from the runtime's log.
 pub(super) const MIGRATIONS: &[(i64, &str, bool)] = &[
     (1, include_str!("../../migrations/0001_init.sql"), false),
     (
@@ -209,6 +213,26 @@ pub(super) const MIGRATIONS: &[(i64, &str, bool)] = &[
     (
         30,
         include_str!("../../migrations/0030_files_root.sql"),
+        false,
+    ),
+    (
+        31,
+        include_str!("../../migrations/0031_mission_review.sql"),
+        false,
+    ),
+    (
+        32,
+        include_str!("../../migrations/0032_mission_budget.sql"),
+        false,
+    ),
+    (
+        33,
+        include_str!("../../migrations/0033_mission_budget_basis.sql"),
+        false,
+    ),
+    (
+        34,
+        include_str!("../../migrations/0034_mission_usage_call.sql"),
         false,
     ),
 ];

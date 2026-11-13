@@ -3,7 +3,7 @@ use super::*;
 impl NativeRoot {
     pub(crate) fn handle_app_store_update(&mut self, cx: &mut Context<Self>) {
         let core = self.core(cx).clone();
-        let enabled = self.settings(cx).model_runtimes();
+        let enabled = self.settings(cx).usage_runtimes();
         let checked: Vec<_> = enabled
             .iter()
             .copied()

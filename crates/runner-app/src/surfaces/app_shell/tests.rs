@@ -1370,10 +1370,10 @@ fn usage_runtimes_are_installed_enabled_and_usage_capable_in_runtime_order() {
 
 #[test]
 fn usage_popover_keeps_provider_order_for_installed_and_enabled_subsets() {
-    let order = [Runtime::ClaudeCode, Runtime::Codex];
+    let order = [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse];
     assert_eq!(usage_popover_runtimes(&Runtime::ALL, &Runtime::ALL), order);
-    for installed_mask in 0..4 {
-        for enabled_mask in 0..4 {
+    for installed_mask in 0..8 {
+        for enabled_mask in 0..8 {
             let subset = |mask| {
                 order
                     .into_iter()

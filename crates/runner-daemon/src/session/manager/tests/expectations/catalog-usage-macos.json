@@ -97,7 +97,7 @@
   },
   {
     "runtime": "muse",
-    "supported": false,
+    "supported": true,
     "commands": []
   },
   {

@@ -246,12 +246,14 @@ enum WorkspaceEntry {
     NewTab,
     Role,
     Crew,
+    Usage,
 }
 
-const WORKSPACE_ENTRIES: [WorkspaceEntry; 3] = [
+const WORKSPACE_ENTRIES: [WorkspaceEntry; 4] = [
     WorkspaceEntry::NewTab,
     WorkspaceEntry::Role,
     WorkspaceEntry::Crew,
+    WorkspaceEntry::Usage,
 ];
 
 impl WorkspaceEntry {
@@ -266,6 +268,7 @@ impl WorkspaceEntry {
                 route,
                 AppRoute::Crews | AppRoute::NewCrew | AppRoute::CrewEditor(_)
             ),
+            Self::Usage => *route == AppRoute::Usage,
         }
     }
 }

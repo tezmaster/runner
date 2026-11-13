@@ -717,7 +717,10 @@ pub mod muse {
     }
     pub const SKILL_DIRS: &[&str] = &[".agents/skills"];
     pub fn capabilities() -> RuntimeCapabilities {
-        RuntimeCapabilities::default()
+        RuntimeCapabilities {
+            usage: true,
+            ..Default::default()
+        }
     }
 }
 pub mod cursor_agent {

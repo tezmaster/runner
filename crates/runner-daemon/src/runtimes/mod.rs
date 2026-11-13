@@ -250,6 +250,67 @@ pub struct ModelDiscoverySource {
     pub config_home: fn() -> Option<PathBuf>,
 }
 
+/// Token counts of one session, or the sum of several. `input` already
+/// includes `cached` where a runtime counts it that way (Muse does).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenSums {
+    pub input: i64,
+    pub output: i64,
+    pub cached: i64,
+    pub reasoning: i64,
+}
+
+impl TokenSums {
+    pub fn add(&mut self, other: &TokenSums) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cached += other.cached;
+        self.reasoning += other.reasoning;
+    }
+
+    /// Input and output, cached input counted in full.
+    pub fn total_basis(&self) -> i64 {
+        self.input + self.output
+    }
+
+    /// Input that was not cached, plus output: the reading of the allowance
+    /// that treats a cache hit as free.
+    pub fn uncached_basis(&self) -> i64 {
+        (self.input - self.cached).max(0) + self.output
+    }
+}
+
+/// One model call of a session, from the runtime's own log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallRecord {
+    /// The runtime's own id for the usage record, unique per call.
+    pub usage_id: String,
+    pub session_key: String,
+    /// When the call was recorded, in microseconds since the Unix epoch.
+    pub at_us: i64,
+    pub tokens: TokenSums,
+}
+
+/// What a scan of a runtime's logs found since a time.
+#[derive(Debug, Clone, Default)]
+pub struct TokenScan {
+    /// Every session on this machine, by session key.
+    pub by_session: std::collections::BTreeMap<String, TokenSums>,
+    /// Each model call of the sessions asked for, oldest first.
+    pub calls: Vec<CallRecord>,
+}
+
+/// Reads what every session of a runtime on this machine has used since a
+/// time from the runtime's own logs, and each call of the sessions in `keys`.
+/// Whether a cached token counts against an allowance is not known, so
+/// callers keep the parts.
+pub struct TokenHistory {
+    pub read: fn(
+        since: chrono::DateTime<chrono::Utc>,
+        keys: &std::collections::HashSet<String>,
+    ) -> Result<TokenScan, String>,
+}
+
 pub struct UsageSource {
     pub fetch: fn(
         &str,
@@ -348,6 +409,9 @@ pub trait RuntimeAdapter: Send + Sync {
     }
     fn npm_dist_tag(&self) -> &'static str {
         "latest"
+    }
+    fn token_history(&self) -> Option<&'static TokenHistory> {
+        None
     }
     fn usage(&self) -> Option<&'static UsageSource> {
         None

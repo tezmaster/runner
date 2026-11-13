@@ -11,9 +11,12 @@ mod rail;
 mod remote;
 #[cfg(test)]
 mod remote_tests;
+mod review;
 mod routing;
 mod state;
 mod terminal_pane;
+mod usage_chart;
+pub(crate) use usage_chart::points_text;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -362,6 +365,9 @@ pub(crate) struct MissionWorkspace {
     session_statuses: BTreeMap<String, SessionActivityState>,
     session_observations: BTreeMap<String, runner_core::protocol::status::AgentStatus>,
     goal: Option<String>,
+    review: review::ReviewState,
+    meta_scroll: gpui::ScrollHandle,
+    meta_scrollbar: Entity<Scrollbar>,
     feed_blocks: Vec<FeedBlock>,
     feed_rows: Vec<FeedRow>,
     feed_block_starts: Vec<usize>,

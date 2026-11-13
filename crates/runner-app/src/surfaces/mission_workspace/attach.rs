@@ -28,6 +28,7 @@ impl MissionWorkspace {
             window.is_window_active(),
         );
         let generation = self.prepare_mission(mission_id.clone());
+        self.refresh_review(cx);
         self.composer_input.update(cx, |input, input_cx| {
             input.reset("", input_cx);
             input.set_disabled(false, input_cx);

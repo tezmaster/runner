@@ -95,6 +95,11 @@ pub(crate) fn runtime_ui(runtime: Runtime) -> RuntimeUi {
         Runtime::Muse => {
             ui.icon = "muse.svg";
             ui.tint = gpui::rgb(0x0866ff).into();
+            ui.usage_title = "Muse Code";
+            ui.usage_refresh_spinner = "usage-muse-refreshing";
+            ui.usage_checking_spinner = "usage-muse-checking";
+            ui.usage_order = 2;
+            ui.usage_invalid = crate::i18n::text("ui.muse_didn_t_answer");
         }
         Runtime::Cursor => {
             ui.icon = "cursor.svg";

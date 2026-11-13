@@ -1526,6 +1526,167 @@ fn mission_rail_scrolls_long_roster_and_goal_above_corner_padding() {
 
 #[cfg(unix)]
 #[test]
+fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls() {
+    use crate::theme_snapshot::ThemeGuard;
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext};
+    let _theme = ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
+    store.update(&mut cx, |store, _| {
+        crate::app_store::seed_mixed_working_sessions(store)
+    });
+    let mission = store.read_with(&cx, |store, _| {
+        runner_daemon::ops::mission::mission_get(&store.test_core, "test-mission").unwrap()
+    });
+    let host = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| {
+            let mut workspace = MissionWorkspace::new(
+                "rail-scroll".into(),
+                WeakEntity::new_invalid(),
+                store,
+                window,
+                cx,
+            );
+            workspace.mission = Some(mission);
+            workspace.goal =
+                Some("A long goal that must remain reachable in a short window.\n".repeat(40));
+            workspace.sessions = (0..20)
+                .map(|index| SessionRow {
+                    session: runner_core::protocol::model::Session {
+                        id: format!("slot-{index}"),
+                        mission_id: Some("test-mission".into()),
+                        role_id: "test-shell-role".into(),
+                        slot_id: None,
+                        cwd: None,
+                        status: SessionStatus::Stopped,
+                        pid: None,
+                        started_at: None,
+                        stopped_at: None,
+                    },
+                    handle: format!("worker-{index}"),
+                    role_handle: String::new(),
+                    lead: index == 0,
+                    runtime: "shell".into(),
+                    live_title: None,
+                    agent_session_key: None,
+                })
+                .collect();
+            workspace.sessions[0].agent_session_key = Some("key-0".into());
+            workspace.sessions[1].agent_session_key = Some("key-1".into());
+            workspace.set_review_for_test(usage_card_fixture(), &["worker-0", "worker-1"]);
+            workspace
+        });
+        MissionRailLayoutTest {
+            workspace,
+            width: None,
+        }
+    });
+    let mut visual = VisualTestContext::from_window(host.into(), &cx);
+    visual.simulate_resize(size(px(960.), px(300.)));
+    visual.run_until_parked();
+    for (view, viewport_selector, final_selector) in [
+        (PanelViewId::Info, "MISSION_META_SCROLL", "MISSION_META_END"),
+    ] {
+        host.update(&mut visual, |host, _, cx| {
+            host.workspace
+                .update(cx, |workspace, _| workspace.rail_surfaces.open.open(view));
+            cx.notify();
+        })
+        .unwrap();
+        visual.run_until_parked();
+        let rail = visual.debug_bounds("MISSION_RAIL").unwrap();
+        let viewport = visual.debug_bounds(viewport_selector).unwrap();
+        assert_eq!(viewport.bottom(), rail.bottom() - px(9.));
+        let last = visual.debug_bounds(final_selector).unwrap();
+        assert!(
+            last.bottom() > viewport.bottom(),
+            "{view:?}: {last:?} {viewport:?}"
+        );
+        // The scrollbar is beside the scroll box, not inside it: its track must stay
+        // where it is while the content scrolls, and its thumb must move down.
+        let track_before = visual.debug_bounds("SCROLLBAR_TRACK").expect("the Info panel has a scrollbar");
+        let thumb_before = visual.debug_bounds("SCROLLBAR_THUMB");
+        visual.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Lines(point(0., -1000.)),
+            ..Default::default()
+        });
+        visual.run_until_parked();
+        let track_after = visual.debug_bounds("SCROLLBAR_TRACK").unwrap();
+        assert_eq!(track_before, track_after, "the scrollbar track moved with the content");
+        assert!(
+            track_after.top() >= viewport.top() - px(1.) && track_after.bottom() <= viewport.bottom() + px(1.),
+            "the track must lie inside the visible scroll area: {track_after:?} {viewport:?}"
+        );
+        // Scrolled to the end, the thumb rests at the bottom of its fixed track.
+        let thumb_after = visual
+            .debug_bounds("SCROLLBAR_THUMB")
+            .expect("the thumb is drawn once the panel has scrolled");
+        if let Some(before) = thumb_before {
+            assert!(thumb_after.top() > before.top(), "the thumb should move down: {before:?} {thumb_after:?}");
+        }
+        assert!(
+            thumb_after.top() >= track_after.top() && thumb_after.bottom() <= track_after.bottom() + px(1.),
+            "the thumb must stay inside its track: {thumb_after:?} {track_after:?}"
+        );
+        assert!(
+            (track_after.bottom() - thumb_after.bottom()).abs() <= px(8.),
+            "at the end of the content the thumb sits at the bottom of the track: {thumb_after:?} {track_after:?}"
+        );
+        let last = visual.debug_bounds(final_selector).unwrap();
+        assert!(
+            last.top() >= viewport.top() && last.bottom() <= viewport.bottom(),
+            "{view:?}: {last:?} {viewport:?}"
+        );
+    }
+}
+
+
+fn usage_card_fixture() -> runner_core::protocol::MissionReview {
+    use runner_core::protocol::{BudgetState, CallUsage, MissionBudget, MissionReview};
+    let call = |index: usize, key: &str| CallUsage {
+        usage_id: format!("u{index}"),
+        runtime: "muse".into(),
+        session_key: key.into(),
+        at: format!("2026-11-12T10:{:02}:00+00:00", index % 60),
+        input_tokens: 1_000 + index as i64 * 37,
+        output_tokens: 50,
+        cached_tokens: 600,
+        reasoning_tokens: 0,
+        points_cached_in_full: Some(0.01 + index as f64 * 0.001),
+        points_cached_free: Some(0.03 + index as f64 * 0.001),
+    };
+    MissionReview {
+        mission_id: "test-mission".into(),
+        rating: None,
+        slots: Vec::new(),
+        budget: vec![MissionBudget {
+            runtime: "muse".into(),
+            window: "Week".into(),
+            state: BudgetState::Measured,
+            first_percent: 44.0,
+            latest_percent: 45.0,
+            used_points: Some(1.0),
+            first_read_at: "2026-11-12T10:00:00+00:00".into(),
+            latest_read_at: "2026-11-12T10:30:00+00:00".into(),
+            readings: 3,
+            other_sessions: 0,
+            attributed_low: Some(0.5),
+            attributed_high: Some(1.5),
+            rounding_margin: Some(0.05),
+            window_points: Some(45.0),
+            share_low: Some(0.01),
+            share_high: Some(0.03),
+        }],
+        calls: (0..40)
+            .map(|index| call(index, if index % 2 == 0 { "key-0" } else { "key-1" }))
+            .collect(),
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_rail_widened_by_an_open_file_lays_the_roster_two_per_row() {
     use crate::theme_snapshot::ThemeGuard;
     use gpui::{TestAppContext, VisualTestContext};

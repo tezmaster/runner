@@ -112,6 +112,9 @@ pub(super) fn unavailable_line(
     runtime: Runtime,
 ) -> &'static str {
     match reason {
+        Some(UnavailableReason::SignIn) if runtime == Runtime::Muse => {
+            crate::i18n::text("ui.sign_in_to_muse_to_see_usage")
+        }
         Some(UnavailableReason::SignIn) => {
             crate::i18n::text("ui.sign_in_to_claude_code_to_see_usage")
         }
@@ -711,7 +714,7 @@ impl NativeRoot {
         } else {
             (
                 self.app_store.read(cx).usage.clone(),
-                visible_usage_runtimes(&self.usage_installed, &self.settings(cx).model_runtimes())
+                visible_usage_runtimes(&self.usage_installed, &self.settings(cx).usage_runtimes())
                     .into_iter()
                     .filter(|runtime| self.settings(cx).usage.badge(*runtime))
                     .collect(),
@@ -944,9 +947,9 @@ impl NativeRoot {
             let agents: Vec<_> = snapshot.runtimes.keys().copied().collect();
             usage_popover_runtimes(&agents, &agents)
         } else {
-            usage_popover_runtimes(&self.usage_installed, &self.settings(cx).model_runtimes())
+            usage_popover_runtimes(&self.usage_installed, &self.settings(cx).usage_runtimes())
         };
-        let sections: Vec<AnyElement> = runtimes
+        let mut sections: Vec<AnyElement> = runtimes
             .into_iter()
             .map(|runtime| {
                 if runtime == Runtime::ClaudeCode && account_picker.is_some() {
@@ -969,6 +972,9 @@ impl NativeRoot {
                 }
             })
             .collect();
+        if !readonly {
+            sections.extend(self.render_mission_usage_link(cx));
+        }
         let header = div()
             .w_full()
             .flex()

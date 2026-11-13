@@ -338,6 +338,16 @@ pub fn call_daemon(
             response(client.mission_list_linked(&argument::<String>(&args, "session_id")?))
         }
         "mission_link" => response(client.mission_link(parse(args)?)),
+        "mission_rate" => response(client.mission_rate(parse(args)?)),
+        "mission_usage_record" => response(client.mission_usage_record(parse(args)?)),
+        "mission_budget_sample" => {
+            response(client.mission_budget_sample(&argument::<String>(&args, "mission_id")?))
+        }
+        "mission_usage_backfill" => response(client.mission_usage_backfill(argument(&args, "days")?)),
+        "mission_usage_list" => response(client.mission_usage_list(argument(&args, "days")?)),
+        "mission_review_get" => {
+            response(client.mission_review_get(&argument::<String>(&args, "mission_id")?))
+        }
         "mission_unlink" => {
             response(client.mission_unlink(&argument::<String>(&args, "mission_id")?))
         }

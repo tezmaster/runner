@@ -290,6 +290,7 @@ impl NativeRoot {
                     this.remote_client.sync_usage_popover(this.usage_open, cx);
                     if this.usage_open && this.remote_client.is_local() {
                         this.start_usage_refresh_timer(cx);
+                        this.refresh_mission_usage(cx);
                         let core = this.core(cx).clone();
                         let _ = core.usage_refresh(RefreshReason::Open);
                         let _ = this.core(cx).runtime_check_updates(false);

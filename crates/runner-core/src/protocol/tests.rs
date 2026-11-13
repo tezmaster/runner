@@ -326,6 +326,87 @@ record!(MissionLinkInput {
     no_report,
     caller_session_id
 });
+variant!(RatingVerdict => Self::Up);
+record!(MissionRating {
+    verdict,
+    note,
+    rated_at
+});
+record!(MissionRateInput {
+    mission_id,
+    verdict,
+    note
+});
+record!(SlotUsage {
+    handle,
+    runtime,
+    model,
+    effort,
+    prompt_hash,
+    input_tokens,
+    output_tokens,
+    cached_tokens,
+    reasoning_tokens,
+    steps,
+    input_includes_cached,
+    wall_minutes,
+    not_recorded_reason,
+    recorded_at
+});
+record!(MissionUsageRecordInput { mission_id, slots });
+variant!(BudgetState => Self::Measured);
+record!(MissionBudget {
+    runtime,
+    window,
+    state,
+    first_percent,
+    latest_percent,
+    used_points,
+    first_read_at,
+    latest_read_at,
+    readings,
+    other_sessions,
+    attributed_low,
+    attributed_high,
+    rounding_margin,
+    window_points,
+    share_low,
+    share_high
+});
+record!(CallUsage {
+    usage_id,
+    runtime,
+    session_key,
+    at,
+    input_tokens,
+    output_tokens,
+    cached_tokens,
+    reasoning_tokens,
+    points_cached_in_full,
+    points_cached_free
+});
+record!(BackfillSummary { measured, skipped });
+record!(MissionUsageSummary {
+    mission_id,
+    title,
+    status,
+    started_at,
+    stopped_at,
+    last_read_at,
+    last_call_at,
+    runtime,
+    attributed_low,
+    attributed_high,
+    window_points,
+    verdict
+});
+record!(MissionReview {
+    mission_id,
+    rating,
+    slots,
+    budget,
+    calls
+});
 variant!(MissionActivityState => Self::Busy);
 variant!(MissionFeedOrder => Self::OldestFirst);
 record!(MissionFeedArgs {
