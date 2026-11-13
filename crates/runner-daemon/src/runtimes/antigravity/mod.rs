@@ -1,27 +1,89 @@
-#[cfg(test)]
 pub use runner_core::protocol::runtime_metadata::ANTIGRAVITY_EFFORTS;
 pub(crate) mod agy_capture;
-pub(crate) mod agy_status;
 pub(crate) mod agy_trust;
 pub(crate) mod models;
+pub(crate) mod usage;
 use super::helpers::*;
 use super::*;
 pub use runner_core::protocol::runtime_metadata::ANTIGRAVITY_MODELS;
 
-pub(crate) fn antigravity_status_args(app_data_dir: &Path) -> Vec<String> {
-    if !Antigravity
-        .status_hooks()
-        .is_some_and(|hooks| hooks.supported(cfg!(windows)))
-        || !crate::runtimes::antigravity::agy_status::hooks_available(app_data_dir)
-    {
+const LEGACY_HOOKS_DIR: &str = "antigravity-hooks";
+
+pub(crate) fn remove_legacy_hooks_dir(app_data_dir: &Path) {
+    let dir = app_data_dir.join(LEGACY_HOOKS_DIR);
+    let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+        return;
+    };
+    if !meta.file_type().is_dir() {
+        return;
+    }
+    let report = dir.join("report.sh");
+    if std::fs::symlink_metadata(&report).is_ok_and(|meta| meta.file_type().is_file()) {
+        let _ = std::fs::remove_file(&report);
+    }
+    let agents = dir.join(".agents");
+    if std::fs::symlink_metadata(&agents).is_ok_and(|meta| meta.file_type().is_dir()) {
+        let hooks = agents.join("hooks.json");
+        if std::fs::symlink_metadata(&hooks).is_ok_and(|meta| meta.file_type().is_file()) {
+            let _ = std::fs::remove_file(&hooks);
+        }
+        let _ = std::fs::remove_dir(&agents);
+    }
+    let _ = std::fs::remove_dir(&dir);
+}
+
+pub(crate) fn inject_antigravity_settings(role_args: &[String]) -> bool {
+    !role_args.iter().any(|arg| {
+        matches!(arg.as_str(), "--settings" | "-settings")
+            || arg.starts_with("--settings=")
+            || arg.starts_with("-settings=")
+    })
+}
+
+pub(crate) fn antigravity_title_command(exe: &Path, windows: bool) -> String {
+    #[cfg(windows)]
+    let exe = ordinary_windows_path(exe);
+    #[cfg(not(windows))]
+    let exe = exe.to_path_buf();
+    let exe = exe.to_string_lossy();
+    if windows {
+        format!("\"{exe}\" hook title")
+    } else {
+        format!("{} hook title", crate::session::launch::shell_quote(&exe))
+    }
+}
+
+pub(crate) fn antigravity_settings_args(role_args: &[String], app_data_dir: &Path) -> Vec<String> {
+    if !inject_antigravity_settings(role_args) {
         return Vec::new();
     }
-    vec![
-        "--add-dir".into(),
-        crate::runtimes::antigravity::agy_status::hooks_dir(app_data_dir)
-            .to_string_lossy()
-            .into_owned(),
-    ]
+    let command = antigravity_title_command(&hook_executable(app_data_dir), cfg!(windows));
+    let settings = serde_json::json!({
+        "title": {
+            "type": "command",
+            "command": command,
+            "enabled": true,
+        }
+    });
+    vec!["--settings".into(), settings.to_string()]
+}
+
+pub(crate) fn antigravity_summaries_db_path(
+    role_args: &[String],
+    role_env: &std::collections::HashMap<String, String>,
+) -> Option<PathBuf> {
+    if !inject_antigravity_settings(role_args) {
+        return None;
+    }
+    let env_home = role_env
+        .get(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    #[cfg(test)]
+    let home = env_home.or_else(crate::runtimes::test_home);
+    #[cfg(not(test))]
+    let home = env_home.or_else(runner_core::app_paths::home_dir);
+    home.map(|home| home.join(".gemini/antigravity-cli/conversation_summaries.db"))
 }
 pub fn antigravity_conversation_exists(key: &str) -> bool {
     #[cfg(test)]
@@ -50,7 +112,7 @@ pub struct Antigravity;
 impl RuntimeAdapter for Antigravity {
     fn status_semantics(&self) -> StatusSemantics {
         StatusSemantics {
-            interruption_ends_invocation: true,
+            program_status_authority: true,
             ..Default::default()
         }
     }
@@ -58,8 +120,12 @@ impl RuntimeAdapter for Antigravity {
         agy_capture::prepare_log(app_data_dir, session_id);
     }
     fn start_capture(&self, ctx: CaptureContext) {
+        let summaries_db_path = antigravity_summaries_db_path(&ctx.role_args, &ctx.role_env);
         agy_capture::spawn_capture(agy_capture::CaptureRequest {
             log_path: agy_capture::log_path(&ctx.app_data_dir, &ctx.session_id),
+            summaries_db_path,
+            cwd: ctx.cwd,
+            initial_key: ctx.initial_key,
             manager: ctx.manager,
             session_id: ctx.session_id,
             mission_id: ctx.mission_id,
@@ -71,6 +137,7 @@ impl RuntimeAdapter for Antigravity {
     }
     fn cleanup_capture(&self, app_data_dir: &Path, pool: &crate::db::DbPool) {
         agy_capture::clear_orphans(app_data_dir, pool);
+        remove_legacy_hooks_dir(app_data_dir);
     }
     fn remove_capture(&self, app_data_dir: &Path, session_id: &str) {
         agy_capture::remove_log(app_data_dir, session_id);
@@ -88,15 +155,11 @@ impl RuntimeAdapter for Antigravity {
     fn model_discovery(&self) -> Option<&'static ModelDiscoverySource> {
         Some(&DISCOVERY)
     }
+    fn usage(&self) -> Option<&'static UsageSource> {
+        Some(&USAGE)
+    }
     fn capabilities(&self) -> RuntimeCapabilities {
         runner_core::protocol::runtime_metadata::antigravity::capabilities()
-    }
-    fn startup_delivery_uses_hooks(&self, pending_turn: bool) -> bool {
-        // Antigravity has turn hooks but no startup-ready hook on a quiet resume.
-        pending_turn
-    }
-    fn status_hooks(&self) -> Option<&'static dyn StatusHooks> {
-        Some(&Hooks)
     }
     fn key_capture(&self) -> KeyCapture {
         KeyCapture::LogTail
@@ -128,9 +191,15 @@ impl RuntimeAdapter for Antigravity {
         };
         let mut out = vec!["--model".into(), m.to_string()];
         let effort = effort.map(str::to_ascii_lowercase).filter(|e| {
-            ANTIGRAVITY_MODELS
-                .iter()
-                .any(|(id, levels)| *id == m && levels.contains(&e.as_str()))
+            if !ANTIGRAVITY_EFFORTS.contains(&e.as_str()) {
+                return false;
+            }
+            if let Some((_, levels)) = ANTIGRAVITY_MODELS.iter().find(|(id, _)| *id == m) {
+                levels.contains(&e.as_str())
+            } else {
+                runner_core::protocol::runtime_metadata::antigravity::split_leveled_model(m)
+                    .is_none()
+            }
         });
         if let Some(e) = effort {
             out.push("--effort".into());
@@ -158,9 +227,8 @@ impl RuntimeAdapter for Antigravity {
             resend_persona_on_fresh: true,
         }
     }
-    fn mission_dir_args(&self, dir: Option<&Path>) -> Vec<String> {
-        add_dir(dir)
-    }
+    // agy sorts active workspaces lexicographically to choose run_command's cwd;
+    // missions already use --dangerously-skip-permissions and reach the bus via `runner`.
     fn conversation_exists(&self, key: &str, _ctx: &ProbeContext<'_>) -> Option<bool> {
         Some(antigravity_conversation_exists(key))
     }
@@ -173,53 +241,9 @@ impl RuntimeAdapter for Antigravity {
                 .to_string_lossy()
                 .into_owned(),
         ]);
-        if status_hooks_enabled(ctx.env) {
-            out.extend(antigravity_status_args(ctx.app_data_dir));
-        }
+        out.extend(antigravity_settings_args(ctx.role_args, ctx.app_data_dir));
         out.extend(self.first_turn_argv(if ctx.resuming { None } else { ctx.first_turn }));
         out
-    }
-}
-
-struct Hooks;
-impl StatusHooks for Hooks {
-    fn start_receiver(
-        &self,
-        _spec: &SpawnSpec,
-        receiver: crate::session::hook_queue::HookReceiver,
-    ) -> Option<Box<dyn HookWatcher>> {
-        Some(Box::new(agy_status::AgyStatusWatcher::from_receiver(
-            receiver,
-        )))
-    }
-    fn supported(&self, windows: bool) -> bool {
-        !windows
-    }
-    fn install(&self, app_data_dir: &Path) {
-        if self.supported(cfg!(windows)) {
-            if let Err(error) = agy_status::install_hooks(app_data_dir) {
-                log::warn!("install Antigravity status hooks: {error}");
-            }
-        }
-    }
-    fn env(
-        &self,
-        _role_args: &[String],
-        _plan: &ResumePlan,
-        app_data_dir: &Path,
-        spec: &SpawnSpec,
-    ) -> std::collections::BTreeMap<String, String> {
-        if !(self.supported(cfg!(windows))) {
-            return std::collections::BTreeMap::new();
-        }
-        let mut env = hook_env(app_data_dir, &spec.session_id);
-        if let Some(cwd) = spec.cwd.as_deref() {
-            env.insert(
-                agy_status::WORKSPACE_CONTEXT_ENV.into(),
-                agy_status::workspace_context(cwd),
-            );
-        }
-        env
     }
 }
 
@@ -231,6 +255,10 @@ static DISCOVERY: ModelDiscoverySource = ModelDiscoverySource {
     method: "models",
     query: models::query,
     config_home: || config_home(None, ".gemini/antigravity-cli"),
+};
+
+static USAGE: UsageSource = UsageSource {
+    fetch: |command, env, _denied| usage::fetch_antigravity(command, env),
 };
 
 static MCP: McpConfig = McpConfig {

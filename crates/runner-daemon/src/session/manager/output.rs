@@ -878,23 +878,25 @@ impl SessionManager {
         let rt_session = self.live_runtime_session(session_id)?;
         self.runtime.send_bytes(&rt_session, payload)?;
         std::thread::sleep(std::time::Duration::from_millis(120));
-        let result = if let Some(session) = self.session_state(session_id) {
-            let mut session = session.lock().unwrap();
-            let result = self
+        let result = match self.session_state(session_id) {
+            Some(session) => {
+                let mut session = session.lock().unwrap();
+                let result = self
+                    .runtime
+                    .send_key(&rt_session, "Enter")
+                    .map_err(Into::into);
+                if result.is_ok() {
+                    session.model.apply(
+                        SessionEvent::ArmCompletion,
+                        crate::session::clock::state_now(),
+                    );
+                }
+                result
+            }
+            _ => self
                 .runtime
                 .send_key(&rt_session, "Enter")
-                .map_err(Into::into);
-            if result.is_ok() {
-                session.model.apply(
-                    SessionEvent::ArmCompletion,
-                    crate::session::clock::state_now(),
-                );
-            }
-            result
-        } else {
-            self.runtime
-                .send_key(&rt_session, "Enter")
-                .map_err(Into::into)
+                .map_err(Into::into),
         };
         if result.is_ok() {
             if let Some(ctx) = self.rollout_capture_context(session_id) {
@@ -1176,7 +1178,7 @@ impl SessionManager {
     ) {
         let _ = mission_id;
         let state = self.session_state_or_insert(session_id);
-        let (model, observation, program_status, launch) = {
+        let (model, observation, program_statuses, launch) = {
             let mut state = state.lock().unwrap();
             if launch.is_some_and(|launch| {
                 launch.load(Ordering::Acquire)
@@ -1203,24 +1205,30 @@ impl SessionManager {
             let observation = model
                 .as_ref()
                 .and_then(|model| model.feed_output(seq, bytes));
-            let program_status = model.as_ref().and_then(|model| model.take_program_status());
+            let program_statuses = model
+                .as_ref()
+                .map(|model| model.take_program_statuses())
+                .unwrap_or_default();
             let launch = state.handle.as_ref().map(|handle| handle.stop.clone());
-            (model, observation, program_status, launch)
+            (model, observation, program_statuses, launch)
         };
         if let Some(model) = model {
             model.publish_input(observation);
         }
-        if let (Some((seq, report)), Some(launch)) = (program_status, launch) {
-            self.publish_model_event_for_launch(
-                session_id,
-                SessionEvent::ProgramStatus {
-                    seq,
-                    report,
-                    live: true,
-                },
-                Some(&launch),
-                events,
-            );
+        if let Some(launch) = launch {
+            for (subseq, (seq, report)) in program_statuses.into_iter().enumerate() {
+                self.publish_model_event_for_launch(
+                    session_id,
+                    SessionEvent::ProgramStatus {
+                        seq,
+                        subseq,
+                        report,
+                        live: true,
+                    },
+                    Some(&launch),
+                    events,
+                );
+            }
         }
     }
 

@@ -316,6 +316,107 @@ fn update_button_sits_before_the_toggle_only_while_an_update_exists() {
 }
 
 #[test]
+fn update_task_row_shows_only_caption_unless_failed_and_omits_output_buttons() {
+    use runner_core::protocol::{RuntimeUpdateState, RuntimeUpdateTask};
+
+    let mut stale = versioned(RuntimeRowState::Detected, Some("0.153.4"), Some("0.155.0"));
+    stale.effective_source = Some(RuntimeCommandSource::Detected);
+    let make_task = |state: RuntimeUpdateState| RuntimeUpdateTask {
+        id: "task-codex-1".into(),
+        runtime: Runtime::Codex,
+        state,
+        from_version: Some("0.153.4".into()),
+        to_version: Some("0.155.0".into()),
+        installed_version: (state == RuntimeUpdateState::Succeeded).then(|| "0.155.0".into()),
+        step: String::new(),
+        message: None,
+        exit_code: None,
+        running_sessions: 0,
+    };
+
+    // Active, succeeded, and may-need-input states render only the vertically centered caption
+    // (no Retry/Reinstall button and no Show output / Answer button).
+    for state in [
+        RuntimeUpdateState::Running,
+        RuntimeUpdateState::Succeeded,
+        RuntimeUpdateState::MayNeedInput,
+    ] {
+        let mut cx = gpui::TestAppContext::single();
+        let (_temp, pane) = test_pane(vec![stale.clone()], false, &mut cx);
+        pane.update(&mut cx, |pane, _, cx| {
+            pane.tasks = vec![make_task(state)];
+            cx.notify();
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+        let card = window.debug_bounds("AGENT_CARD_codex").unwrap();
+        let toggle = window.debug_bounds("AGENT_TOGGLE_codex").unwrap();
+        let update = window.debug_bounds("AGENT_UPDATE_codex").unwrap();
+        let caption = window.debug_bounds("AGENT_TASK_CAPTION_codex").unwrap();
+        assert!(
+            window.debug_bounds("AGENT_TASK_RETRY_codex").is_none(),
+            "{state:?} should not show Retry/Reinstall"
+        );
+        assert!(
+            (update.size.width - caption.size.width).abs() <= px(0.5)
+                && (update.size.height - caption.size.height).abs() <= px(0.5),
+            "{state:?} update container {update:?} should collapse to caption only {caption:?}"
+        );
+        assert!(
+            (caption.center().y - toggle.center().y).abs() <= px(1.)
+                && (caption.center().y - card.center().y).abs() <= px(1.),
+            "{state:?} caption {caption:?} should center vertically against toggle {toggle:?} and card {card:?}"
+        );
+
+        // Detail page header also renders only the centered caption without output/answer buttons.
+        open_test_page(pane, Runtime::Codex, &mut window);
+        let detail_toggle = window.debug_bounds("AGENT_TOGGLE_codex").unwrap();
+        let detail_update = window.debug_bounds("AGENT_UPDATE_codex").unwrap();
+        let detail_caption = window.debug_bounds("AGENT_TASK_CAPTION_codex").unwrap();
+        assert!(window.debug_bounds("AGENT_TASK_RETRY_codex").is_none());
+        assert!(
+            (detail_update.size.height - detail_caption.size.height).abs() <= px(0.5),
+            "{state:?} detail header update {detail_update:?} should collapse to caption {detail_caption:?}"
+        );
+        assert!(
+            (detail_caption.center().y - detail_toggle.center().y).abs() <= px(1.),
+            "{state:?} detail caption {detail_caption:?} should center against toggle {detail_toggle:?}"
+        );
+    }
+
+    // Failed and BrokenAfterStop keep only Retry / Reinstall alongside the caption (still no
+    // Show output / Answer button).
+    for state in [
+        RuntimeUpdateState::Failed,
+        RuntimeUpdateState::BrokenAfterStop,
+    ] {
+        let mut cx = gpui::TestAppContext::single();
+        let (_temp, pane) = test_pane(vec![stale.clone()], false, &mut cx);
+        pane.update(&mut cx, |pane, _, cx| {
+            pane.tasks = vec![make_task(state)];
+            cx.notify();
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+        let update = window.debug_bounds("AGENT_UPDATE_codex").unwrap();
+        let caption = window.debug_bounds("AGENT_TASK_CAPTION_codex").unwrap();
+        let retry = window.debug_bounds("AGENT_TASK_RETRY_codex").unwrap();
+        assert!(retry.top() >= caption.bottom());
+        assert!(
+            (update.size.width - caption.size.width.max(retry.size.width)).abs() <= px(1.),
+            "{state:?} button row should hold only Retry/Reinstall, got update={update:?}, caption={caption:?}, retry={retry:?}"
+        );
+        assert!(
+            (update.size.height - (caption.size.height + retry.size.height + px(4.))).abs()
+                <= px(1.),
+            "{state:?} update height {update:?} should match caption + gap + retry"
+        );
+    }
+}
+
+#[test]
 fn formats_known_partial_and_unknown_runtime_defaults() {
     let mut runtime = runtime(RuntimeRowState::Detected);
     runtime.default_model = Some("claude-fable-5[1m]".into());
@@ -1115,6 +1216,7 @@ fn launch_card_switches_follow_the_runtime_table() {
         Runtime::Codex,
         Runtime::ClaudeCode,
         Runtime::Pi,
+        Runtime::Antigravity,
         Runtime::Cursor,
     ] {
         let mut cx = gpui::TestAppContext::single();
@@ -1161,4 +1263,164 @@ fn launch_card_switches_follow_the_runtime_table() {
             ))
             .is_some());
     }
+}
+
+#[test]
+fn launch_copy_shows_feedback_and_ignores_unavailable_previews() {
+    use gpui::Focusable as _;
+    use runner_core::protocol::runtime::{
+        RuntimeCommandLine, RuntimeCommandNote, RuntimeCommandPreview,
+    };
+    use std::time::Duration;
+
+    let mut cx = gpui::TestAppContext::single();
+    let mut codex = runtime(RuntimeRowState::Detected);
+    codex.name = Runtime::Codex;
+    let mut claude = runtime(RuntimeRowState::Detected);
+    claude.name = Runtime::ClaudeCode;
+    claude.display_name = "Claude Code".into();
+    let (_temp, pane) = test_pane(vec![codex, claude], false, &mut cx);
+    pane.update(&mut cx, |pane, _, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("initial".into()));
+        pane.selected_runtime = Some(Runtime::Codex);
+        cx.notify();
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+
+    let copy = window.debug_bounds("AGENT_LAUNCH_COPY").unwrap();
+    window.simulate_click(copy.center(), gpui::Modifiers::default());
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(!pane.launch_copy.read(cx).is_copied());
+        assert_eq!(pane.launch_copy.read(cx).value(), None);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("initial")
+        );
+    })
+    .unwrap();
+
+    pane.update(&mut window, |pane, _, cx| {
+        pane.launch_previews.insert(
+            (Runtime::Codex, false),
+            RuntimeCommandPreview {
+                lines: vec![
+                    RuntimeCommandLine {
+                        command: "codex -m <model>".into(),
+                        note: RuntimeCommandNote::FromChat,
+                        option: None,
+                    },
+                    RuntimeCommandLine {
+                        command: "<first message>".into(),
+                        note: RuntimeCommandNote::FirstTurn,
+                        option: None,
+                    },
+                ],
+            },
+        );
+        pane.launch_previews.insert(
+            (Runtime::Codex, true),
+            RuntimeCommandPreview {
+                lines: vec![RuntimeCommandLine {
+                    command: "codex --ask-for-approval never --sandbox danger-full-access".into(),
+                    note: RuntimeCommandNote::AlwaysInMissions,
+                    option: None,
+                }],
+            },
+        );
+        cx.notify();
+    })
+    .unwrap();
+    window.run_until_parked();
+
+    let copy = window.debug_bounds("AGENT_LAUNCH_COPY").unwrap();
+    window.simulate_click(copy.center(), gpui::Modifiers::default());
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(pane.launch_copy.read(cx).is_copied());
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("codex -m <model>\n<first message>")
+        );
+    })
+    .unwrap();
+
+    window
+        .executor()
+        .advance_clock(Duration::from_millis(1_499));
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(pane.launch_copy.read(cx).is_copied());
+    })
+    .unwrap();
+    window.executor().advance_clock(Duration::from_millis(1));
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(!pane.launch_copy.read(cx).is_copied());
+    })
+    .unwrap();
+
+    window.simulate_click(copy.center(), gpui::Modifiers::default());
+    window.run_until_parked();
+    let mission_tab = window
+        .debug_bounds("AGENT_LAUNCH_TAB_codex_mission")
+        .unwrap();
+    window.simulate_click(mission_tab.center(), gpui::Modifiers::default());
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(!pane.launch_copy.read(cx).is_copied());
+        assert_eq!(
+            pane.launch_copy.read(cx).value(),
+            Some("codex --ask-for-approval never --sandbox danger-full-access")
+        );
+    })
+    .unwrap();
+
+    pane.update(&mut window, |pane, win, cx| {
+        let focus = pane.launch_copy.read(cx).focus_handle(cx);
+        focus.focus(win, cx);
+    })
+    .unwrap();
+    window.run_until_parked();
+    window.simulate_keystrokes("space");
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(pane.launch_copy.read(cx).is_copied());
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("codex --ask-for-approval never --sandbox danger-full-access")
+        );
+    })
+    .unwrap();
+
+    pane.update(&mut window, |pane, _, cx| {
+        pane.selected_runtime = Some(Runtime::ClaudeCode);
+        pane.sync_launch_copy(true, cx);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("marker".into()));
+        cx.notify();
+    })
+    .unwrap();
+    window.run_until_parked();
+    let copy = window.debug_bounds("AGENT_LAUNCH_COPY").unwrap();
+    window.simulate_click(copy.center(), gpui::Modifiers::default());
+    window.run_until_parked();
+    pane.read_with(&window, |pane, cx| {
+        assert!(!pane.launch_copy.read(cx).is_copied());
+        assert_eq!(pane.launch_copy.read(cx).value(), None);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("marker")
+        );
+    })
+    .unwrap();
 }

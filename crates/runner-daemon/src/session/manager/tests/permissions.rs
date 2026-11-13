@@ -684,11 +684,9 @@ fn runtime_only_chat_spawn_and_resume_assert_no_permission_posture() {
         let args = fake.last_spawn_spec().unwrap().args;
         assert_chat_has_no_permission_flags(&args);
         assert!(has_arg_pair(&args, "--model", "test-model"));
-        // agy takes `--effort` only with a catalog model that lists the level.
         let effort = match runtime {
-            "claude-code" | "copilot" => Some(("--effort", "high")),
+            "claude-code" | "copilot" | "antigravity" => Some(("--effort", "high")),
             "pi" => Some(("--thinking", "high")),
-            "antigravity" => None,
             _ => Some(("-c", "model_reasoning_effort=high")),
         };
         let has_effort = |args: &[String]| match effort {
@@ -738,7 +736,6 @@ fn launch_switches_cover_chat_resume_mission_and_role_permissions() {
     let root = tempfile::tempdir().unwrap();
     crate::runtimes::pi::pi_status::install_extension(root.path()).unwrap();
     crate::runtimes::copilot::copilot_status::install_plugin(root.path()).unwrap();
-    crate::runtimes::antigravity::agy_status::install_hooks(root.path()).unwrap();
     let pool = pool_with_schema();
     let manager = mgr_with_fake(None, fake_runtime());
     for runtime in Runtime::ALL
@@ -819,6 +816,12 @@ fn launch_switches_cover_chat_resume_mission_and_role_permissions() {
                     runtime == Runtime::Codex
                 );
                 let no_hooks = compose(false, true, false);
+                if runtime == Runtime::Antigravity {
+                    assert!(!baseline
+                        .args
+                        .iter()
+                        .any(|arg| arg == "--plugin-dir" || arg == "--add-dir"));
+                }
                 if mission {
                     assert_eq!(baseline.args, no_hooks.args, "mission hooks for {runtime}");
                 } else {
@@ -871,10 +874,11 @@ fn launch_switches_cover_chat_resume_mission_and_role_permissions() {
                             );
                         }
                         Runtime::Antigravity => {
-                            assert!(!no_hooks
+                            assert_eq!(baseline.args, no_hooks.args);
+                            assert!(!baseline
                                 .env
                                 .contains_key(runner_core::protocol::hook::GENERATION_ENV));
-                            assert!(!no_hooks
+                            assert!(!baseline
                                 .args
                                 .iter()
                                 .any(|arg| arg == "--plugin-dir" || arg == "--add-dir"));

@@ -17,13 +17,24 @@ impl SessionManager {
             state
                 .handle
                 .is_none()
-                .then(|| state.terminal.clone())
+                .then(|| {
+                    state
+                        .terminal
+                        .clone()
+                        .zip(state.terminal_started_at.clone())
+                })
                 .flatten()
         });
-        let terminal = prepared.unwrap_or_else(|| {
-            self.create_terminal(session_id, cols, rows, pool, events)
-                .expect("create session terminal model")
-        });
+        let (terminal, terminal_started_at) = match prepared {
+            Some((terminal, started_at)) => {
+                self.rebind_terminal_session(session_id, &terminal, &started_at, pool)
+                    .expect("rebind session terminal model");
+                (terminal, started_at)
+            }
+            None => self
+                .create_terminal_with_started_at(session_id, cols, rows, pool, events)
+                .expect("create session terminal model"),
+        };
         let previous_worker = {
             let controller = self
                 .inherited_controller(session_id, pool, &mut control)
@@ -43,6 +54,7 @@ impl SessionManager {
             state.last_exit_was_killed = false;
             state.controller = controller;
             state.terminal = Some(terminal);
+            state.terminal_started_at = Some(terminal_started_at);
             if state.terminal_input.is_none() {
                 let (input, worker) = self.start_terminal_input(
                     session_id,
@@ -132,6 +144,13 @@ impl SessionManager {
                 .filter(|startup| !startup.reports_only)
                 .map(|startup| startup.runtime.clone())
                 .unwrap_or_default();
+            if let Some(startup) = &handle.startup {
+                state.model.set_program_status_authority(
+                    crate::runtimes::for_key(&startup.runtime)
+                        .status_semantics()
+                        .program_status_authority,
+                );
+            }
             state.handle = Some(handle);
             state
                 .model

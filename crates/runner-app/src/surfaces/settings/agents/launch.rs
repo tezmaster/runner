@@ -37,7 +37,6 @@ fn switch_copy(
                 Runtime::ClaudeCode => "On: --settings {\"hooks\":{…}}",
                 Runtime::Pi => "On: -e <Runner status extension>",
                 Runtime::Copilot => "On: --plugin-dir <Runner status plugin>",
-                Runtime::Antigravity => "On: --add-dir <Runner hooks folder>",
                 Runtime::OpenCode => "On: OPENCODE_CLI_CONFIG_CONTENT=<Runner status plugin>",
                 _ => "On: <Runner status hooks>",
             },
@@ -46,6 +45,19 @@ fn switch_copy(
 }
 
 impl AgentsPane {
+    pub(super) fn sync_launch_copy(&self, reset_copied: bool, cx: &mut Context<Self>) {
+        let value = self
+            .selected_runtime
+            .and_then(|runtime| self.launch_previews.get(&(runtime, self.mission_preview)))
+            .map(preview_clipboard_text);
+        self.launch_copy.update(cx, |copy, copy_cx| {
+            if reset_copied {
+                copy.reset_copied(copy_cx);
+            }
+            copy.set_value(value, copy_cx);
+        });
+    }
+
     pub(super) fn refresh_launch_previews(&mut self, runtime: Runtime, cx: &mut Context<Self>) {
         let core = self.app_store.read(cx).client.clone();
         let task = cx.background_spawn(async move {
@@ -66,9 +78,12 @@ impl AgentsPane {
                         this.launch_previews.insert((runtime, true), mission);
                     }
                     Err(error) => {
+                        this.launch_previews.remove(&(runtime, false));
+                        this.launch_previews.remove(&(runtime, true));
                         this.launch_preview_errors.insert(runtime, error);
                     }
                 }
+                this.sync_launch_copy(false, cx);
                 cx.notify();
             });
         })
@@ -194,16 +209,9 @@ impl AgentsPane {
             );
         }
         let preview = self.launch_previews.get(&(name, self.mission_preview));
-        let copied = preview
-            .map(|preview| {
-                preview
-                    .lines
-                    .iter()
-                    .map(|line| line.command.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
+        self.launch_copy.update(cx, |copy, copy_cx| {
+            copy.set_value(preview.map(preview_clipboard_text), copy_cx);
+        });
         let tabs = div()
             .flex()
             .gap(rems(2. / 16.))
@@ -222,6 +230,10 @@ impl AgentsPane {
                         "ui.chat"
                     }),
                 )
+                .debug_selector(format!(
+                    "AGENT_LAUNCH_TAB_{name}_{}",
+                    if mission { "mission" } else { "chat" }
+                ))
                 .size(ButtonSize::Sm)
                 .variant(if mission == self.mission_preview {
                     ButtonVariant::Secondary
@@ -230,7 +242,9 @@ impl AgentsPane {
                 })
                 .on_press(move |_, cx| {
                     pane.update(cx, |this, cx| {
+                        let changed = this.mission_preview != mission;
                         this.mission_preview = mission;
+                        this.sync_launch_copy(changed, cx);
                         cx.notify();
                     })
                 })
@@ -255,21 +269,10 @@ impl AgentsPane {
                     )
                     .child(tabs)
                     .child(
-                        div().ml_auto().child(
-                            Button::new(
-                                SharedString::from(format!("launch-copy-{name}")),
-                                crate::i18n::text("ui.copy"),
-                            )
-                            .icon("copy.svg")
-                            .size(ButtonSize::Sm)
-                            .variant(ButtonVariant::Secondary)
-                            .disabled(preview.is_none())
-                            .on_press(move |_, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    copied.clone(),
-                                ))
-                            }),
-                        ),
+                        div()
+                            .ml_auto()
+                            .debug_selector(|| format!("AGENT_LAUNCH_COPY_{name}"))
+                            .child(self.launch_copy.clone()),
                     ),
             )
             .child(render_command(preview))
@@ -291,6 +294,15 @@ impl AgentsPane {
             )))
             .into_any_element()
     }
+}
+
+fn preview_clipboard_text(preview: &RuntimeCommandPreview) -> String {
+    preview
+        .lines
+        .iter()
+        .map(|line| line.command.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_command(preview: Option<&RuntimeCommandPreview>) -> Div {

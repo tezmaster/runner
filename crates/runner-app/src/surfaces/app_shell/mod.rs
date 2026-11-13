@@ -153,21 +153,26 @@ impl NativeRoot {
         } else {
             Vec::new()
         };
-        let entity_overlays = if let Some(workspace) = self.remote_client.mission_workspace() {
-            let fallback = (!self.create_modal_open()
-                && self.fork_confirm.is_none()
-                && self.terminal_close_confirm.is_none()
-                && self.remote_client.ui.pair.is_none()
-                && !self.remote_client.ui.picker_open)
-                .then(|| self.root_focus.clone());
-            workspace.update(cx, |workspace, cx| {
-                workspace.restore_remote_dialog_focus(fallback.as_ref(), window, cx);
-                workspace.render_mission_overlays(cx)
-            })
-        } else if self.route != AppRoute::Settings {
-            self.render_entity_overlays(window, cx)
-        } else {
-            Vec::new()
+        let entity_overlays = match self.remote_client.mission_workspace() {
+            Some(workspace) => {
+                let fallback = (!self.create_modal_open()
+                    && self.fork_confirm.is_none()
+                    && self.terminal_close_confirm.is_none()
+                    && self.remote_client.ui.pair.is_none()
+                    && !self.remote_client.ui.picker_open)
+                    .then(|| self.root_focus.clone());
+                workspace.update(cx, |workspace, cx| {
+                    workspace.restore_remote_dialog_focus(fallback.as_ref(), window, cx);
+                    workspace.render_mission_overlays(cx)
+                })
+            }
+            _ => {
+                if self.route != AppRoute::Settings {
+                    self.render_entity_overlays(window, cx)
+                } else {
+                    Vec::new()
+                }
+            }
         };
         let chrome = div()
             .debug_selector(|| "APP_CHROME".into())
@@ -391,7 +396,7 @@ impl NativeRoot {
         id: &'static str,
         area: gpui::Div,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let area = area
             .id(id)
             .window_control_area(WindowControlArea::Drag)
@@ -443,20 +448,27 @@ fn usage_ui_catalog_golden() {
         Some(UnavailableReason::KeychainUnavailable),
         Some(UnavailableReason::ClaudeUnreachable),
         Some(UnavailableReason::CodexNoAnswer),
+        Some(UnavailableReason::AntigravityNoAnswer),
         Some(UnavailableReason::InvalidResponse),
     ];
     let now = chrono::DateTime::from_timestamp(1770000000, 0).unwrap();
     let usage = AgentUsage {
         credits: None,
         updated_at: now,
-        windows: ["Week", "5 hours", "Opus · week"]
-            .into_iter()
-            .map(|name| UsageWindow {
-                name: name.into(),
-                used_percent: 27.,
-                resets_at: None,
-            })
-            .collect(),
+        windows: [
+            "Week",
+            "5 hours",
+            "Opus · week",
+            "Gemini Models · Week used",
+            "Claude and GPT models · 5 hours used",
+        ]
+        .into_iter()
+        .map(|name| UsageWindow {
+            name: name.into(),
+            used_percent: 27.,
+            resets_at: None,
+        })
+        .collect(),
     };
     let rows: Vec<_> = Runtime::ALL.into_iter().map(|runtime| {
         let sections = crate::catalog_golden::capture(|| {

@@ -5,7 +5,9 @@
 
 use crate::runtime_status::direct_chat_path;
 use crate::shell_path::LoginShellEnv;
-use crate::usage::{parse_timestamp, percent, UnavailableReason, UsageWindow, FETCH_TIMEOUT};
+use crate::usage::{
+    parse_timestamp, percent, UnavailableReason, UsageReading, UsageWindow, FETCH_TIMEOUT,
+};
 use serde_json::Value;
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -56,7 +58,7 @@ pub(crate) fn parse_muse(value: &Value) -> Result<Vec<UsageWindow>, UnavailableR
 pub(crate) fn fetch_muse(
     command: &str,
     env: &LoginShellEnv,
-) -> Result<Vec<UsageWindow>, UnavailableReason> {
+) -> Result<UsageReading, UnavailableReason> {
     fetch_muse_with_timeout(command, env, FETCH_TIMEOUT)
 }
 
@@ -64,7 +66,7 @@ pub(crate) fn fetch_muse_with_timeout(
     command: &str,
     env: &LoginShellEnv,
     timeout: Duration,
-) -> Result<Vec<UsageWindow>, UnavailableReason> {
+) -> Result<UsageReading, UnavailableReason> {
     let mut process = Command::new(command);
     process
         .args(["usage", "--json"])
@@ -101,7 +103,7 @@ pub(crate) fn fetch_muse_with_timeout(
     let _ = child.wait();
     let value: Value =
         serde_json::from_str(text.trim()).map_err(|_| UnavailableReason::InvalidResponse)?;
-    parse_muse(&value)
+    parse_muse(&value).map(UsageReading::from)
 }
 
 #[cfg(test)]
@@ -195,7 +197,9 @@ mod tests {
             r#"[ "$1 $2" = "usage --json" ] || exit 3
 echo '{"allowance":{"window":{"usedPercent":9,"resetsAtMs":1794506456000},"weekly":{"usedPercent":12,"resetsAtMs":1794787200000}}}'"#,
         );
-        let windows = fetch_muse_with_timeout(&ok, &env, Duration::from_secs(5)).unwrap();
+        let windows = fetch_muse_with_timeout(&ok, &env, Duration::from_secs(5))
+            .unwrap()
+            .windows;
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[1].used_percent, 12.0);
     }

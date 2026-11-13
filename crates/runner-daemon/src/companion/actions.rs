@@ -721,10 +721,22 @@ impl DaemonCore {
                 }
                 Ok(Value::Null)
             }
-            Archive { target, .. } => {
+            Archive {
+                target,
+                with_missions,
+                ..
+            } => {
                 match target.kind {
                     ActionKind::Session => {
-                        ops::session::session_archive_direct(core, &target.id).map_err(failed)?
+                        let archived = ops::session::session_archive_direct_with_missions(
+                            core,
+                            &target.id,
+                            with_missions,
+                        )
+                        .map_err(failed)?;
+                        if with_missions {
+                            return Ok(json!({"archivedMissions": archived}));
+                        }
                     }
                     ActionKind::Tab => ops::node::node_tab_delete(core, &node_id(core, &target)?)
                         .map_err(failed)?,
@@ -888,6 +900,27 @@ impl DaemonCore {
                         .map_err(launch_failed)?;
                 mission_changed(core, None);
                 Ok(json!({"mission":output.mission_id,"sessions":output.resumed_session_ids}))
+            }
+            LinkMission {
+                mission, session, ..
+            } => {
+                let mission = ops::mission::link::mission_link(
+                    core,
+                    p::MissionLinkInput {
+                        mission_id: mission,
+                        session_id: session,
+                        no_report: false,
+                        caller_session_id: None,
+                    },
+                )
+                .map_err(failed)?;
+                mission_changed(core, Some(&mission.id));
+                Ok(Value::Null)
+            }
+            UnlinkMission { mission, .. } => {
+                let mission = ops::mission::link::mission_unlink(core, &mission).map_err(failed)?;
+                mission_changed(core, Some(&mission.id));
+                Ok(Value::Null)
             }
         }
     }

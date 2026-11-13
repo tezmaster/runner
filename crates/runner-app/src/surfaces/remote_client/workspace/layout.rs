@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn sidebar_nodes(overview: &Overview) -> Vec<SidebarNode> {
-    let nodes = overview.sidebar.clone().unwrap_or_else(|| {
+    overview.sidebar.clone().unwrap_or_else(|| {
         let mut nodes = overview
             .projects
             .iter()
@@ -34,8 +34,7 @@ pub(crate) fn sidebar_nodes(overview: &Overview) -> Vec<SidebarNode> {
             });
         }
         nodes
-    });
-    nodes
+    })
 }
 
 impl RemoteClient {
@@ -231,6 +230,33 @@ impl RemoteClient {
         self.workspace.as_ref()?.layouts.get(id)
     }
 
+    pub(crate) fn pane_closing(&self, pane: &PaneKey) -> bool {
+        self.workspace
+            .as_ref()
+            .and_then(|remote| remote.closing_layouts.get(&pane.tab_id))
+            .is_some_and(|layout| {
+                !layout
+                    .root
+                    .leaves()
+                    .iter()
+                    .any(|leaf| leaf.id == pane.pane_id)
+            })
+    }
+
+    pub(crate) fn track_pane_close(&mut self, layout: &PaneLayout) {
+        self.workspace
+            .as_mut()
+            .unwrap()
+            .closing_layouts
+            .insert(layout.id.clone(), layout.clone());
+    }
+
+    pub(crate) fn pane_close_pending(&self, tab: &str) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(|remote| remote.closing_layouts.contains_key(tab))
+    }
+
     pub(crate) fn recently_viewed_tab_layout(&self) -> Option<&PaneLayout> {
         let remote = self.workspace.as_ref()?;
         remote
@@ -319,5 +345,15 @@ impl RemoteClient {
             .map(|remote| remote.layouts.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         crate::surfaces::sidebar::archive_targets_for_chats(ids, &layouts)
+    }
+
+    pub(crate) fn overview<'a>(&self, cx: &'a App) -> Option<&'a Overview> {
+        let remote = self.workspace.as_ref()?;
+        self.app_store
+            .read(cx)
+            .remote_clients
+            .read(cx)
+            .overviews
+            .get(&remote.computer.id)
     }
 }

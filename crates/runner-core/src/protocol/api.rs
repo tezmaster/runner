@@ -46,6 +46,7 @@ macro_rules! daemon_api {
         session_get_with_status(session_id: &str => String = { session_id.to_owned() }) -> serde_json::Value [false] => |core: &crate::AppCore, session_id: String| { crate::ops::session::session_get_with_status(core, &session_id) };
         session_stop(session_id: &str => String = { session_id.to_owned() }) -> () [false] => |core: &crate::AppCore, session_id: String| { crate::ops::session::session_stop(core, &session_id) };
         session_archive_direct(session_id: &str => String = { session_id.to_owned() }) -> () [false] => |core: &crate::AppCore, session_id: String| { crate::ops::session::session_archive_direct(core, &session_id) };
+        session_archive_direct_with_missions(session_id: &str => String = { session_id.to_owned() }, with_missions: bool => bool = { with_missions }) -> Vec<String> [false] => |core: &crate::AppCore, session_id: String, with_missions: bool| { crate::ops::session::session_archive_direct_with_missions(core, &session_id, with_missions) };
         session_start_chat(args: StartDirectSessionArgs => StartDirectSessionArgs = { args }) -> StartDirectSessionOutput [false] => |core: &crate::AppCore, args: StartDirectSessionArgs| { crate::ops::session::session_start_chat(core, args) };
 
         session_live_ids() -> Vec<String> [true] => |core: &crate::AppCore| { Ok(core.sessions.live_session_ids()) };
@@ -220,7 +221,7 @@ macro_rules! daemon_api {
 }
 
 macro_rules! define_api {
-    ($( $name:ident($( $arg:ident: $client_ty:ty => $wire_ty:ty = $convert:block ),*) -> $out:ty [$fast:literal] => $handler:expr; )*) => {
+    ($( $name:ident($( $arg:ident: $client_ty:ty => $wire_ty:ty = $convert:block ),*) -> $out:ty [$fast:literal] => $handler:expr_2021; )*) => {
         #[allow(non_camel_case_types)]
         #[derive(Debug, serde::Serialize, serde::Deserialize)]
         pub enum Request { $( $name { $( $arg: $wire_ty ),* }, )* }

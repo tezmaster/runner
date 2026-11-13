@@ -94,7 +94,7 @@ impl Sidebar {
             true
         });
     }
-    fn remote_overview(&self, cx: &App) -> Option<runner_core::companion::Overview> {
+    pub(super) fn remote_overview(&self, cx: &App) -> Option<runner_core::companion::Overview> {
         let crate::surfaces::front_page::FrontPageTarget::Remote { computer, .. } =
             &self.front_page.target
         else {
@@ -175,11 +175,21 @@ impl Sidebar {
                         return None;
                     }
                     let rollup = self.tab_status_rollup(&members, cx);
+                    let attention = super::rows::status_attention(rollup.priority_value()).max(
+                        if members
+                            .iter()
+                            .any(|member| self.archiving_sessions.contains(&member.session_id))
+                        {
+                            AttentionState::Working
+                        } else {
+                            AttentionState::None
+                        },
+                    );
                     Some(SidebarRow::Tab {
                         node,
                         layout,
                         members,
-                        attention: super::rows::status_attention(rollup.priority_value()),
+                        attention,
                     })
                 }
                 NodeType::Mission => {
@@ -271,6 +281,21 @@ impl Sidebar {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn remote_row_attentions(&self, cx: &App) -> HashMap<String, AttentionState> {
+        self.remote_rows(cx)
+            .into_iter()
+            .map(|row| match row {
+                SidebarRow::Tab {
+                    node, attention, ..
+                }
+                | SidebarRow::Mission {
+                    node, attention, ..
+                } => (node.ref_id.unwrap_or(node.id), attention),
+            })
+            .collect()
+    }
+
     pub(super) fn session_status(
         &self,
         id: &str,
@@ -321,8 +346,8 @@ impl Sidebar {
                 self.front_page.supports(&["close", "archive", "layout"])
             }
             SidebarMenuAction::ArchiveMission(_) => self.front_page.supports(&["archive"]),
-            // The companion protocol carries the link but no request to change it.
-            SidebarMenuAction::LinkToChat(_) | SidebarMenuAction::UnlinkMission(_) => false,
+            SidebarMenuAction::LinkToChat(_) => self.front_page.supports(&["linkMission"]),
+            SidebarMenuAction::UnlinkMission(_) => self.front_page.supports(&["unlinkMission"]),
             SidebarMenuAction::StopMission(_) => self.front_page.supports(&["stopMission"]),
             SidebarMenuAction::ResumeMission(_) => self.front_page.supports(&["resumeMission"]),
             SidebarMenuAction::DeleteProject(_) => self.front_page.supports(&["deleteProject"]),

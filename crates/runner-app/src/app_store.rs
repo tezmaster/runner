@@ -268,6 +268,7 @@ impl From<&AppSettings> for ShellSettingsSnapshot {
         settings.usage.sidebar.hash(&mut hasher);
         settings.usage.codex.hash(&mut hasher);
         settings.usage.claude_code.hash(&mut hasher);
+        settings.usage.antigravity.hash(&mut hasher);
         settings.usage.five_hour.hash(&mut hasher);
         settings.notifications.usage.near_limit.hash(&mut hasher);
         settings.notifications.usage.threshold.hash(&mut hasher);
@@ -467,15 +468,18 @@ impl AppStore {
                     .update(cx, |this, cx| {
                         let mut labels_changed = false;
                         for id in changed {
-                            if let Some(terminal) = this.bridge.session(&id) {
-                                let label =
-                                    (terminal.title(), terminal.live_cwd(), terminal.control());
-                                if this.terminal_labels.get(&id) != Some(&label) {
-                                    this.terminal_labels.insert(id.clone(), label);
-                                    labels_changed = true;
+                            match this.bridge.session(&id) {
+                                Some(terminal) => {
+                                    let label =
+                                        (terminal.title(), terminal.live_cwd(), terminal.control());
+                                    if this.terminal_labels.get(&id) != Some(&label) {
+                                        this.terminal_labels.insert(id.clone(), label);
+                                        labels_changed = true;
+                                    }
                                 }
-                            } else {
-                                labels_changed |= this.terminal_labels.remove(&id).is_some();
+                                _ => {
+                                    labels_changed |= this.terminal_labels.remove(&id).is_some();
+                                }
                             }
                             this.terminal_updates.update(cx, |_, cx| cx.emit(id));
                         }
@@ -1738,10 +1742,11 @@ mod roster_change_tests {
 fn usage_controls_invalidate_shell_but_alert_history_does_not() {
     let settings = AppSettings::default();
     let before = ShellSettingsSnapshot::from(&settings);
-    let changes: [fn(&mut AppSettings); 6] = [
+    let changes: [fn(&mut AppSettings); 7] = [
         |s| s.usage.sidebar = false,
         |s| s.usage.codex = false,
         |s| s.usage.claude_code = false,
+        |s| s.usage.antigravity = false,
         |s| s.usage.five_hour = false,
         |s| s.notifications.usage.near_limit = false,
         |s| s.notifications.usage.threshold = 50,

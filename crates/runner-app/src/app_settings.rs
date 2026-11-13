@@ -361,6 +361,7 @@ pub struct UsageSettings {
     pub sidebar: bool,
     pub codex: bool,
     pub claude_code: bool,
+    pub antigravity: bool,
     pub five_hour: bool,
 }
 impl Default for UsageSettings {
@@ -369,6 +370,7 @@ impl Default for UsageSettings {
             sidebar: true,
             codex: true,
             claude_code: true,
+            antigravity: true,
             five_hour: true,
         }
     }
@@ -379,6 +381,7 @@ impl UsageSettings {
             && match runtime {
                 runner_core::Runtime::Codex => self.codex,
                 runner_core::Runtime::ClaudeCode => self.claude_code,
+                runner_core::Runtime::Antigravity => self.antigravity,
                 _ => false,
             }
     }
@@ -1649,7 +1652,15 @@ mod tests {
         let mut settings = AppSettings::default();
         let mut defaults = settings.usage_runtimes();
         defaults.sort_by_key(|runtime| runtime.key());
-        assert_eq!(defaults, [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse]);
+        assert_eq!(
+            defaults,
+            [
+                Runtime::Antigravity,
+                Runtime::ClaudeCode,
+                Runtime::Codex,
+                Runtime::Muse
+            ]
+        );
         assert!(
             !settings.model_runtimes().contains(&Runtime::Muse),
             "Muse reports usage without discovering models"
@@ -1834,13 +1845,23 @@ fn usage_preferences_defaults_roundtrip_and_fetching_rules() {
         defaults.usage.sidebar
             && defaults.usage.codex
             && defaults.usage.claude_code
+            && defaults.usage.antigravity
             && defaults.usage.five_hour
     );
+    let legacy: UsageSettings = serde_json::from_str(
+        r#"{"sidebar":true,"codex":false,"claudeCode":true,"fiveHour":false}"#,
+    )
+    .unwrap();
+    assert!(legacy.antigravity);
+    assert!(!legacy.codex);
+    assert!(!legacy.five_hour);
+    assert!(legacy.badge(Runtime::Antigravity));
     assert!(defaults.notifications.usage.near_limit);
     assert_eq!(defaults.notifications.usage.threshold, 80);
     let mut settings = defaults;
     settings.usage.sidebar = false;
     settings.usage.codex = false;
+    settings.usage.antigravity = false;
     settings.usage.five_hour = false;
     settings.notifications.usage.near_limit = false;
     settings.notifications.usage.threshold = 60;
@@ -1854,9 +1875,10 @@ fn usage_preferences_defaults_roundtrip_and_fetching_rules() {
                     sidebar: badges,
                     codex: agent,
                     claude_code: agent,
+                    antigravity: agent,
                     ..Default::default()
                 };
-                for runtime in [Runtime::Codex, Runtime::ClaudeCode] {
+                for runtime in [Runtime::Codex, Runtime::ClaudeCode, Runtime::Antigravity] {
                     assert_eq!(usage.checks(runtime, alert), (badges && agent) || alert);
                 }
             }

@@ -49,6 +49,8 @@ const CLIENT_FIXTURES: &[&str] = &[
     "start_mission",
     "stop_mission",
     "resume_mission",
+    "link_mission",
+    "unlink_mission",
     "overview_request",
     "feed_request",
     "follow",
@@ -1133,6 +1135,7 @@ fn usage_conversions_preserve_values_and_known_errors() {
         UsageUnavailableReason::KeychainUnavailable,
         UsageUnavailableReason::ClaudeUnreachable,
         UsageUnavailableReason::CodexNoAnswer,
+        UsageUnavailableReason::AntigravityNoAnswer,
         UsageUnavailableReason::InvalidResponse,
     ] {
         let internal: crate::protocol::usage::UnavailableReason = reason.clone().into();
@@ -1174,4 +1177,101 @@ fn update_recovery_wire_preserves_versions_and_startup_errors() {
     }))
     .unwrap();
     assert!(old.startup_error.is_none());
+}
+
+#[test]
+fn archive_action_wire_keeps_default_shape_and_accepts_optional_with_missions() {
+    let default_req = ActionRequest::Archive {
+        id: 7,
+        target: ActionTarget {
+            kind: ActionKind::Session,
+            id: "chat-1".into(),
+        },
+        with_missions: false,
+    };
+    let default_json = serde_json::to_value(&default_req).unwrap();
+    assert!(
+        default_json.get("withMissions").is_none(),
+        "default archive wire shape omits withMissions for older hosts"
+    );
+    assert_eq!(
+        ClientMessage::decode(&serde_json::to_vec(&default_json).unwrap()).unwrap(),
+        ClientMessage::Action(Box::new(default_req))
+    );
+
+    let with_missions_req = ActionRequest::Archive {
+        id: 8,
+        target: ActionTarget {
+            kind: ActionKind::Session,
+            id: "chat-1".into(),
+        },
+        with_missions: true,
+    };
+    let with_missions_json = serde_json::to_value(&with_missions_req).unwrap();
+    assert_eq!(with_missions_json["withMissions"], true);
+    assert_eq!(
+        ClientMessage::decode(&serde_json::to_vec(&with_missions_json).unwrap()).unwrap(),
+        ClientMessage::Action(Box::new(with_missions_req))
+    );
+
+    let bad = ClientMessage::decode(
+        &serde_json::to_vec(&json!({
+            "type": "archive",
+            "id": 9,
+            "target": { "kind": "session", "id": "chat-1" },
+            "withMissions": "yes"
+        }))
+        .unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        bad.message.contains("field withMissions must be a boolean"),
+        "{}",
+        bad.message
+    );
+}
+
+#[test]
+fn mission_link_actions_validate_fields_and_preserve_id_mapping() {
+    assert!(ActionRequest::NAMES.contains(&"linkMission"));
+    assert!(ActionRequest::NAMES.contains(&"unlinkMission"));
+    for name in ["link_mission", "unlink_mission"] {
+        let body = fixture(name);
+        let message = ClientMessage::decode(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let ClientMessage::Action(mut action) = message else {
+            panic!("{name}")
+        };
+        assert_eq!(action.id(), 42);
+        action.set_id(99);
+        assert_eq!(action.id(), 99);
+        assert!(!format!("{action:?}").contains("mission-a"));
+        for field in body
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            let mut invalid = body.clone();
+            invalid[field] = json!({"private-body-canary": true});
+            let error = ClientMessage::decode(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BadRequest, "{name}.{field}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "{}: field {field} must be a string.",
+                    body["type"].as_str().unwrap()
+                )
+            );
+            assert!(!error.message.contains("private-body-canary"));
+
+            let mut missing = body.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let error = ClientMessage::decode(&serde_json::to_vec(&missing).unwrap()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BadRequest, "{name}.{field}");
+            assert_eq!(
+                error.message,
+                format!("{}: missing field {field}.", body["type"].as_str().unwrap())
+            );
+        }
+    }
 }

@@ -268,14 +268,17 @@ impl CoreSessionEvents {
 
 impl SessionEvents for CoreSessionEvents {
     fn terminal_metadata_changed(&self, id: &str) {
-        if let Some(observer) = self.observer.observer() {
-            observer.updated(&SessionUpdatedEvent {
-                session_id: id.to_owned(),
-                mission_id: None,
-            });
-        } else {
-            self.events
-                .emit("session/updated", &serde_json::json!({"session_id": id}));
+        match self.observer.observer() {
+            Some(observer) => {
+                observer.updated(&SessionUpdatedEvent {
+                    session_id: id.to_owned(),
+                    mission_id: None,
+                });
+            }
+            _ => {
+                self.events
+                    .emit("session/updated", &serde_json::json!({"session_id": id}));
+            }
         }
     }
     fn input_error(&self, id: &str, message: &str) {
@@ -319,24 +322,32 @@ impl SessionEvents for CoreSessionEvents {
     }
     fn status(&self, ev: &SessionActivityEvent) {
         if ev.source != StatusSource::CodexAttention
-            && ev.source != StatusSource::ProgramStatus
-            && ev.status.observation.program_status.is_none()
             && ev.status.observation.outcome != Some(TurnOutcome::Interrupted)
             && ev.status.observation.outcome != Some(TurnOutcome::Failed)
         {
             if let Some(sessions) = self.sessions.upgrade() {
-                let native_hook_completion = ev.source == StatusSource::Hook
+                let program_status_completion = ev.source == StatusSource::ProgramStatus
+                    && ev.state == SessionActivityState::Idle
                     && ev.status.observation.outcome == Some(TurnOutcome::Completed)
-                    && sessions
-                        .session_state(&ev.session_id)
-                        .is_some_and(|state| state.lock().unwrap().model.codex_attention_active());
-                let completion_eligible = (ev.state == SessionActivityState::Idle
-                    || native_hook_completion)
-                    && matches!(
-                        (ev.status.observation.activity, ev.status.observation.source),
-                        (Activity::Idle, ObservationSource::Baseline) | (Activity::Ready, _)
-                    );
-                if completion_eligible {
+                    && sessions.session_state(&ev.session_id).is_some_and(|state| {
+                        state.lock().unwrap().model.program_status_authority()
+                    });
+                let baseline_or_hook_completion = ev.source != StatusSource::ProgramStatus
+                    && ev.status.observation.program_status.is_none()
+                    && {
+                        let native_hook_completion = ev.source == StatusSource::Hook
+                            && ev.status.observation.outcome == Some(TurnOutcome::Completed)
+                            && sessions.session_state(&ev.session_id).is_some_and(|state| {
+                                state.lock().unwrap().model.codex_attention_active()
+                            });
+                        (ev.state == SessionActivityState::Idle || native_hook_completion)
+                            && matches!(
+                                (ev.status.observation.activity, ev.status.observation.source),
+                                (Activity::Idle, ObservationSource::Baseline)
+                                    | (Activity::Ready, _)
+                            )
+                    };
+                if program_status_completion || baseline_or_hook_completion {
                     if let Err(error) = crate::ops::node::record_session_completion(
                         &self.db,
                         &sessions,

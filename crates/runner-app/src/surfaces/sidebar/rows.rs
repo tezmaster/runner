@@ -7,11 +7,11 @@ use runner_core::protocol::node::NodeType;
 
 impl Sidebar {
     pub(super) fn dismiss_transients(&mut self, cx: &mut Context<Self>) {
-        let had_context_menu = self.context_menu.take().is_some();
+        let had_transient = self.context_menu.take().is_some() | self.link_picker.take().is_some();
         self.rename = None;
         self._rename_focus_subscription = None;
         self.clear_sidebar_drag("dismiss", cx);
-        if had_context_menu {
+        if had_transient {
             self.schedule_shell_notify(cx);
         }
         cx.notify();
@@ -35,7 +35,7 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(super) fn set_mission_archiving(
+    pub(crate) fn set_mission_archiving(
         &mut self,
         mission_id: String,
         archiving: bool,
@@ -48,11 +48,18 @@ impl Sidebar {
         };
         if changed {
             if let Some(shell) = self.shell.upgrade() {
+                let remote = self.front_page.is_remote();
                 cx.defer(move |cx| {
-                    let workspace = shell.read(cx).mission_workspace.clone();
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.set_archiving(&mission_id, archiving, cx);
-                    });
+                    let workspace = if remote {
+                        shell.read(cx).remote_client.remote_mission_workspace()
+                    } else {
+                        Some(shell.read(cx).mission_workspace.clone())
+                    };
+                    if let Some(workspace) = workspace {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.set_archiving(&mission_id, archiving, cx);
+                        });
+                    }
                 });
             }
             cx.notify();

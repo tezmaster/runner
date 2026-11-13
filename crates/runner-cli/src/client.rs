@@ -400,11 +400,27 @@ pub fn call_daemon(
         }
         "session_archive" => {
             let id: String = argument(&args, "session_id")?;
-            response(
-                client
-                    .session_archive_direct(&id)
-                    .map(|()| json!({"session_id": id})),
-            )
+            let with_missions = args
+                .get("with_missions")
+                .map(|value| serde_json::from_value::<bool>(value.clone()))
+                .transpose()
+                .map_err(|_| {
+                    ClientError::Refused("invalid argument with_missions: expected boolean".into())
+                })?
+                .unwrap_or(false);
+            if with_missions {
+                response(
+                    client.session_archive_direct_with_missions(&id, true).map(
+                        |archived| json!({"session_id": id, "archived_mission_ids": archived}),
+                    ),
+                )
+            } else {
+                response(
+                    client
+                        .session_archive_direct(&id)
+                        .map(|()| json!({"session_id": id})),
+                )
+            }
         }
         _ => Err(ClientError::Refused("tool not found".into())),
     }
@@ -434,18 +450,19 @@ mod tests {
         // Only this test touches RUNNER_SOCKET, so set/restore here is safe.
         let key = runner_core::app_paths::DAEMON_SOCKET_ENV_VAR;
         let prior = std::env::var_os(key);
-        std::env::set_var(key, "/tmp/override-test/runnerd.sock");
+        // SAFETY: only this test touches RUNNER_SOCKET.
+        unsafe { std::env::set_var(key, "/tmp/override-test/runnerd.sock") };
         assert_eq!(
             endpoint(),
             Some(IpcEndpoint(std::path::PathBuf::from(
                 "/tmp/override-test/runnerd.sock"
             )))
         );
-        std::env::set_var(key, "");
+        unsafe { std::env::set_var(key, "") };
         let empty_falls_through = endpoint();
         match prior {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
         }
         assert_eq!(endpoint(), empty_falls_through);
     }

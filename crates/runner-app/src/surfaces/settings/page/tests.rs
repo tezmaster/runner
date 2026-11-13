@@ -617,7 +617,9 @@ fn usage_preview_keeps_its_natural_size_and_wraps_inside_the_sidebar_card() {
             assert!((sample.right() - preview.right() + px(20. * zoom)).abs() < px(1.));
         }
         assert!((gear.left() - host.right() - px(8. * zoom)).abs() < px(1.));
-        assert!(badges.size.width < px(128. * zoom));
+        assert!(
+            badges.size.width <= px((super::super::usage::USAGE_PREVIEW_WIDTH - 96.) * zoom + 1.)
+        );
         assert!(badges.left() >= footer.left() && gear.right() <= footer.right() + px(1.));
     }
 }
@@ -639,18 +641,20 @@ fn usage_preview_tracks_badges_and_keeps_the_same_footer_anchors() {
             window,
             cx,
         );
-        root.usage_installed = vec![Runtime::Codex, Runtime::ClaudeCode];
+        root.usage_installed = vec![Runtime::Codex, Runtime::ClaudeCode, Runtime::Antigravity];
         root
     });
     let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
     visual.simulate_resize(gpui::size(px(1200.), px(900.)));
     let mut anchors = None;
-    for (sidebar, codex, claude) in [
-        (true, true, true),
-        (true, true, false),
-        (true, false, true),
-        (true, false, false),
-        (false, true, true),
+    for (sidebar, codex, claude, antigravity) in [
+        (true, true, true, true),
+        (true, true, true, false),
+        (true, true, false, true),
+        (true, false, true, false),
+        (true, false, false, true),
+        (true, false, false, false),
+        (false, true, true, true),
     ] {
         store.update(&mut visual, |store, cx| {
             store.update_settings(
@@ -658,6 +662,7 @@ fn usage_preview_tracks_badges_and_keeps_the_same_footer_anchors() {
                     s.usage.sidebar = sidebar;
                     s.usage.codex = codex;
                     s.usage.claude_code = claude;
+                    s.usage.antigravity = antigravity;
                     true
                 },
                 false,
@@ -677,15 +682,29 @@ fn usage_preview_tracks_badges_and_keeps_the_same_footer_anchors() {
             .unwrap();
             visual.run_until_parked();
             let usage = visual.debug_bounds("SIDEBAR_USAGE");
-            assert_eq!(usage.is_some(), sidebar && (codex || claude));
+            assert_eq!(usage.is_some(), sidebar && (codex || claude || antigravity));
             for (selector, enabled) in [
                 ("SIDEBAR_USAGE_VALUE_codex", codex),
                 ("SIDEBAR_USAGE_VALUE_claude-code", claude),
+                ("SIDEBAR_USAGE_VALUE_antigravity", antigravity),
             ] {
-                assert_eq!(visual.debug_bounds(selector).is_some(), sidebar && enabled,);
+                assert_eq!(visual.debug_bounds(selector).is_some(), sidebar && enabled);
             }
             if preview {
                 assert_eq!(usage.map(|bounds| bounds.size.width), real_usage_width);
+                if sidebar && codex && claude && antigravity {
+                    let codex_entry = visual.debug_bounds("SIDEBAR_USAGE_ENTRY_codex").unwrap();
+                    let claude_entry = visual
+                        .debug_bounds("SIDEBAR_USAGE_ENTRY_claude-code")
+                        .unwrap();
+                    let antigravity_entry = visual
+                        .debug_bounds("SIDEBAR_USAGE_ENTRY_antigravity")
+                        .unwrap();
+                    assert!((claude_entry.left() - codex_entry.right() - px(8.)).abs() <= px(0.5));
+                    assert!(
+                        (antigravity_entry.left() - claude_entry.right() - px(8.)).abs() <= px(0.5)
+                    );
+                }
                 let sample = visual.debug_bounds("USAGE_PREVIEW_SIDEBAR").unwrap();
                 let host_button = visual.debug_bounds("USAGE_PREVIEW_HOST").unwrap();
                 let gear = visual.debug_bounds("USAGE_PREVIEW_SETTINGS").unwrap();
@@ -699,6 +718,66 @@ fn usage_preview_tracks_badges_and_keeps_the_same_footer_anchors() {
             }
         }
     }
+}
+
+#[test]
+fn usage_settings_centers_codex_row_without_subtitle_and_labels_antigravity_gemini_pool() {
+    use runner_core::Runtime;
+
+    #[cfg(debug_assertions)]
+    {
+        crate::i18n::testing::with_locale(crate::i18n::Locale::English, || {
+            assert_eq!(
+                crate::i18n::text("usage.antigravity_gemini_pool"),
+                "Shows the Gemini Models weekly pool."
+            );
+        });
+        crate::i18n::testing::with_locale(crate::i18n::Locale::SimplifiedChinese, || {
+            assert_eq!(
+                crate::i18n::text("usage.antigravity_gemini_pool"),
+                "显示 Gemini 模型的每周模型池。"
+            );
+        });
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = gpui::TestAppContext::single();
+    let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
+    let host = cx.add_window(|window, cx| {
+        let mut root = NativeRoot::new(
+            "usage-badge-rows".into(),
+            temp.path().join("logs"),
+            None,
+            None,
+            store.clone(),
+            window,
+            cx,
+        );
+        root.usage_installed = vec![Runtime::Codex, Runtime::ClaudeCode, Runtime::Antigravity];
+        root.enter_settings_pane(SettingsPane::Usage, window, cx);
+        root
+    });
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
+    visual.simulate_resize(gpui::size(px(1200.), px(900.)));
+    visual.run_until_parked();
+
+    assert!(visual.debug_bounds("USAGE_BADGE_codex_SUBTITLE").is_none());
+    assert!(visual
+        .debug_bounds("USAGE_BADGE_claude-code_SUBTITLE")
+        .is_some());
+    assert!(visual
+        .debug_bounds("USAGE_BADGE_antigravity_SUBTITLE")
+        .is_some());
+
+    let codex_row = visual.debug_bounds("USAGE_BADGE_ROW_codex").unwrap();
+    let claude_row = visual.debug_bounds("USAGE_BADGE_ROW_claude-code").unwrap();
+    let antigravity_row = visual.debug_bounds("USAGE_BADGE_ROW_antigravity").unwrap();
+    assert!(codex_row.size.height < claude_row.size.height);
+    assert!(codex_row.size.height < antigravity_row.size.height);
+
+    let codex_label = visual.debug_bounds("USAGE_BADGE_codex_LABEL").unwrap();
+    let codex_control = visual.debug_bounds("USAGE_BADGE_codex_CONTROL").unwrap();
+    assert!((codex_label.center().y - codex_control.center().y).abs() < px(1.));
 }
 
 #[test]

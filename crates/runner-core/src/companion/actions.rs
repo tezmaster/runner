@@ -165,6 +165,8 @@ pub enum ActionRequest {
     Archive {
         id: u64,
         target: ActionTarget,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        with_missions: bool,
     },
     Layout {
         id: u64,
@@ -218,6 +220,15 @@ pub enum ActionRequest {
         mission: String,
         cols: u16,
         rows: u16,
+    },
+    LinkMission {
+        id: u64,
+        mission: String,
+        session: String,
+    },
+    UnlinkMission {
+        id: u64,
+        mission: String,
     },
 }
 
@@ -277,7 +288,15 @@ impl ActionRequest {
             "rename" => {
                 fields!(target: ActionTarget => "an item target", name: String => "a string")
             }
-            "archive" => fields!(target: ActionTarget => "an item target"),
+            "archive" => fields!(target: ActionTarget => "an item target").or_else(|| {
+                value
+                    .get("withMissions")
+                    .is_some()
+                    .then(|| {
+                        super::messages::field_problem::<bool>(value, "withMissions", "a boolean")
+                    })
+                    .flatten()
+            }),
             "layout" => {
                 fields!(target: ActionTarget => "an item target", project: Option<String> => "a string or null", name: String => "a string", panes: ActionPane => "a pane tree", shells: Vec<String> => "an array of strings")
             }
@@ -291,7 +310,10 @@ impl ActionRequest {
             "startMission" => {
                 fields!(crew: String => "a string", project: Option<String> => "a string or null", title: String => "a string", goal: Option<String> => "a string or null", cwd: Option<String> => "a string or null", cols: u16 => "an unsigned 16-bit integer", rows: u16 => "an unsigned 16-bit integer")
             }
-            "stopMission" => fields!(mission: String => "a string"),
+            "stopMission" | "unlinkMission" => fields!(mission: String => "a string"),
+            "linkMission" => {
+                fields!(mission: String => "a string", session: String => "a string")
+            }
             "resumeMission" => {
                 fields!(mission: String => "a string", cols: u16 => "an unsigned 16-bit integer", rows: u16 => "an unsigned 16-bit integer")
             }
@@ -335,6 +357,8 @@ impl ActionRequest {
         "startMission",
         "stopMission",
         "resumeMission",
+        "linkMission",
+        "unlinkMission",
     ];
     pub fn id(&self) -> u64 {
         match self {
@@ -373,6 +397,8 @@ impl ActionRequest {
             Self::StartMission { id, .. } => *id,
             Self::StopMission { id, .. } => *id,
             Self::ResumeMission { id, .. } => *id,
+            Self::LinkMission { id, .. } => *id,
+            Self::UnlinkMission { id, .. } => *id,
         }
     }
     pub fn set_id(&mut self, value: u64) {
@@ -412,6 +438,8 @@ impl ActionRequest {
             Self::StartMission { id, .. } => *id = value,
             Self::StopMission { id, .. } => *id = value,
             Self::ResumeMission { id, .. } => *id = value,
+            Self::LinkMission { id, .. } => *id = value,
+            Self::UnlinkMission { id, .. } => *id = value,
         }
     }
 }
@@ -650,7 +678,8 @@ pub struct UsageWindow {
 super::wire_enum!(UsageUnavailableReason, InvalidResponse, {
     SignIn => "signIn", KeychainDenied => "keychainDenied",
     KeychainUnavailable => "keychainUnavailable", ClaudeUnreachable => "claudeUnreachable",
-    CodexNoAnswer => "codexNoAnswer", InvalidResponse => "invalidResponse",
+    CodexNoAnswer => "codexNoAnswer", AntigravityNoAnswer => "antigravityNoAnswer",
+    InvalidResponse => "invalidResponse",
 });
 
 impl From<crate::protocol::usage::AgentUsage> for UsageValue {
@@ -702,6 +731,7 @@ impl From<crate::protocol::usage::UnavailableReason> for UsageUnavailableReason 
             Reason::KeychainUnavailable => Self::KeychainUnavailable,
             Reason::ClaudeUnreachable => Self::ClaudeUnreachable,
             Reason::CodexNoAnswer => Self::CodexNoAnswer,
+            Reason::AntigravityNoAnswer => Self::AntigravityNoAnswer,
             Reason::InvalidResponse => Self::InvalidResponse,
         }
     }
@@ -715,6 +745,7 @@ impl From<UsageUnavailableReason> for crate::protocol::usage::UnavailableReason 
             UsageUnavailableReason::KeychainUnavailable => Self::KeychainUnavailable,
             UsageUnavailableReason::ClaudeUnreachable => Self::ClaudeUnreachable,
             UsageUnavailableReason::CodexNoAnswer => Self::CodexNoAnswer,
+            UsageUnavailableReason::AntigravityNoAnswer => Self::AntigravityNoAnswer,
             _ => Self::InvalidResponse,
         }
     }

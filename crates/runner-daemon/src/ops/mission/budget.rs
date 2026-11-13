@@ -226,7 +226,7 @@ fn read_runtime(
         .effective_command
         .ok_or(UnavailableReason::InvalidResponse)?;
     let env = core.runtime_shell_env.read().unwrap().clone();
-    (source.fetch)(&command, &env, false)
+    (source.fetch)(&command, &env, false).map(|reading| reading.windows)
 }
 
 pub fn mission_budget_sample(core: &AppCore, mission_id: &str, kind: SampleKind) -> Result<usize> {

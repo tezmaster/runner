@@ -147,6 +147,11 @@ impl Fake {
                 overview.tabs.retain(|tab| tab.id != id);
                 Some(Ok(serde_json::Value::Null))
             }
+            "archive" if value["target"]["kind"] == "mission" => {
+                let id = value["target"]["id"].as_str().unwrap();
+                overview.missions.retain(|mission| mission.id != id);
+                Some(Ok(serde_json::Value::Null))
+            }
             "layout" => {
                 let id = value["target"]["id"].as_str().unwrap();
                 let Some(tab) = overview.tabs.iter_mut().find(|tab| tab.id == id) else {
@@ -164,6 +169,12 @@ impl Fake {
             .iter()
             .map(|feature| (*feature).to_owned())
             .collect();
+    }
+    pub(crate) fn without_features(&self, omit: &[&str]) {
+        self.features
+            .lock()
+            .unwrap()
+            .retain(|feature| !omit.contains(&feature.as_str()));
     }
     pub(crate) fn queue_result(&self, kind: &str, result: Result<serde_json::Value, ClientError>) {
         self.action_results
@@ -5564,6 +5575,8 @@ pub(crate) fn enable_front_page(fake: &Fake) {
         "deleteProject",
         "stopMission",
         "resumeMission",
+        "linkMission",
+        "unlinkMission",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -7965,4 +7978,652 @@ fn remote_resume_and_fork_refusals_offer_host_scoped_update_recovery() {
             })
             .unwrap();
     }
+}
+
+#[test]
+fn split_close_completion_restores_remote_keyboard_input_without_stealing_navigation() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for kind in ["shell", "chat", "empty"] {
+        for navigation in ["stay", "sibling", "tab", "input", "late-tab", "late-input"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut cx = TestAppContext::single();
+            let (store, fake, _) = fixture(&mut cx, temp.path());
+            enable_front_page(&fake);
+            fake.model_session_removal.store(true, Ordering::SeqCst);
+            let mut data = overview();
+            let mut survivor = data.sessions["s"].clone();
+            survivor.runtime = Some("shell".into());
+            data.sessions.insert("survivor".into(), survivor);
+            if kind == "shell" {
+                data.sessions.get_mut("s").unwrap().runtime = Some("shell".into());
+            }
+            data.tabs[0].panes = serde_json::from_value(serde_json::json!({
+                "split":"row","sizes":[0.5,0.5],
+                "a":{"id":"closing", "session": if kind == "empty" { None } else { Some("s") }},
+                "b":{"id":"surviving", "session":"survivor"}
+            }))
+            .unwrap();
+            let mut other = data.tabs[0].clone();
+            other.id = "other-tab".into();
+            other.panes =
+                serde_json::from_value(serde_json::json!({"id":"other", "session":"survivor"}))
+                    .unwrap();
+            data.tabs.push(other);
+            fake.set_overview(data);
+            let window = add_window(&mut cx, &store, temp.path(), "remote-close-focus");
+            window.update(&mut cx, choose_host).unwrap();
+            cx.run_until_parked();
+            let mut visual = VisualTestContext::from_window(window.into(), &cx);
+            let (closing, surviving) = window
+                .update(&mut visual, |root, _, _| {
+                    let leaves = root.front_page_layout().unwrap().root.leaves();
+                    (leaves[0].id.clone(), leaves[1].id.clone())
+                })
+                .unwrap();
+            window
+                .update(&mut visual, |root, window, cx| {
+                    root.focus_pane(
+                        if navigation == "sibling" {
+                            &surviving
+                        } else {
+                            &closing
+                        },
+                        cx,
+                    );
+                    root.focus_active_terminal(window, cx);
+                })
+                .unwrap();
+            visual.run_until_parked();
+            let mut input_focus = None;
+            window
+                .update(&mut visual, |root, window, cx| {
+                    match kind {
+                        "empty" => root.close_pane(&closing, window, cx),
+                        "shell" => root.close_terminal_pane(&closing, "s", window, cx),
+                        _ => {
+                            root.request_close_chat_pane(&closing, "s", window, cx);
+                            root.confirm_terminal_close(window, cx);
+                        }
+                    }
+                    match navigation {
+                        "tab" => {
+                            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+                            root.focus_active_terminal(window, cx);
+                        }
+                        "input" => {
+                            let find = root.remote_client.workspace().unwrap().terminals
+                                ["survivor"]
+                                .attachment
+                                .terminal_find
+                                .clone();
+                            find.update(cx, |find, cx| find.open(window, cx));
+                            input_focus = window.focused(cx);
+                        }
+                        _ => {}
+                    }
+                })
+                .unwrap();
+            visual.run_until_parked();
+            window
+                .update(&mut visual, |root, window, cx| match navigation {
+                    "late-tab" => {
+                        root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+                        root.focus_active_terminal(window, cx);
+                    }
+                    "late-input" => {
+                        let find = root.remote_client.workspace().unwrap().terminals["survivor"]
+                            .attachment
+                            .terminal_find
+                            .clone();
+                        find.update(cx, |find, cx| find.open(window, cx));
+                        input_focus = window.focused(cx);
+                    }
+                    _ => {}
+                })
+                .unwrap();
+            visual.run_until_parked();
+            let completed_overview = fake.overview.lock().unwrap().clone();
+            fake.set_overview(completed_overview);
+            visual.run_until_parked();
+            window
+                .update(&mut visual, |root, window, cx| {
+                    let layout = root.front_page_layout().unwrap();
+                    assert_eq!(
+                        layout.id,
+                        if matches!(navigation, "tab" | "late-tab") {
+                            "other-tab"
+                        } else {
+                            "remote-tab"
+                        }
+                    );
+                    assert_eq!(layout.root.leaves().len(), 1, "{kind}/{navigation}");
+                    if matches!(navigation, "input" | "late-input") {
+                        assert_eq!(window.focused(cx), input_focus, "{kind}/{navigation}");
+                    } else {
+                        assert!(
+                            root.remote_client.workspace().unwrap().terminals["survivor"]
+                                .attachment
+                                .terminal_focus
+                                .is_focused(window),
+                            "{kind}/{navigation}"
+                        );
+                    }
+                })
+                .unwrap();
+            if !matches!(navigation, "input" | "late-input") {
+                fake.input.lock().unwrap().clear();
+                visual.simulate_keystrokes("x");
+                visual.run_until_parked();
+                assert!(
+                    fake.input
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(address, bytes)| address.contains("survivor") && bytes == b"x"),
+                    "{kind}/{navigation}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn remote_archive_intermediate_launcher_waits_for_collapse_without_stealing_find_focus() {
+    use crate::surfaces::chat::PaneCloseFocus;
+    use crate::surfaces::front_page::actions::{Completion, WorkspaceAction};
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for navigation in ["stay", "find-before", "find-after"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, _) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+        fake.model_session_removal.store(true, Ordering::SeqCst);
+        let mut data = overview();
+        let mut survivor = data.sessions["s"].clone();
+        survivor.runtime = Some("shell".into());
+        data.sessions.insert("survivor".into(), survivor);
+        data.tabs[0].panes = serde_json::from_value(serde_json::json!({
+            "split":"row","sizes":[0.5,0.5],
+            "a":{"session":"s"},"b":{"session":"survivor"}
+        }))
+        .unwrap();
+        fake.set_overview(data);
+        let window = add_window(&mut cx, &store, temp.path(), "intermediate-remote-archive");
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+        let (focus, action, final_layout, mut input_focus) = window
+            .update(&mut visual, |root, window, cx| {
+                let layout = root.front_page_layout().unwrap().clone();
+                let pane = layout.root.leaves()[0].id.clone();
+                root.focus_pane(&pane, cx);
+                root.focus_active_terminal(window, cx);
+                let focus = PaneCloseFocus::capture(root, window, cx).unwrap();
+                let (action, _) = WorkspaceAction::archive(
+                    root,
+                    vec!["s".into()],
+                    None,
+                    Some(crate::PendingPaneClose {
+                        tab_id: layout.id.clone(),
+                        pane_id: pane,
+                    }),
+                    cx,
+                )
+                .unwrap();
+                let final_layout =
+                    root.remote_client.workspace().unwrap().closing_layouts[&layout.id].clone();
+                if navigation == "find-before" {
+                    let find = root.remote_client.workspace().unwrap().terminals["survivor"]
+                        .attachment
+                        .terminal_find
+                        .clone();
+                    find.update(cx, |find, cx| find.open(window, cx));
+                }
+                (focus, action, final_layout, window.focused(cx))
+            })
+            .unwrap();
+        action
+            .client
+            .archive(runner_core::companion::ActionTarget {
+                kind: runner_core::companion::ActionKind::Session,
+                id: "s".into(),
+            })
+            .unwrap();
+        let intermediate_overview = fake.overview.lock().unwrap().clone();
+        fake.set_overview(intermediate_overview);
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |root, window, cx| {
+                let layout = root.front_page_layout().unwrap();
+                assert_eq!(layout.root.leaves().len(), 2);
+                assert_eq!(layout.focused_session_id(), None);
+                assert!(
+                    !root.launchers.is_empty(),
+                    "the intermediate launcher must render"
+                );
+                assert_eq!(
+                    window.focused(cx),
+                    input_focus,
+                    "intermediate launcher stole focus: {navigation}"
+                );
+                if navigation == "find-after" {
+                    let find = root.remote_client.workspace().unwrap().terminals["survivor"]
+                        .attachment
+                        .terminal_find
+                        .clone();
+                    find.update(cx, |find, cx| find.open(window, cx));
+                    input_focus = window.focused(cx);
+                }
+            })
+            .unwrap();
+        action
+            .client
+            .layout(&final_layout, final_layout.parent_id.clone())
+            .unwrap();
+        window
+            .update(&mut visual, |root, window, cx| {
+                WorkspaceAction::complete_observed(
+                    root,
+                    action,
+                    Ok::<_, String>(Completion {
+                        layouts: vec![final_layout],
+                        ..Default::default()
+                    }),
+                    |done| done,
+                    |_, _, succeeded, cx| {
+                        assert!(succeeded);
+                        focus.defer_restore(window, cx);
+                    },
+                    cx,
+                );
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |root, window, cx| {
+                assert!(root.remote_client.pane_close_pending("remote-tab"));
+                assert_eq!(
+                    window.focused(cx),
+                    input_focus,
+                    "acknowledgement focused the interim launcher"
+                );
+            })
+            .unwrap();
+        let final_overview = fake.overview.lock().unwrap().clone();
+        fake.set_overview(final_overview);
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |root, window, cx| {
+                assert!(!root.remote_client.pane_close_pending("remote-tab"));
+                assert_eq!(root.front_page_layout().unwrap().root.leaves().len(), 1);
+                if navigation == "stay" {
+                    assert!(
+                        root.remote_client.workspace().unwrap().terminals["survivor"]
+                            .attachment
+                            .terminal_focus
+                            .is_focused(window)
+                    );
+                } else {
+                    assert_eq!(window.focused(cx), input_focus);
+                }
+            })
+            .unwrap();
+        fake.input.lock().unwrap().clear();
+        visual.simulate_keystrokes("x");
+        visual.run_until_parked();
+        if navigation == "stay" {
+            assert!(fake
+                .input
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(address, bytes)| address.contains("survivor") && bytes == b"x"));
+        } else {
+            assert!(
+                fake.input.lock().unwrap().is_empty(),
+                "Find input reached the terminal"
+            );
+        }
+    }
+}
+
+#[test]
+fn remote_chat_archive_prompts_for_linked_missions_and_supports_new_and_legacy_hosts() {
+    for legacy_host in [true, false] {
+        let _theme = crate::theme_snapshot::ThemeGuard::new();
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, _) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+
+        let mut data = fake.overview.lock().unwrap().clone();
+        data.missions[0].linked_chat = Some(runner_core::companion::LinkedChat {
+            session_id: "s".into(),
+            title: "Remote chat".into(),
+            archived: false,
+            reports: true,
+        });
+        let mut other = data.missions[0].clone();
+        other.id = "other-mission".into();
+        other.title = "Other mission".into();
+        other.linked_chat = None;
+        data.missions.push(other);
+        fake.set_overview(data);
+        cx.run_until_parked();
+
+        let window = add_window(&mut cx, &store, temp.path(), "remote-linked-archive");
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+
+        // Sidebar/tab archive on a remote chat with a linked mission opens Option A instead of archiving silently.
+        window
+            .update(&mut visual, |root, window, cx| {
+                window.activate_window();
+                root.request_archive_all(
+                    Some("remote-tab"),
+                    vec!["s".into()],
+                    crate::ArchiveAllSource::Sidebar,
+                    window,
+                    cx,
+                );
+                assert!(
+                    root.terminal_close_confirm.is_some(),
+                    "legacy_host={legacy_host}: linked remote chat opens confirmation"
+                );
+            })
+            .unwrap();
+        visual.update(|window, _| window.refresh());
+        visual.run_until_parked();
+        assert!(visual
+            .debug_bounds("CONFIRM_LINKED_MISSION remote-mission")
+            .is_some());
+        assert!(visual
+            .debug_bounds("CONFIRM_LINKED_MISSION other-mission")
+            .is_none());
+
+        // Escape cancels with zero archive requests.
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        assert_eq!(fake.request_count("archive"), 0);
+
+        if !legacy_host {
+            fake.queue_result(
+                "archive",
+                Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+            );
+        }
+
+        window
+            .update(&mut visual, |root, window, cx| {
+                root.request_archive_all(
+                    Some("remote-tab"),
+                    vec!["s".into()],
+                    crate::ArchiveAllSource::Sidebar,
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+
+        let archives = action_trace(&fake, "archive");
+        assert_eq!(archives[0]["target"]["kind"], "session");
+        assert_eq!(archives[0]["target"]["id"], "s");
+        assert_eq!(archives[0]["withMissions"], true);
+        if legacy_host {
+            assert_eq!(
+                archives.len(),
+                2,
+                "legacy host returning null triggers explicit mission archive fallback"
+            );
+            assert_eq!(archives[1]["target"]["kind"], "mission");
+            assert_eq!(archives[1]["target"]["id"], "remote-mission");
+            assert!(archives[1].get("withMissions").is_none());
+        } else {
+            assert_eq!(
+                archives.len(),
+                1,
+                "withMissions-aware host archives chat and linked missions in one request"
+            );
+        }
+    }
+}
+
+#[test]
+fn remote_chat_archive_tracks_linked_mission_pending_state_across_hosts_and_errors() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+
+    let host_a = computers()[1].clone();
+    let host_b = Computer {
+        id: "host-b".into(),
+        name: "Backup".into(),
+        online: true,
+        paired: true,
+        fingerprint: "host-b-key".into(),
+        ..Default::default()
+    };
+    fake.computers.lock().unwrap().push(host_b.clone());
+
+    let mut data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [{"id": "remote-tab", "project": "p", "name": "Remote tab", "pinned": true, "panes": {"session": "s"}, "shells": []}],
+        "missions": [{"id": "remote-mission", "title": "Remote mission", "project": null, "crew": "Duo", "state": "stopped", "pinned": false, "members": [], "asks": [], "shells": []}],
+        "sessions": {"s": {"kind": "chat", "title": "Remote session", "runtime": "codex", "status": "stopped", "unread": false}}
+    }))
+    .unwrap();
+    data.missions[0].linked_chat = Some(runner_core::companion::LinkedChat {
+        session_id: "s".into(),
+        title: "Remote session".into(),
+        archived: false,
+        reports: true,
+    });
+    fake.set_overview(data.clone());
+    fake.emit(
+        "remote/overview",
+        serde_json::json!({"computer": "host-b", "overview": data}),
+    );
+    cx.run_until_parked();
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-pending-archive");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+
+    // Case 1: Staying on Host A: in-flight state marks both chat and linked mission and blocks
+    // duplicates, then an error clears both marks and surfaces action_error for retry.
+    fake.queue_result("archive", Err(ClientError::msg("archive refused")));
+    window
+        .update(&mut cx, |root, window, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            assert!(root.terminal_close_confirm.is_some());
+            root.confirm_terminal_close(window, cx);
+
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Working));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::Working)
+            );
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            assert!(root.terminal_close_confirm.is_none());
+            root.remote_archive_sessions(vec!["s".into()], cx);
+        })
+        .unwrap();
+
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 1);
+    window
+        .read_with(&cx, |root, cx| {
+            assert!(root
+                .remote_client
+                .workspace()
+                .unwrap()
+                .action_error
+                .is_some());
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+        })
+        .unwrap();
+
+    // Case 2: Retry succeeds even across host switches (Host A -> Host B -> Local -> Host A while in
+    // flight, and finishing after epoch change).
+    fake.queue_result(
+        "archive",
+        Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+    );
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            assert!(root.terminal_close_confirm.is_some());
+            root.confirm_terminal_close(window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+
+            // Switching to another computer or This Computer never leaks Host A's pending marks.
+            root.visit_computer(host_b.clone(), window, cx);
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+
+            root.return_to_this_computer(window, cx);
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+
+            // Switching back to Host A while in flight restores the archiving state.
+            root.visit_computer(host_a.clone(), window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Working));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::Working)
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 2);
+    window
+        .read_with(&cx, |root, cx| {
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+        })
+        .unwrap();
+
+    // Case 3: Completing while viewing Host B cleans up Host A so returning shows no stale marks.
+    fake.queue_result(
+        "archive",
+        Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+    );
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            root.confirm_terminal_close(window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            root.visit_computer(host_b, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 3);
+
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.visit_computer(host_a, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(&cx, |root, cx| {
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+        })
+        .unwrap();
+
+    // Case 4: Clearing pending archives for a disconnected host clears both marks cleanly.
+    fake.queue_result(
+        "archive",
+        Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+    );
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            root.confirm_terminal_close(window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            root.remote_client.clear_pending_archives_for("host", cx);
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 4);
 }

@@ -106,6 +106,15 @@ impl RemoteClient {
                 }
                 remote.layouts.insert(tab.id.clone(), layout);
             }
+            remote.closing_layouts.retain(|id, layout| {
+                overview
+                    .tabs
+                    .iter()
+                    .find(|tab| &tab.id == id)
+                    .is_some_and(|tab| {
+                        !crate::surfaces::front_page::model::same_topology(&layout.root, &tab.panes)
+                    })
+            });
         }
         if let Some(overview) = clients.read(cx).overviews.get(&remote.computer.id) {
             let live = remote
@@ -236,6 +245,7 @@ impl RemoteClient {
             remote.delete_project = None;
             *remote.shell_placement.lock().unwrap() = None;
             remote.actions_pending.clear();
+            remote.closing_layouts.clear();
             remote.layout_hints.clear();
             remote.reopen_sessions.clear();
             remote.activate_session = None;
@@ -253,6 +263,9 @@ impl RemoteClient {
             remote.errors.clear();
         }
         remote.connection = connection;
+        let disconnected_computer =
+            (!matches!(connection, Connection::Opening | Connection::Connected))
+                .then(|| remote.computer.id.clone());
         let access = clients.update(cx, |state, cx| {
             state.front_page_access(&remote.computer, cx)
         });
@@ -315,6 +328,9 @@ impl RemoteClient {
         workspace.update(cx, |workspace, cx| {
             workspace.sync_remote(client, mission, overview, clients, cx)
         });
+        if let Some(computer) = disconnected_computer {
+            self.clear_pending_archives_for(&computer, cx);
+        }
         self.ensure_remote_library(cx);
         self.load_remote_metadata(cx);
         self.attach_remote_panes(cx);

@@ -38,6 +38,7 @@ impl RemoteClient {
             key,
             epoch: self.ui.epoch,
             remote,
+            pending_archive: None,
         })
     }
     pub(crate) fn complete_action<T>(
@@ -75,6 +76,7 @@ impl RemoteClient {
                     remote.action_error = Some(error);
                 }
                 if let Some(tab) = action.key.strip_prefix("layout:") {
+                    remote.closing_layouts.remove(tab);
                     remote.layout_hints.remove(tab);
                     if remote.navigation_generation != navigation_generation {
                         let mut staged = remote.shell_placement.lock().unwrap();
