@@ -30,9 +30,12 @@ make the whole board fail or create guessed ticket state.
 
 ## Derived cards and lanes
 
-Cards show the ticket summary, severity, blockers and triage state; linked
-mission and active slots; newest meaningful handoff; a real pending human ask;
-branch/worktree; and links to the contributing evidence.
+Cards are grouped in a compact, horizontally scrolling seven-lane board. Every
+lane remains visible when empty and shows its derived-state color, label and
+count. A card emphasizes its lane, ticket ID/severity/triage chips and title;
+it keeps a real pending human ask prominent in **Needs you**, with active slots,
+branch/worktree, handoff and contributing evidence as terse secondary rows and
+clickable source chips. The board remains read-only.
 
 Lane assignment is derived only, using this order:
 

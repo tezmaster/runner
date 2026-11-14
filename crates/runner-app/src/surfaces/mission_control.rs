@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, Context, FontWeight, IntoElement, MouseButton, SharedString, Window,
 };
-use runner_core::protocol::mission_control::MissionControlSnapshot;
+use runner_core::protocol::mission_control::{MissionControlLane, MissionControlSnapshot};
 use std::path::PathBuf;
 
 use crate::{file_links::FileLinkTarget, theme, NativeRoot};
@@ -82,7 +82,19 @@ impl NativeRoot {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let warning_count = snapshot.health.len();
-        let cards = snapshot.cards.into_iter().map(|card| {
+        let mut lanes = mission_control_lanes()
+            .into_iter()
+            .map(|lane| (lane, Vec::new()))
+            .collect::<Vec<_>>();
+        for card in snapshot.cards {
+            let (_, cards) = lanes
+                .iter_mut()
+                .find(|(lane, _)| *lane == card.lane)
+                .expect("every Mission Control lane is rendered");
+            cards.push(card);
+        }
+        let lanes = lanes.into_iter().map(|(lane, cards)| {
+            let cards = cards.into_iter().map(|card| {
             let mission = card
                 .mission
                 .as_ref()
@@ -100,20 +112,17 @@ impl NativeRoot {
                 .and_then(|mission| mission.newest_handoff.as_ref())
                 .map(|handoff| format!("Handoff: {handoff}"));
             let details = [
-                card.severity
-                    .map(|severity| format!("Severity: {severity}")),
-                card.triage_state.map(|state| format!("Triage: {state}")),
-                card.mission
-                    .as_ref()
-                    .map(|mission| format!("Active slots: {}", mission.active_slots)),
+                card.mission.as_ref().map(|mission| {
+                    format!("{} active slot{}", mission.active_slots, if mission.active_slots == 1 { "" } else { "s" })
+                }),
                 card.mission
                     .as_ref()
                     .and_then(|mission| mission.branch.as_ref())
-                    .map(|branch| format!("Branch: {branch}")),
+                    .map(|branch| format!("⌥ {branch}")),
                 card.mission
                     .as_ref()
                     .and_then(|mission| mission.worktree.as_ref())
-                    .map(|worktree| format!("Worktree: {worktree}")),
+                    .map(|worktree| format!("⌂ {worktree}")),
             ];
             let evidence = card.evidence.to_vec();
             let card = div()
@@ -122,53 +131,75 @@ impl NativeRoot {
                 .rounded_md()
                 .border_1()
                 .border_color(theme::border())
-                .bg(theme::panel())
+                .bg(theme::raised())
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(chip(card.ticket_id.clone(), theme::border()))
+                        .children(card.severity.map(|severity| chip(severity, theme::warning())))
+                        .children(card.triage_state.map(|state| chip(state, theme::accent())))
+                        .child(chip(lane_label(lane).to_owned(), lane_color(lane))),
+                )
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(card.summary))
                 .child(
                     div()
-                        .mt_1()
                         .text_sm()
                         .text_color(theme::muted())
-                        .child(format!("{} · {:?}{mission}", card.ticket_id, card.lane)),
+                        .truncate()
+                        .child(mission),
                 )
                 .children(card.blockers.into_iter().map(|blocker| {
                     div()
-                        .mt_1()
                         .text_sm()
-                        .text_color(theme::warning())
-                        .child(blocker)
+                        .text_color(theme::danger())
+                        .child(format!("Blocked · {blocker}"))
                 }))
                 .children(pending_question.map(|question| {
                     div()
-                        .mt_1()
                         .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::warning())
                         .child(question)
                 }))
                 .children(handoff.map(|handoff| {
                     div()
-                        .mt_1()
                         .text_sm()
                         .text_color(theme::muted())
                         .child(handoff)
                 }))
                 .children(details.into_iter().flatten().map(|detail| {
                     div()
-                        .mt_1()
                         .text_sm()
                         .text_color(theme::muted())
+                        .truncate()
                         .child(detail)
                 }))
                 .children(evidence.into_iter().map(|evidence| {
                     let path = evidence.path.clone();
                     let runner_mission = mission_id.clone();
+                    let source_label = match evidence.kind {
+                        runner_core::protocol::mission_control::MissionControlSourceKind::Ticket => "Ticket",
+                        runner_core::protocol::mission_control::MissionControlSourceKind::Triage => "Triage",
+                        runner_core::protocol::mission_control::MissionControlSourceKind::Runner => "Runner",
+                    };
                     let evidence = div()
                         .id(SharedString::from(format!("MISSION_CONTROL_EVIDENCE:{path}")))
-                        .mt_1()
-                        .text_sm()
+                        .px_1()
+                        .py_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_xs()
                         .text_color(theme::accent())
                         .cursor_pointer()
-                        .child(format!("Evidence: {path}"))
+                        .child(format!("{source_label} · {path}"))
                         .on_mouse_down(MouseButton::Left, cx.listener(move |root, _, window, cx| {
                             cx.stop_propagation();
                             if evidence.kind
@@ -201,11 +232,41 @@ impl NativeRoot {
             } else {
                 card
             }
+            });
+            let lane = div()
+                .id(SharedString::from(format!("MISSION_CONTROL_LANE:{}", lane_label(lane))))
+                .w(px(300.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .bg(theme::panel())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(div().size(px(8.)).rounded_full().bg(lane_color(lane)))
+                                .child(lane_label(lane)),
+                        )
+                        .child(chip(cards.len().to_string(), theme::border())),
+                )
+                .children(cards);
+            #[cfg(test)]
+            let lane = crate::theme_snapshot::record_fill("MISSION_CONTROL_LANE", lane);
+            lane
         });
         div()
             .id("mission-control")
             .size_full()
-            .overflow_y_scroll()
             .p(px(24.))
             .flex()
             .flex_col()
@@ -225,9 +286,63 @@ impl NativeRoot {
                     format!(" · {warning_count} source warning(s)")
                 }
             )))
-            .children(cards)
+            .child(
+                div()
+                    .id("MISSION_CONTROL_BOARD_SCROLL")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_x_scroll()
+                    .overflow_y_scroll()
+                    .child(div().flex().items_start().gap_3().children(lanes)),
+            )
             .into_any_element()
     }
+}
+
+fn mission_control_lanes() -> [MissionControlLane; 7] {
+    [
+        MissionControlLane::Closed,
+        MissionControlLane::NeedsYou,
+        MissionControlLane::Running,
+        MissionControlLane::VerifyLand,
+        MissionControlLane::Blocked,
+        MissionControlLane::Ready,
+        MissionControlLane::Backlog,
+    ]
+}
+
+fn lane_label(lane: MissionControlLane) -> &'static str {
+    match lane {
+        MissionControlLane::Closed => "Closed",
+        MissionControlLane::NeedsYou => "Needs you",
+        MissionControlLane::Running => "Running",
+        MissionControlLane::VerifyLand => "Verify / Land",
+        MissionControlLane::Blocked => "Blocked",
+        MissionControlLane::Ready => "Ready",
+        MissionControlLane::Backlog => "Backlog",
+    }
+}
+
+fn lane_color(lane: MissionControlLane) -> gpui::Hsla {
+    match lane {
+        MissionControlLane::NeedsYou | MissionControlLane::VerifyLand => theme::warning(),
+        MissionControlLane::Running | MissionControlLane::Ready => theme::accent(),
+        MissionControlLane::Blocked => theme::danger(),
+        MissionControlLane::Closed | MissionControlLane::Backlog => theme::muted(),
+    }
+}
+
+fn chip(label: impl Into<SharedString>, color: gpui::Hsla) -> AnyElement {
+    div()
+        .px_1()
+        .py_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(color)
+        .text_xs()
+        .text_color(color)
+        .child(label.into())
+        .into_any_element()
 }
 
 fn empty_state(description: impl Into<String>) -> AnyElement {
@@ -269,6 +384,22 @@ mod tests {
         MissionControlCard, MissionControlEvidence, MissionControlLane, MissionControlMission,
         MissionControlSourceKind,
     };
+
+    #[test]
+    fn lanes_follow_the_derived_precedence_order() {
+        assert_eq!(
+            mission_control_lanes(),
+            [
+                MissionControlLane::Closed,
+                MissionControlLane::NeedsYou,
+                MissionControlLane::Running,
+                MissionControlLane::VerifyLand,
+                MissionControlLane::Blocked,
+                MissionControlLane::Ready,
+                MissionControlLane::Backlog,
+            ]
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -371,7 +502,7 @@ mod tests {
                 severity: Some("high".into()),
                 blockers: vec!["needs evidence".into()],
                 triage_state: Some("review".into()),
-                lane: MissionControlLane::VerifyLand,
+                lane: MissionControlLane::Closed,
                 mission: Some(MissionControlMission {
                     id: mission.id.clone(),
                     title: mission.title.clone(),
@@ -411,6 +542,7 @@ mod tests {
         visual.run_until_parked();
 
         let card = visual.debug_bounds("MISSION_CONTROL_CARD").unwrap();
+        assert!(visual.debug_bounds("MISSION_CONTROL_LANE").is_some());
         let evidence = visual
             .debug_bounds("MISSION_CONTROL_EVIDENCE")
             .expect("Runner evidence renders on populated cards");
