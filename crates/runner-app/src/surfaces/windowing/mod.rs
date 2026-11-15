@@ -47,13 +47,16 @@ impl NativeRoot {
         if self.closing {
             return;
         }
+        self.window_active = window.is_window_active();
         self.report_current_subjects(cx);
         if window.is_window_active() {
             if let Err(error) = self.core(cx).mark_focused(&self.window_label) {
                 self.error = Some(error.to_string().into());
             }
             crate::notifications::refresh_permission(cx);
-            if self.route == AppRoute::Chat {
+            if self.remote_client.is_active() {
+                self.mark_remote_sessions_viewed_if_unobstructed(cx);
+            } else if self.route == AppRoute::Chat {
                 self.mark_active_tab_viewed(window, cx);
             }
         } else {
@@ -227,6 +230,8 @@ impl NativeRoot {
             AppRoute::Crews | AppRoute::NewCrew => Some("/crews".into()),
             AppRoute::CrewEditor(crew_id) => Some(format!("/crews/{crew_id}")),
             AppRoute::Mission(mission_id) => Some(format!("/missions/{mission_id}")),
+            AppRoute::Usage => Some("/usage".into()),
+            AppRoute::MissionControl => Some("/mission-control".into()),
             AppRoute::Settings => Some("/settings".into()),
             AppRoute::Launcher | AppRoute::ArchivedChat => None,
         }

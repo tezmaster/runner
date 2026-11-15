@@ -20,7 +20,7 @@ impl NativeRoot {
         let (chat_event_tx, mut chat_event_rx) =
             futures::channel::mpsc::unbounded::<runner_core::protocol::ClientEvent>();
         let mut chat_events = core.subscribe();
-        cx.background_spawn(async move {
+        let chat_events_task = cx.background_spawn(async move {
             loop {
                 match chat_events.recv().await {
                     Ok(event)
@@ -44,9 +44,8 @@ impl NativeRoot {
                     Err(runner_core::protocol::EventError::Closed) => break,
                 }
             }
-        })
-        .detach();
-        cx.spawn_in(window, async move |weak, cx| {
+        });
+        let chat_event_task = cx.spawn_in(window, async move |weak, cx| {
             while let Some(event) = chat_event_rx.next().await {
                 if weak
                     .update_in(cx, |this, window, cx| {
@@ -64,39 +63,60 @@ impl NativeRoot {
                     break;
                 }
             }
-        })
-        .detach();
+        });
 
         let (runtime_event_tx, mut runtime_event_rx) =
-            futures::channel::mpsc::unbounded::<String>();
+            futures::channel::mpsc::unbounded::<runner_core::protocol::ClientEvent>();
         let mut app_events = core.subscribe();
-        cx.background_spawn(async move {
+        let runtime_client = core.clone();
+        let runtime_events_task = cx.background_spawn(async move {
             loop {
                 match app_events.recv().await {
                     Ok(event)
                         if matches!(
                             event.name.as_str(),
-                            "runtime/changed" | "usage/updated" | "claude_accounts/changed"
+                            "runtime/changed"
+                                | "runtime/task-changed"
+                                | "usage/updated"
+                                | "claude_accounts/changed"
                         ) =>
                     {
-                        if runtime_event_tx.unbounded_send(event.name).is_err() {
+                        if runtime_event_tx.unbounded_send(event).is_err() {
                             break;
                         }
                     }
-                    Ok(_) | Err(runner_core::protocol::EventError::Lagged(_)) => {}
+                    Err(runner_core::protocol::EventError::Lagged(_)) => {
+                        if let Ok(tasks) = runtime_client.runtime_task_list() {
+                            let event = runner_core::protocol::ClientEvent {
+                                name: "runtime/task-changed".into(),
+                                payload: serde_json::to_value(tasks).unwrap(),
+                            };
+                            if runtime_event_tx.unbounded_send(event).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
                     Err(runner_core::protocol::EventError::Closed) => break,
                 }
             }
-        })
-        .detach();
-        cx.spawn(async move |weak, cx| {
+        });
+        let runtime_event_task = cx.spawn_in(window, async move |weak, cx| {
             while let Some(event) = runtime_event_rx.next().await {
-                let mut runtime_changed = event == "runtime/changed";
+                let mut events = vec![event];
                 while let Ok(pending) = runtime_event_rx.try_recv() {
-                    runtime_changed |= pending == "runtime/changed";
+                    events.push(pending);
                 }
+                let runtime_changed = events.iter().any(|event| event.name == "runtime/changed");
                 if weak
-                    .update(cx, |this, cx| {
+                    .update_in(cx, |this, window, cx| {
+                        for event in &events {
+                            if event.name == "runtime/task-changed" {
+                                if let Ok(tasks) = serde_json::from_value(event.payload.clone()) {
+                                    this.apply_agent_tasks(tasks, window, cx);
+                                }
+                            }
+                        }
                         if runtime_changed {
                             this.refresh_start_chat_runtimes(cx);
                             this.refresh_role_form_runtimes(cx);
@@ -105,6 +125,36 @@ impl NativeRoot {
                             this.refresh_agents_pane(cx);
                             this.usage_installed =
                                 crate::surfaces::app_shell::usage_installed(this.core(cx));
+                            let runtimes = this
+                                .core(cx)
+                                .runtime_status_list()
+                                .ok()
+                                .into_iter()
+                                .flat_map(|status| status.runtimes)
+                                .collect::<Vec<_>>();
+                            let supported = runtimes
+                                .iter()
+                                .filter(|runtime| !runtime.below_minimum)
+                                .map(|runtime| runtime.name)
+                                .collect::<Vec<_>>();
+                            this.clear_unblocked_gates(
+                                &surfaces::front_page::FrontPageTarget::Local,
+                                &supported,
+                            );
+                            this.agent_tasks.minimums = runtimes
+                                .into_iter()
+                                .filter(|runtime| runtime.below_minimum)
+                                .filter_map(|runtime| {
+                                    Some((
+                                        runtime.name,
+                                        runner_core::protocol::RuntimeVersionGate {
+                                            runtime: runtime.name,
+                                            installed_version: runtime.installed_version?,
+                                            min_version: runtime.min_version?,
+                                        },
+                                    ))
+                                })
+                                .collect();
                             this.agent_updates =
                                 crate::surfaces::app_shell::agents_with_updates(this.core(cx));
                         }
@@ -115,8 +165,7 @@ impl NativeRoot {
                     break;
                 }
             }
-        })
-        .detach();
+        });
 
         window.set_rem_size(px(16. * settings.app_zoom));
         let mut tabs = TabSet::from_rows(&nodes);
@@ -155,6 +204,10 @@ impl NativeRoot {
             AppRoute::Roles
         } else if route_path == "crews" {
             AppRoute::Crews
+        } else if route_path == "usage" {
+            AppRoute::Usage
+        } else if route_path == "mission-control" {
+            AppRoute::MissionControl
         } else if route_path == "settings" {
             AppRoute::Settings
         } else if window_label == "main" {
@@ -242,7 +295,9 @@ impl NativeRoot {
             | AppRoute::RoleDetail(_)
             | AppRoute::Crews
             | AppRoute::NewCrew
-            | AppRoute::CrewEditor(_) => vec![RuntimeLocation::Entity(initial_route.clone())],
+            | AppRoute::CrewEditor(_)
+            | AppRoute::Usage
+            | AppRoute::MissionControl => vec![RuntimeLocation::Entity(initial_route.clone())],
             _ => Vec::new(),
         };
         let runtime_navigation_index = (!runtime_navigation_history.is_empty()).then_some(0);
@@ -258,6 +313,7 @@ impl NativeRoot {
             window_label: window_label.clone(),
             log_dir,
             closing: false,
+            window_active: window.is_window_active(),
             app_store: app_store.clone(),
             store_revisions,
             tabs,
@@ -289,12 +345,34 @@ impl NativeRoot {
             pane_drop: None,
             pane_rename: None,
             _pane_rename_focus_subscription: None,
+            _pane_close_focus_subscription: None,
             terminal_close_confirm: None,
             pending_pane_closes: HashMap::new(),
             pending_tab_close: None,
             tab_landed_at: None,
             update_popover: crate::surfaces::update_ui::UpdatePopoverState::new(cx),
             quit_dialog: None,
+            agent_tasks: surfaces::background_tasks::BackgroundTasks {
+                tasks: core.runtime_task_list().unwrap_or_default(),
+                minimums: core
+                    .runtime_status_list()
+                    .ok()
+                    .into_iter()
+                    .flat_map(|status| status.runtimes)
+                    .filter(|runtime| runtime.below_minimum)
+                    .filter_map(|runtime| {
+                        Some((
+                            runtime.name,
+                            runner_core::protocol::RuntimeVersionGate {
+                                runtime: runtime.name,
+                                installed_version: runtime.installed_version?,
+                                min_version: runtime.min_version?,
+                            },
+                        ))
+                    })
+                    .collect(),
+                ..Default::default()
+            },
             agent_update: None,
             fork_confirm: None,
             forking_sessions: HashMap::new(),
@@ -311,6 +389,10 @@ impl NativeRoot {
             route: initial_route.clone(),
             settings_return_route: initial_route,
             usage_open: false,
+            usage_refresh_task: None,
+            usage_checked: None,
+            mission_usage: crate::surfaces::app_shell::MissionUsageState::new(cx),
+            mission_control: crate::surfaces::mission_control::MissionControlState::default(),
             claude_account_picker: None,
             usage_anchor: None,
             usage_installed: crate::surfaces::app_shell::usage_installed(&core),
@@ -353,6 +435,12 @@ impl NativeRoot {
                 this.leave_other_computers_when_signed_out(window, cx);
                 this.handle_app_store_update(cx);
             }),
+            _event_tasks: [
+                chat_events_task,
+                chat_event_task,
+                runtime_events_task,
+                runtime_event_task,
+            ],
         };
         root._appearance_subscription = Some(cx.observe_window_appearance(window, |_, _, cx| {
             cx.notify();
@@ -391,6 +479,16 @@ impl NativeRoot {
             }
             AppRoute::Crews => {
                 root.load_crew_page(cx);
+                window.focus(&root.root_focus, cx);
+            }
+            AppRoute::Usage => {
+                root.refresh_mission_usage(cx);
+                window.focus(&root.root_focus, cx);
+            }
+            AppRoute::MissionControl => {
+                if let Some(project_id) = root.active_project_id(cx) {
+                    root.refresh_mission_control(project_id, cx);
+                }
                 window.focus(&root.root_focus, cx);
             }
             AppRoute::CrewEditor(crew_id) => {

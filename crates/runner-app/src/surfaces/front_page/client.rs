@@ -61,6 +61,17 @@ impl RemoteAccess {
                 .is_some_and(|known| features.iter().all(|feature| known.contains(*feature)))
     }
 
+    /// Whether this host is known not to serve `feature`, unlike `supports`, which also says no
+    /// before the features are discovered.
+    pub(crate) fn lacks(&self, feature: &str) -> bool {
+        let state = self.state.read().unwrap();
+        state.valid
+            && state
+                .features
+                .as_ref()
+                .is_some_and(|known| !known.contains(feature))
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.state.read().unwrap().valid
     }
@@ -141,6 +152,73 @@ impl FrontPageClient {
         }
         serde_json::from_value(result.result)
             .map_err(|_| ClientError::msg("The computer returned an invalid action result."))
+    }
+
+    pub(crate) fn usage(&self, popover: bool) -> ClientResult<runner_core::companion::Usage> {
+        self.action("usage", ActionRequest::Usage { id: 0, popover })
+    }
+
+    pub(crate) fn start_runtime_task(
+        &self,
+        runtime: runner_core::protocol::Runtime,
+    ) -> ClientResult<runner_core::protocol::RuntimeUpdateTask> {
+        if !self.is_remote() {
+            return self.daemon.runtime_task_start(runtime);
+        }
+        self.action(
+            "runtimeTaskStart",
+            ActionRequest::RuntimeTaskStart {
+                id: 0,
+                runtime: runtime.key().into(),
+            },
+        )
+    }
+
+    pub(crate) fn runtime_task(
+        &self,
+        runtime: runner_core::protocol::Runtime,
+    ) -> ClientResult<Option<runner_core::protocol::RuntimeUpdateTask>> {
+        if !self.is_remote() {
+            return self
+                .daemon
+                .runtime_task_list()
+                .map(|tasks| tasks.into_iter().find(|task| task.runtime == runtime));
+        }
+        self.action(
+            "runtimeTask",
+            ActionRequest::RuntimeTask {
+                id: 0,
+                runtime: runtime.key().into(),
+            },
+        )
+    }
+
+    pub(crate) fn task_terminal(
+        &self,
+        id: &str,
+    ) -> Option<(
+        String,
+        DaemonClient,
+        crate::surfaces::remote_client::transport::AttachmentLifetime,
+    )> {
+        let FrontPageTarget::Remote { computer, .. } = &self.target else {
+            return None;
+        };
+        let config = runner_core::remote::RemoteTerminal {
+            computer: computer.clone(),
+            session: id.into(),
+            cols: 80,
+            rows: 24,
+            take_control: true,
+        };
+        let address = config.address();
+        let (client, lifetime) = crate::surfaces::remote_client::transport::RemoteTransport::client(
+            self.daemon.clone(),
+            config,
+            "Agent update".into(),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        Some((address, client, lifetime))
     }
 
     pub(crate) fn catalog(&self) -> ClientResult<Catalog> {
@@ -685,27 +763,41 @@ impl FrontPageClient {
         &self,
         mission: String,
         session: String,
-    ) -> ClientResult<runner_core::protocol::model::Mission> {
-        if self.is_remote() {
-            return Err(ClientError::msg("Linking is available on the host."));
+    ) -> ClientResult<Option<runner_core::protocol::model::Mission>> {
+        if !self.is_remote() {
+            return self
+                .daemon
+                .mission_link(runner_core::protocol::MissionLinkInput {
+                    mission_id: mission,
+                    session_id: session,
+                    no_report: false,
+                    caller_session_id: None,
+                })
+                .map(Some);
         }
-        self.daemon
-            .mission_link(runner_core::protocol::MissionLinkInput {
-                mission_id: mission,
-                session_id: session,
-                no_report: false,
-                caller_session_id: None,
-            })
+        self.action::<()>(
+            "linkMission",
+            ActionRequest::LinkMission {
+                id: 0,
+                mission,
+                session,
+            },
+        )
+        .map(|()| None)
     }
 
     pub(crate) fn unlink_mission(
         &self,
         mission: String,
-    ) -> ClientResult<runner_core::protocol::model::Mission> {
-        if self.is_remote() {
-            return Err(ClientError::msg("Linking is available on the host."));
+    ) -> ClientResult<Option<runner_core::protocol::model::Mission>> {
+        if !self.is_remote() {
+            return self.daemon.mission_unlink(&mission).map(Some);
         }
-        self.daemon.mission_unlink(&mission)
+        self.action::<()>(
+            "unlinkMission",
+            ActionRequest::UnlinkMission { id: 0, mission },
+        )
+        .map(|()| None)
     }
 
     pub(crate) fn archive_mission_state(
@@ -771,24 +863,78 @@ impl FrontPageClient {
         })
     }
 
+    pub(crate) fn archive_chat_with_missions(
+        &self,
+        session: &str,
+        linked_missions: &[String],
+    ) -> ClientResult<Vec<String>> {
+        if !self.is_remote() {
+            return self
+                .daemon
+                .session_archive_direct_with_missions(session, true);
+        }
+        let value: serde_json::Value = self.action(
+            "archive",
+            ActionRequest::Archive {
+                id: 0,
+                target: ActionTarget {
+                    kind: ActionKind::Session,
+                    id: session.into(),
+                },
+                with_missions: true,
+            },
+        )?;
+        if let Some(archived) = value
+            .get("archivedMissions")
+            .and_then(|entry| entry.as_array())
+        {
+            return Ok(archived
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect());
+        }
+        // Older remote hosts ignore `withMissions` and return null; archive
+        // each resolved linked mission explicitly so both peers end up matching.
+        let mut archived = Vec::with_capacity(linked_missions.len());
+        for mission_id in linked_missions {
+            self.archive(ActionTarget {
+                kind: ActionKind::Mission,
+                id: mission_id.clone(),
+            })?;
+            archived.push(mission_id.clone());
+        }
+        Ok(archived)
+    }
+
     pub(crate) fn archive_sessions(
         &self,
         plan: Vec<(String, ArchiveSessionOperation)>,
-    ) -> (Vec<String>, Option<String>) {
+    ) -> (Vec<String>, Vec<String>, Option<String>) {
         let mut removed = Vec::new();
+        let mut archived_missions = Vec::new();
         for (session, operation) in plan {
             let result = match operation {
-                ArchiveSessionOperation::CloseTerminal => self.close(&session),
+                ArchiveSessionOperation::CloseTerminal => self.close(&session).map(|()| Vec::new()),
                 ArchiveSessionOperation::ArchiveChat { running } => {
-                    self.archive_chat(&session, running)
+                    self.archive_chat(&session, running).map(|()| Vec::new())
                 }
+                ArchiveSessionOperation::ArchiveChatWithMissions {
+                    linked_missions, ..
+                } => self.archive_chat_with_missions(&session, &linked_missions),
             };
-            if let Err(error) = result {
-                return (removed, Some(error.to_string()));
+            match result {
+                Ok(missions) => {
+                    removed.push(session);
+                    for mission_id in missions {
+                        if !archived_missions.contains(&mission_id) {
+                            archived_missions.push(mission_id);
+                        }
+                    }
+                }
+                Err(error) => return (removed, archived_missions, Some(error.to_string())),
             }
-            removed.push(session);
         }
-        (removed, None)
+        (removed, archived_missions, None)
     }
 
     pub(crate) fn resume_mission(
@@ -840,7 +986,14 @@ impl FrontPageClient {
                 ActionKind::Project => Err(ClientError::msg("Projects use deleteProject.")),
             };
         }
-        self.action("archive", ActionRequest::Archive { id: 0, target })
+        self.action(
+            "archive",
+            ActionRequest::Archive {
+                id: 0,
+                target,
+                with_missions: false,
+            },
+        )
     }
 
     pub(crate) fn start_mission(
@@ -1110,8 +1263,25 @@ pub(crate) struct ChatLaunched {
     pub(crate) layout: Option<runner_app::pane_layout::PaneLayout>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ArchiveSessionOperation {
-    ArchiveChat { running: bool },
+    ArchiveChat {
+        running: bool,
+    },
+    ArchiveChatWithMissions {
+        running: bool,
+        linked_missions: Vec<String>,
+    },
     CloseTerminal,
+}
+
+impl ArchiveSessionOperation {
+    pub(crate) fn linked_missions(&self) -> &[String] {
+        match self {
+            Self::ArchiveChatWithMissions {
+                linked_missions, ..
+            } => linked_missions,
+            Self::ArchiveChat { .. } | Self::CloseTerminal => &[],
+        }
+    }
 }

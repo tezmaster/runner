@@ -73,17 +73,31 @@ impl SessionManager {
         let Some(definition) = crate::runtimes::for_key(&role.runtime).catalog() else {
             return Ok(role.clone());
         };
-        if role.command != definition.command {
-            return Ok(role.clone());
-        }
-        let effective = crate::runtime_status::effective_runtime_command(
-            definition.name,
-            pool,
-            &self.shell_env,
-            &self.discovery_state,
-        )?;
         let mut resolved = role.clone();
-        resolved.command = effective.command;
+        if role.command == definition.command {
+            resolved.command = crate::runtime_status::effective_runtime_command(
+                definition.name,
+                pool,
+                &self.shell_env,
+                &self.discovery_state,
+            )?
+            .command;
+        }
+        let discovery = self
+            .discovery_state
+            .read()
+            .map_err(|_| Error::msg("runtime discovery lock poisoned"))?;
+        let installed = discovery
+            .versions
+            .installed(definition.name, &resolved.command);
+        if crate::runtime_status::versions::below_minimum(installed, definition.min_version) {
+            return Err(runner_core::protocol::runtime::RuntimeVersionGate {
+                runtime: definition.name,
+                installed_version: installed.unwrap().into(),
+                min_version: definition.min_version.unwrap().into(),
+            }
+            .into());
+        }
         Ok(resolved)
     }
 
@@ -224,6 +238,21 @@ impl SessionManager {
         mission_bus_dir: Option<&Path>,
         pool: Option<&DbPool>,
     ) -> bool {
+        let options = pool
+            .and_then(|pool| crate::db::runtime_launch_options(pool).ok())
+            .and_then(|options| options.get(&role.runtime).cloned())
+            .unwrap_or_default();
+        let effective_role = crate::runtimes::apply_launch_options(role, spec.mission, &options);
+        let role = &effective_role;
+        spec.args.clone_from(&role.args);
+        if !spec.mission && !options.status_hooks {
+            spec.env
+                .insert(crate::runtimes::STATUS_HOOKS_ENV.into(), "false".into());
+        }
+        if !options.remote_plugin_catalog {
+            spec.env
+                .insert(crate::runtimes::REMOTE_PLUGIN_ENV.into(), "false".into());
+        }
         let adapter = crate::runtimes::for_key(&role.runtime);
         let env = crate::shell_path::LoginShellEnv {
             path: spec.shell_path.clone(),
@@ -258,11 +287,25 @@ impl SessionManager {
             first_turn
         };
         adapter.prepare_capture(app_data_dir, &spec.session_id);
-        if let Some(hooks) = adapter.status_hooks() {
+        if let Some(hooks) = adapter.status_hooks().filter(|_| {
+            options.status_hooks
+                || spec.mission
+                || matches!(
+                    Runtime::parse(&role.runtime),
+                    Some(
+                        Runtime::Codex
+                            | Runtime::ClaudeCode
+                            | Runtime::Pi
+                            | Runtime::Cursor
+                            | Runtime::OpenCode
+                            | Runtime::Copilot
+                            | Runtime::Grok
+                    )
+                )
+        }) {
             let env = hooks.env(&role.args, plan, app_data_dir, spec);
             spec.env.extend(env);
         }
-        spec.args = adapter.launch_role_args(&spec.args);
         spec.env
             .extend(adapter.launch_context_env(&crate::runtimes::LaunchContext {
                 default_model: default_model.as_deref(),
@@ -279,20 +322,14 @@ impl SessionManager {
                 system_prompt: None,
                 first_turn,
             }));
-        let mut composed: Vec<String> = Vec::new();
-        if plan.prepend {
-            composed.extend(plan.args.iter().cloned());
-            composed.append(&mut spec.args);
-        } else {
-            composed.append(&mut spec.args);
-            composed.extend(plan.args.iter().cloned());
-        }
-        let first_turn_for_argv =
-            crate::runtimes::for_key(&role.runtime).first_turn_argv(first_turn);
-        let delivered_via_argv = !first_turn_for_argv.is_empty();
-        composed.extend(crate::runtimes::for_key(&role.runtime).mission_dir_args(mission_bus_dir));
-        for extra in
-            crate::runtimes::for_key(&role.runtime).launch_args(&crate::runtimes::LaunchContext {
+        let custom_flags = crate::runtimes::custom_flags::parse_lossy(&options.custom_flags);
+        let (args, _, delivered_via_argv) = compose_args(
+            adapter,
+            &custom_flags,
+            &spec.args,
+            plan,
+            mission_bus_dir,
+            &crate::runtimes::LaunchContext {
                 default_model: default_model.as_deref(),
                 env: &spec.env,
                 cwd: spec.cwd.as_deref(),
@@ -308,11 +345,9 @@ impl SessionManager {
                     .as_deref(),
                 first_turn,
                 mission: spec.mission,
-            })
-        {
-            composed.push(extra);
-        }
-        spec.args = composed;
+            },
+        );
+        spec.args = args;
         if is_terminal_shell(role) && !spec.mission {
             crate::shell_integration::inject(spec, app_data_dir, |name| std::env::var(name).ok());
         }
@@ -460,4 +495,802 @@ pub(crate) fn runtime_direct_role(
         created_at: now,
         updated_at: now,
     })
+}
+
+fn compose_args(
+    adapter: &dyn crate::runtimes::RuntimeAdapter,
+    custom_flags: &[String],
+    role_args: &[String],
+    plan: &router::runtime::ResumePlan,
+    mission_dir: Option<&Path>,
+    ctx: &crate::runtimes::LaunchContext<'_>,
+) -> (Vec<String>, std::ops::Range<usize>, bool) {
+    let mut args = Vec::new();
+    if plan.prepend {
+        args.extend(plan.args.iter().cloned());
+    }
+    let custom_start = args.len();
+    args.extend(custom_flags.iter().cloned());
+    let custom_end = args.len();
+    args.extend(adapter.launch_role_args(role_args));
+    if !plan.prepend {
+        args.extend(plan.args.iter().cloned());
+    }
+    args.extend(adapter.mission_dir_args(mission_dir));
+    args.extend(adapter.launch_args(ctx));
+    (
+        args,
+        custom_start..custom_end,
+        !adapter.first_turn_argv(ctx.first_turn).is_empty(),
+    )
+}
+
+#[derive(Default)]
+pub(crate) struct PreviewArgsOverrides<'a> {
+    pub(crate) model: Option<&'a str>,
+    pub(crate) effort: Option<&'a str>,
+    pub(crate) prior_key: Option<&'a str>,
+    pub(crate) codex_speed: Option<crate::model::CodexSpeed>,
+    pub(crate) system_prompt: Option<&'a str>,
+}
+
+pub(crate) fn compose_preview_args(
+    runtime: Runtime,
+    mission: bool,
+    options: &runner_core::protocol::runtime::RuntimeLaunchOptions,
+    app_data_dir: &Path,
+    mut env: BTreeMap<String, String>,
+    overrides: PreviewArgsOverrides<'_>,
+) -> (Vec<String>, std::ops::Range<usize>) {
+    let PreviewArgsOverrides {
+        model,
+        effort,
+        prior_key,
+        codex_speed,
+        system_prompt,
+    } = overrides;
+    let adapter = crate::runtimes::adapter(runtime);
+    let role = Role {
+        id: String::new(),
+        handle: String::new(),
+        display_name: String::new(),
+        runtime: runtime.key().into(),
+        command: String::new(),
+        args: if mission {
+            adapter.permissions().mission_args()
+        } else {
+            Vec::new()
+        },
+        working_dir: None,
+        system_prompt: system_prompt.map(str::to_owned),
+        env: HashMap::new(),
+        model: Some(model.unwrap_or("<model>").into()),
+        effort: Some(effort.unwrap_or("<effort>").into()),
+        codex_speed,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let role = crate::runtimes::apply_launch_options(&role, mission, options);
+    if !mission && !options.status_hooks {
+        env.insert(crate::runtimes::STATUS_HOOKS_ENV.into(), "false".into());
+    }
+    if !options.remote_plugin_catalog {
+        env.insert(crate::runtimes::REMOTE_PLUGIN_ENV.into(), "false".into());
+    }
+    let mut plan = adapter.resume_plan(prior_key);
+    if let Some(key) = &plan.assigned_key {
+        for arg in &mut plan.args {
+            if arg == key {
+                *arg = "<session id>".into();
+            }
+        }
+    }
+    let first_turn = if mission {
+        "<role prompt, crew notes and mission goal>"
+    } else {
+        "<first message>"
+    };
+    let ctx = crate::runtimes::LaunchContext {
+        default_model: None,
+        env: &env,
+        cwd: None,
+        role_args: &role.args,
+        app_data_dir,
+        session_id: "<session id>",
+        resuming: prior_key.is_some(),
+        mission,
+        model: role.model.as_deref(),
+        effort: role.effort.as_deref(),
+        codex_speed,
+        system_prompt,
+        first_turn: Some(first_turn),
+    };
+    let custom_flags = crate::runtimes::custom_flags::parse_lossy(&options.custom_flags);
+    let (args, custom_range, _) = compose_args(
+        adapter,
+        &custom_flags,
+        &role.args,
+        &plan,
+        mission.then_some(Path::new("<mission folder>")),
+        &ctx,
+    );
+    (args, custom_range)
+}
+
+impl SessionManager {
+    pub(crate) fn command_preview(
+        &self,
+        runtime: Runtime,
+        command: &str,
+        mission: bool,
+        options: &runner_core::protocol::runtime::RuntimeLaunchOptions,
+        app_data_dir: &Path,
+        env: BTreeMap<String, String>,
+    ) -> runner_core::protocol::runtime::RuntimeCommandPreview {
+        let (args, custom_range) = compose_preview_args(
+            runtime,
+            mission,
+            options,
+            app_data_dir,
+            env,
+            PreviewArgsOverrides::default(),
+        );
+        command_lines(
+            runtime,
+            command,
+            &args,
+            custom_range,
+            mission,
+            options,
+            app_data_dir,
+        )
+    }
+}
+
+fn command_lines(
+    runtime: Runtime,
+    command: &str,
+    args: &[String],
+    custom_range: std::ops::Range<usize>,
+    mission: bool,
+    options: &runner_core::protocol::runtime::RuntimeLaunchOptions,
+    app_data_dir: &Path,
+) -> runner_core::protocol::runtime::RuntimeCommandPreview {
+    use runner_core::protocol::runtime::{
+        RuntimeCommandLine, RuntimeCommandNote as Note, RuntimeCommandPreview,
+        RuntimeLaunchOption as OptionKey,
+    };
+    let mut lines = vec![RuntimeCommandLine {
+        command: command.into(),
+        note: Note::None,
+        option: None,
+    }];
+    let mut i = 0;
+    let mut hooks = Vec::new();
+    while i < args.len() {
+        if i == custom_range.start && !custom_range.is_empty() {
+            let formatted =
+                crate::runtimes::custom_flags::format_preview_args(&args[custom_range.clone()]);
+            lines.push(RuntimeCommandLine {
+                command: format!("  {formatted}"),
+                note: Note::CustomFlags,
+                option: None,
+            });
+            i = custom_range.end;
+            continue;
+        }
+        let arg = &args[i];
+        let takes_value = [
+            "-c",
+            "--config",
+            "--ask-for-approval",
+            "--sandbox",
+            "--permission-mode",
+            "--model",
+            "-m",
+            "--effort",
+            "--thinking",
+            "--reasoning-effort",
+            "--add-dir",
+            "--settings",
+            "--enable",
+            "-e",
+            "--plugin-dir",
+            "--log-file",
+            "--session-id",
+            "--prompt",
+            "--",
+        ]
+        .contains(&arg.as_str());
+        let count = if takes_value && i + 1 < args.len() {
+            2
+        } else {
+            1
+        };
+        let tokens = &args[i..i + count];
+        let mut code = tokens.join(" ");
+        let mut note = Note::Always;
+        let mut option = None;
+        if code.contains("<model>") || code.contains("<effort>") {
+            note = if mission {
+                Note::FromRole
+            } else {
+                Note::FromChat
+            };
+        }
+        if code.contains("<mission folder>") {
+            note = Note::MissionFiles;
+        }
+        if code.contains("<first message>") || code.contains("<role prompt,") {
+            note = if mission {
+                Note::FirstTurn
+            } else {
+                Note::FromChat
+            };
+        }
+        if code.contains("tui.terminal_title") {
+            note = Note::NamesChat;
+        }
+        if code.contains("features.remote_plugin=false") {
+            note = Note::CatalogOff;
+            option = Some(OptionKey::RemotePluginCatalog);
+        }
+        if [
+            "--ask-for-approval",
+            "--sandbox",
+            "--permission-mode",
+            "--dangerously-skip-permissions",
+        ]
+        .contains(&arg.as_str())
+        {
+            note = if mission {
+                Note::AlwaysInMissions
+            } else if runtime == Runtime::Codex {
+                Note::CodexBypass
+            } else if runtime == Runtime::Antigravity {
+                Note::AntigravityBypass
+            } else {
+                Note::ClaudeBypass
+            };
+            option = (!mission).then_some(OptionKey::Bypass);
+        }
+        if arg == "--settings" && runtime == Runtime::Antigravity {
+            if let [_, settings] = crate::runtimes::antigravity::antigravity_settings_args(
+                &[],
+                Path::new("<Runner data>"),
+            )
+            .as_slice()
+            {
+                code = format!("--settings {settings}");
+            }
+            note = Note::NamesChat;
+        } else if arg == "--settings" {
+            if let Some(value) = tokens
+                .get(1)
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+            {
+                let events = value["hooks"].as_object().map_or(0, |hooks| hooks.len());
+                code = format!("--settings {{\"tui\":\"fullscreen\",\"theme\":\"auto\",\"hooks\":{{…{events} events}}{}}}", if value["skipDangerousModePermissionPrompt"] == true { ",\"skipDangerousModePermissionPrompt\":true" } else { "" });
+            }
+            note = if mission {
+                Note::AlwaysInMissions
+            } else if options.status_hooks && options.bypass {
+                Note::HooksBypass
+            } else if options.bypass {
+                Note::IdentityBypass
+            } else if options.status_hooks {
+                Note::StatusHooks
+            } else {
+                Note::Identity
+            };
+            option = if mission {
+                None
+            } else if options.status_hooks {
+                Some(OptionKey::StatusHooks)
+            } else {
+                options.bypass.then_some(OptionKey::Bypass)
+            };
+        }
+        if code.contains("hooks.")
+            || code.contains("mcp_servers.runner_hooks")
+            || code == "--enable hooks"
+            || code == "--dangerously-bypass-hook-trust"
+        {
+            hooks.push(code);
+            i += count;
+            continue;
+        }
+        if arg == "-e" || arg == "--plugin-dir" {
+            note = if mission {
+                Note::AlwaysInMissions
+            } else if options.status_hooks {
+                Note::StatusHooks
+            } else {
+                Note::Identity
+            };
+            option = (!mission && options.status_hooks).then_some(OptionKey::StatusHooks);
+        }
+        code = code.replace(app_data_dir.to_string_lossy().as_ref(), "<Runner data>");
+        let combine = lines.last().is_some_and(|line| {
+            line.note != Note::CustomFlags
+                && ((arg == "--sandbox" && line.command.contains("--ask-for-approval"))
+                    || (code.contains("<effort>") && line.command.contains("<model>")))
+        });
+        if combine {
+            let line = lines.last_mut().unwrap();
+            line.command.push(' ');
+            line.command.push_str(&code);
+        } else {
+            lines.push(RuntimeCommandLine {
+                command: format!("  {code}"),
+                note,
+                option,
+            });
+        }
+        i += count;
+    }
+    if !hooks.is_empty() {
+        let count = hooks
+            .iter()
+            .filter(|line| line.starts_with("-c hooks."))
+            .count();
+        let note = if mission {
+            Note::AlwaysInMissions
+        } else if options.status_hooks {
+            Note::StatusHooks
+        } else {
+            Note::Identity
+        };
+        let option = (!mission && options.status_hooks).then_some(OptionKey::StatusHooks);
+        let hook_lines = [
+            RuntimeCommandLine {
+                command: "  --enable hooks --dangerously-bypass-hook-trust".into(),
+                note: note.clone(),
+                option,
+            },
+            RuntimeCommandLine {
+                command: format!(
+                    "  -c mcp_servers.runner_hooks={{…}} -c hooks.<event>=[…] × {count}"
+                ),
+                note: note.clone(),
+                option,
+            },
+        ];
+        let index = lines
+            .iter()
+            .position(|line| {
+                line.command.contains("<first message>") || line.command.contains("<role prompt,")
+            })
+            .unwrap_or(lines.len());
+        lines.splice(index..index, hook_lines);
+    }
+    RuntimeCommandPreview {
+        lines,
+        custom_flags_warning: None,
+    }
+}
+
+#[cfg(test)]
+mod launch_preview_tests {
+    use super::*;
+    use runner_core::protocol::runtime::RuntimeLaunchOptions;
+
+    #[test]
+    fn preview_uses_composed_arguments_and_tracks_switches() {
+        let core = crate::test_support::test_core();
+        let root = tempfile::tempdir().unwrap();
+        let options = RuntimeLaunchOptions {
+            bypass: true,
+            remote_plugin_catalog: false,
+            status_hooks: false,
+            custom_flags: String::new(),
+        };
+        let preview = core.sessions.command_preview(
+            Runtime::Codex,
+            "codex",
+            false,
+            &options,
+            root.path(),
+            BTreeMap::new(),
+        );
+        let text = preview
+            .lines
+            .iter()
+            .map(|line| line.command.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for value in [
+            "--ask-for-approval never",
+            "--sandbox danger-full-access",
+            "--model <model>",
+            "model_reasoning_effort=<effort>",
+            "features.remote_plugin=false",
+            "hooks.<event>=[…] × 2",
+            "<first message>",
+        ] {
+            assert!(text.contains(value), "{value}: {text}");
+        }
+        let mission = core.sessions.command_preview(
+            Runtime::Codex,
+            "codex",
+            true,
+            &options,
+            root.path(),
+            BTreeMap::new(),
+        );
+        let defaults = core.sessions.command_preview(
+            Runtime::Codex,
+            "codex",
+            true,
+            &RuntimeLaunchOptions {
+                remote_plugin_catalog: false,
+                ..Default::default()
+            },
+            root.path(),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            serde_json::to_value(mission).unwrap(),
+            serde_json::to_value(defaults).unwrap()
+        );
+        let preview = core.sessions.command_preview(
+            Runtime::Trae,
+            "traecli",
+            false,
+            &RuntimeLaunchOptions::default(),
+            root.path(),
+            BTreeMap::new(),
+        );
+        let env = BTreeMap::new();
+        let ctx = crate::runtimes::LaunchContext {
+            default_model: None,
+            env: &env,
+            cwd: None,
+            role_args: &[],
+            app_data_dir: root.path(),
+            session_id: "<session id>",
+            resuming: false,
+            mission: false,
+            model: Some("<model>"),
+            effort: Some("<effort>"),
+            codex_speed: None,
+            system_prompt: None,
+            first_turn: Some("<first message>"),
+        };
+        let adapter = crate::runtimes::adapter(Runtime::Trae);
+        let (args, _, _) = compose_args(adapter, &[], &[], &adapter.resume_plan(None), None, &ctx);
+        assert_eq!(
+            preview.lines[1..]
+                .iter()
+                .map(|line| line.command.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+            args.join(" ")
+        );
+
+        for mission in [false, true] {
+            let agy_preview = core.sessions.command_preview(
+                Runtime::Antigravity,
+                "agy",
+                mission,
+                &RuntimeLaunchOptions::default(),
+                root.path(),
+                BTreeMap::new(),
+            );
+            let agy_text = agy_preview
+                .lines
+                .iter()
+                .map(|line| line.command.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let normalized_agy = agy_text.replace('\\', "/");
+            assert!(
+                normalized_agy
+                    .contains("--log-file <Runner data>/antigravity/logs/<session id>.log"),
+                "{agy_text}"
+            );
+            assert!(
+                !agy_text.contains("antigravity-hooks"),
+                "legacy hooks workspace must not appear in preview: {agy_text}"
+            );
+            assert!(agy_preview.lines.iter().all(|line| {
+                line.option
+                    != Some(runner_core::protocol::runtime::RuntimeLaunchOption::StatusHooks)
+                    && line.note != runner_core::protocol::runtime::RuntimeCommandNote::StatusHooks
+            }));
+            assert!(!agy_text.contains("--add-dir"), "{agy_text}");
+            if mission {
+                assert!(agy_text.contains("--dangerously-skip-permissions"));
+            } else {
+                assert!(!agy_text.contains("--dangerously-skip-permissions"));
+            }
+        }
+
+        for mission in [false, true] {
+            let agy_bypass = core.sessions.command_preview(
+                Runtime::Antigravity,
+                "agy",
+                mission,
+                &options,
+                root.path(),
+                BTreeMap::new(),
+            );
+            let bypass_line = agy_bypass
+                .lines
+                .iter()
+                .find(|line| line.command.trim() == "--dangerously-skip-permissions")
+                .expect("Antigravity preview should show --dangerously-skip-permissions when bypass is on");
+            if mission {
+                assert_eq!(
+                    bypass_line.note,
+                    runner_core::protocol::runtime::RuntimeCommandNote::AlwaysInMissions
+                );
+                assert_eq!(bypass_line.option, None);
+            } else {
+                assert_eq!(
+                    bypass_line.note,
+                    runner_core::protocol::runtime::RuntimeCommandNote::AntigravityBypass
+                );
+                assert_eq!(
+                    bypass_line.option,
+                    Some(runner_core::protocol::runtime::RuntimeLaunchOption::Bypass)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn antigravity_preview_shows_title_hook_settings_without_disturbing_claude() {
+        use runner_core::protocol::runtime::{RuntimeCommandNote, RuntimeLaunchOption};
+
+        let core = crate::test_support::test_core();
+        let root = tempfile::tempdir().unwrap();
+        let app_data = root.path().join("Jason's Runner Data");
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        for mission in [false, true] {
+            let preview = core.sessions.command_preview(
+                Runtime::Antigravity,
+                "agy",
+                mission,
+                &RuntimeLaunchOptions::default(),
+                &app_data,
+                BTreeMap::new(),
+            );
+            let settings_line = preview
+                .lines
+                .iter()
+                .find(|line| line.command.trim_start().starts_with("--settings "))
+                .expect("Antigravity preview should show --settings");
+            assert_eq!(settings_line.note, RuntimeCommandNote::NamesChat);
+            assert_eq!(settings_line.option, None);
+            assert!(!settings_line.command.contains("fullscreen"));
+            assert!(settings_line.command.contains("<Runner data>"));
+            assert!(!settings_line
+                .command
+                .contains(app_data.to_string_lossy().as_ref()));
+            let json_str = settings_line
+                .command
+                .trim_start()
+                .strip_prefix("--settings ")
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+            assert_eq!(parsed["title"]["type"], "command");
+            assert_eq!(parsed["title"]["enabled"], true);
+            assert!(parsed["title"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("hook title"));
+        }
+
+        let claude = core.sessions.command_preview(
+            Runtime::ClaudeCode,
+            "claude",
+            false,
+            &RuntimeLaunchOptions {
+                bypass: false,
+                remote_plugin_catalog: true,
+                status_hooks: true,
+                custom_flags: String::new(),
+            },
+            &app_data,
+            BTreeMap::new(),
+        );
+        let claude_settings = claude
+            .lines
+            .iter()
+            .find(|line| line.command.trim_start().starts_with("--settings "))
+            .expect("Claude Code preview should show --settings");
+        assert!(claude_settings.command.contains("\"tui\":\"fullscreen\""));
+        assert_eq!(claude_settings.note, RuntimeCommandNote::StatusHooks);
+        assert_eq!(
+            claude_settings.option,
+            Some(RuntimeLaunchOption::StatusHooks)
+        );
+    }
+
+    #[test]
+    fn custom_flags_preview_matches_composed_argv_and_is_absent_when_empty() {
+        use runner_core::protocol::runtime::RuntimeCommandNote;
+
+        let core = crate::test_support::test_core();
+        let root = tempfile::tempdir().unwrap();
+        let raw = r#"--search -c model_verbosity=high --add-dir "/tmp/runner qa/extra dir""#;
+        let options = RuntimeLaunchOptions {
+            custom_flags: raw.into(),
+            ..Default::default()
+        };
+
+        for mission in [false, true] {
+            let preview = core.sessions.command_preview(
+                Runtime::Codex,
+                "codex",
+                mission,
+                &options,
+                root.path(),
+                BTreeMap::new(),
+            );
+            assert_eq!(preview.lines[0].command, "codex");
+            assert_eq!(preview.lines[1].note, RuntimeCommandNote::CustomFlags);
+            assert_eq!(preview.lines[1].option, None);
+            let parsed =
+                crate::runtimes::custom_flags::parse_custom_flags(preview.lines[1].command.trim())
+                    .unwrap();
+            assert_eq!(
+                parsed,
+                vec![
+                    "--search",
+                    "-c",
+                    "model_verbosity=high",
+                    "--add-dir",
+                    "/tmp/runner qa/extra dir",
+                ]
+            );
+            assert_eq!(
+                preview
+                    .lines
+                    .iter()
+                    .filter(|l| l.note == RuntimeCommandNote::CustomFlags)
+                    .count(),
+                1
+            );
+
+            let empty_preview = core.sessions.command_preview(
+                Runtime::Codex,
+                "codex",
+                mission,
+                &RuntimeLaunchOptions::default(),
+                root.path(),
+                BTreeMap::new(),
+            );
+            assert!(empty_preview
+                .lines
+                .iter()
+                .all(|l| l.note != RuntimeCommandNote::CustomFlags));
+        }
+    }
+
+    #[test]
+    fn apply_runtime_args_places_custom_flags_between_prepend_and_role_args_for_all_runtimes() {
+        use crate::router::runtime::ForkPlan;
+
+        let core = crate::test_support::test_core();
+        let root = tempfile::tempdir().unwrap();
+
+        for runtime in Runtime::ALL {
+            if runtime == Runtime::Shell {
+                continue;
+            }
+            crate::db::set_runtime_custom_flags(
+                &core.db,
+                runtime,
+                r#"--custom-flag "with spaces""#,
+            )
+            .unwrap();
+            let adapter = crate::runtimes::adapter(runtime);
+            let prior = crate::runtimes::custom_flags::sample_prior_key(runtime);
+
+            for (mission, resuming, plan) in [
+                (false, false, adapter.resume_plan(None)),
+                (false, true, adapter.resume_plan(Some(prior))),
+                (true, false, adapter.resume_plan(None)),
+            ] {
+                let role = Role {
+                    id: "r1".into(),
+                    handle: "coder".into(),
+                    display_name: "Coder".into(),
+                    runtime: runtime.key().into(),
+                    command: crate::runtimes::custom_flags::command_name(runtime).into(),
+                    args: vec!["--role-marker".into()],
+                    working_dir: None,
+                    system_prompt: None,
+                    env: HashMap::new(),
+                    model: Some("test-model".into()),
+                    effort: None,
+                    codex_speed: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                let mut spec = crate::session::runtime::SpawnSpec {
+                    session_id: "00000000-0000-0000-0000-000000000099".into(),
+                    mission,
+                    command: role.command.clone(),
+                    args: role.args.clone(),
+                    agent_runtime: Some(runtime),
+                    ..Default::default()
+                };
+                core.sessions.apply_runtime_args(
+                    &mut spec,
+                    &role,
+                    &plan,
+                    root.path(),
+                    None,
+                    Some("hello"),
+                    mission.then_some(root.path()),
+                    Some(&core.db),
+                );
+                let flag_pos = spec
+                    .args
+                    .iter()
+                    .position(|a| a == "--custom-flag")
+                    .unwrap_or_else(|| panic!("{runtime} missing --custom-flag (resuming={resuming}, mission={mission}): {:?}", spec.args));
+                assert_eq!(spec.args[flag_pos + 1], "with spaces");
+                let role_pos = spec.args.iter().position(|a| a == "--role-marker").unwrap();
+                assert!(
+                    flag_pos + 1 < role_pos,
+                    "{runtime}: custom flags must precede role args: {:?}",
+                    spec.args
+                );
+                if plan.prepend && !plan.args.is_empty() {
+                    assert_eq!(&spec.args[..plan.args.len()], plan.args.as_slice());
+                    assert_eq!(flag_pos, plan.args.len());
+                } else {
+                    assert_eq!(flag_pos, 0);
+                }
+            }
+
+            if let Some(ForkPlan::Direct(fork_plan)) = adapter.fork_plan(prior, "fork") {
+                let role = Role {
+                    id: "r1".into(),
+                    handle: "coder".into(),
+                    display_name: "Coder".into(),
+                    runtime: runtime.key().into(),
+                    command: crate::runtimes::custom_flags::command_name(runtime).into(),
+                    args: vec!["--role-marker".into()],
+                    working_dir: None,
+                    system_prompt: None,
+                    env: HashMap::new(),
+                    model: None,
+                    effort: None,
+                    codex_speed: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                let mut spec = crate::session::runtime::SpawnSpec {
+                    session_id: "00000000-0000-0000-0000-000000000099".into(),
+                    mission: false,
+                    command: role.command.clone(),
+                    args: role.args.clone(),
+                    agent_runtime: Some(runtime),
+                    ..Default::default()
+                };
+                core.sessions.apply_runtime_args(
+                    &mut spec,
+                    &role,
+                    &fork_plan,
+                    root.path(),
+                    None,
+                    None,
+                    None,
+                    Some(&core.db),
+                );
+                let flag_pos = spec.args.iter().position(|a| a == "--custom-flag").unwrap();
+                let role_pos = spec.args.iter().position(|a| a == "--role-marker").unwrap();
+                assert!(flag_pos + 1 < role_pos);
+                if fork_plan.prepend && !fork_plan.args.is_empty() {
+                    assert_eq!(flag_pos, fork_plan.args.len());
+                }
+            }
+        }
+    }
 }

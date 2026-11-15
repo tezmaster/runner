@@ -716,17 +716,18 @@ impl MissionWorkspace {
         let cwd_root = root;
         let goal = self.goal();
         let permission_mode = self.permission_mode();
+        // The content is one column that keeps its natural height inside the
+        // scrolling box. As direct children of a fixed-height flex column the
+        // sections would shrink to fit and clip instead of scrolling.
         let mut panel = div()
-            .id("mission-meta-scroll")
-            .debug_selector(|| "MISSION_META_SCROLL".into())
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
+            .flex_none()
             .px_5()
+            .pt_3()
             .pb_5()
             .flex()
             .flex_col()
             .gap_4()
+            .children(self.render_review_sections(cx))
             .child(rail_section_label(crate::i18n::text("ui.mission_detail")))
             .child(meta_section(
                 crate::i18n::text("ui.mission_id"),
@@ -819,6 +820,26 @@ impl MissionWorkspace {
                 ),
             ));
         }
+        // A plain frame holds the scroll box and its scrollbar side by side. The
+        // scrollbar must not be a child of the scroll box, or its track scrolls
+        // away with the content.
+        div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+        div()
+            .id("mission-meta-scroll")
+            .debug_selector(|| "MISSION_META_SCROLL".into())
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .scrollbar_width(px(0.))
+            .track_scroll(&self.meta_scroll)
+            .child(
         panel
             .children(permission_mode.map(|mode| {
                 meta_section(
@@ -857,7 +878,10 @@ impl MissionWorkspace {
                     .h(rems(1. / 16.))
                     .w_full()
                     .bg(theme::border()),
+            ),
             )
+            )
+            .child(self.meta_scrollbar.clone())
             .into_any_element()
     }
 
@@ -974,7 +998,7 @@ fn rail_section_label(label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-fn meta_section(label: &'static str, body: impl IntoElement) -> AnyElement {
+pub(super) fn meta_section(label: &'static str, body: impl IntoElement) -> AnyElement {
     div()
         .flex()
         .flex_col()

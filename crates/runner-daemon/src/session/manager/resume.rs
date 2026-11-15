@@ -228,8 +228,6 @@ impl SessionManager {
         }
         role = self.resolve_role_executable(&role, &pool)?;
 
-        // Resumed chats are attended, including runtime-only chats.
-        // Strip permission flags and leave every other arg alone.
         if snap.mission_id.is_none() {
             role.args = crate::runtimes::for_key(&role.runtime)
                 .permissions()
@@ -615,6 +613,7 @@ impl SessionManager {
         if *spawning {
             return Err(Error::msg("runnerd is stopping"));
         }
+        let status_hooks_enabled = crate::runtimes::status_hooks_enabled(&spec.env);
         let (rt_session, output) = match self.spawn_runtime(spec) {
             Ok(p) => p,
             Err(e) => {
@@ -686,9 +685,11 @@ impl SessionManager {
             )
         });
         self.start_runtime_capture(
-            &role.runtime,
+            &role,
             session_id,
             snap.mission_id.clone(),
+            resolved_cwd.clone(),
+            plan.assigned_key.clone(),
             app_data_dir,
             &started_at,
             output.stop_flag(),
@@ -718,7 +719,10 @@ impl SessionManager {
                         } else {
                             startup::StartupDelivery::for_reports
                         };
-                        Some(gate(&role.runtime, pending_turn, now))
+                        Some(
+                            gate(&role.runtime, pending_turn, now)
+                                .with_status_hooks(status_hooks_enabled),
+                        )
                     }
                 },
                 #[cfg(windows)]

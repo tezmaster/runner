@@ -405,7 +405,7 @@ impl Drop for Fixture {
 }
 
 macro_rules! cli_cases {
-    ($($name:ident => $args:expr),+ $(,)?) => {
+    ($($name:ident => $args:expr_2021),+ $(,)?) => {
         fn cases() -> Vec<Vec<&'static str>> {
             vec![$($args),+]
         }
@@ -467,6 +467,11 @@ cli_cases! {
     mission_link => vec!["mission", "link", MISSION, "--chat", SESSION],
     mission_link_outside_a_chat => vec!["mission", "link", MISSION],
     mission_unlink => vec!["mission", "unlink", "mission-running"],
+    mission_review => vec!["mission", "review", "mission-running"],
+    mission_usage => vec!["mission", "usage"],
+    mission_usage_backfill => vec!["mission", "usage-backfill"],
+    mission_rate => vec!["mission", "rate", "mission-running", "up", "--note", "clean run"],
+    mission_rate_without_a_verdict => vec!["mission", "rate", "mission-running"],
     mission_show_linked => vec!["mission", "show", "mission-running"],
     mission_list_linked_here => vec!["mission", "list", "--linked-here"],
     mission_feed => vec!["mission", "feed", MISSION, "--oldest-first"],
@@ -477,6 +482,7 @@ cli_cases! {
     session_show => vec!["session", "show", SESSION],
     session_stop => vec!["session", "stop", SESSION],
     session_archive => vec!["session", "archive", SESSION],
+    session_archive_with_missions => vec!["session", "archive", "--with-missions", SESSION],
     session_resume => vec!["session", "resume", SESSION],
     session_restart => vec!["session", "restart", SESSION],
     msg_post => vec!["msg", "post", "Hello", "--mission", MISSION, "--to", "reviewer"],
@@ -670,7 +676,7 @@ fn offline_variants(args: Vec<&'static str>, inside: bool, json: bool) -> Vec<Ca
 }
 
 macro_rules! offline_goldens {
-    ($cases:ident, $tests:ident, $inside:literal, $json:literal; $($name:ident => $args:expr),+ $(,)?) => {
+    ($cases:ident, $tests:ident, $inside:literal, $json:literal; $($name:ident => $args:expr_2021),+ $(,)?) => {
         fn $cases() -> Vec<Case> {
             vec![$($args),+].into_iter()
                 .flat_map(|args| offline_variants(args, $inside, $json))
@@ -777,6 +783,11 @@ offline_goldens! {
     mission_move => vec!["mission", "move", "--help"],
     mission_link => vec!["mission", "link", "--help"],
     mission_unlink => vec!["mission", "unlink", "--help"],
+    mission_rate => vec!["mission", "rate", "--help"],
+    mission_review => vec!["mission", "review", "--help"],
+    mission_usage_help => vec!["mission", "usage", "--help"],
+    mission_usage_backfill_help => vec!["mission", "usage-backfill", "--help"],
+    mission_usage_record => vec!["mission", "usage-record", "--help"],
     mission_feed => vec!["mission", "feed", "--help"],
     mission_answer => vec!["mission", "answer", "--help"],
     chat_start => vec!["chat", "start", "--help"],
@@ -867,7 +878,10 @@ fn render_case(case: &Case) -> String {
         && (case.args.starts_with(&["mission", "unlink"])
             || case
                 .args
-                .starts_with(&["mission", "show", "mission-running"]))
+                .starts_with(&["mission", "show", "mission-running"])
+            || case
+                .args
+                .starts_with(&["session", "archive", "--with-missions"]))
     {
         let pool = runner_daemon::db::open_fixture_pool(&fixture.data.join("runner.db")).unwrap();
         let conn = pool.get().unwrap();
@@ -1290,4 +1304,33 @@ fn session_show_text_and_json_keep_launch_values_after_role_edit() {
             .unwrap()
             .contains("SECRET_878_SENTINEL"));
     }
+}
+
+#[test]
+fn session_archive_with_missions_succeeds_with_empty_list_when_no_unarchived_linked_missions_exist()
+{
+    let mut fixture = Fixture::new();
+    {
+        let pool = runner_daemon::db::open_fixture_pool(&fixture.data.join("runner.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "UPDATE missions SET linked_session_id = ?1, archived_at = ?2 WHERE id = 'mission-running'",
+            [SESSION, STAMP],
+        )
+        .unwrap();
+    }
+    fixture.start();
+    let output = fixture
+        .command(false)
+        .args(["session", "archive", "--with-missions", SESSION, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["session_id"], SESSION);
+    assert_eq!(json["archived_mission_ids"], serde_json::json!([]));
 }

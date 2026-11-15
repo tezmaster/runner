@@ -19,6 +19,8 @@
   English · <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
+> **This is a fork of [yicheng47/runner](https://github.com/yicheng47/runner) that adds support for the Muse runtime.** It is rebased onto upstream and tracks it; everything else is upstream's work. Muse support lives in `crates/runner-daemon/src/runtimes/muse/`. The fork also carries a small `RUNNER_SOCKET` change. It is built from source and does not publish releases. For the official app, use [upstream](https://github.com/yicheng47/runner).
+
 <p align="center">
   <strong>Where terminal agents work together.</strong>
   <br />
@@ -148,7 +150,7 @@ runner help agents</code></pre>
 - **MCP servers and skills in one place** — **Settings → MCP** and **Settings → Skills** list each agent's own config and switch entries off per agent, changing only the entry you touched.
 - **Desktop notifications** — Get notified when an agent needs input, finishes a turn or fails, and click to open its chat or mission. Choose events in **Settings → Notifications**.
 - **Projects** — Bind a working directory once; chats and missions started in it inherit the cwd and group in the sidebar.
-- **Light and dark** — Carbon and Runner Light, plus Catppuccin, with an app palette and a terminal palette per mode. Claude Code follows the switch live.
+- **Light and dark** — Runner Light and Runner, plus Catppuccin, Rosé Pine, Tokyo Night, Gruvbox and Solarized, picking a theme for each mode that sets the app and terminal colours together. Claude Code follows the switch live.
 
 ## Demo
 
@@ -190,6 +192,7 @@ Fresh installations include **Pair coding crew**: a coder implements and a revie
 - **[alacritty_terminal](https://github.com/alacritty/alacritty)** — the terminal grid, parser, and scrollback under every pane.
 - **[xterm.js](https://github.com/xtermjs/xterm.js)** — the procedural box-drawing glyph table is transcribed from the WebGL addon under its MIT notice (`crates/runner-app/LICENSE.xterm`).
 - **[Windows Terminal ConPTY](https://github.com/microsoft/terminal)** — Windows builds bundle Microsoft's `conpty.dll` and `OpenConsole.exe` under the MIT notice (`crates/runner-app/LICENSE.conpty`).
+- **[Catppuccin](https://github.com/catppuccin/catppuccin)** (MIT), **[Rosé Pine](https://github.com/rose-pine/rose-pine-theme)** (MIT), **[Tokyo Night](https://github.com/folke/tokyonight.nvim)** (Apache-2.0), **[Gruvbox](https://github.com/morhetz/gruvbox)** (MIT) and **[Solarized](https://ethanschoonover.com/solarized/)** (MIT) — bundled app and terminal themes (`crates/runner-app/LICENSE.themes`).
 - **[Sparkle](https://sparkle-project.org)** — the macOS updater.
 
 ## Author

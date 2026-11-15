@@ -11,17 +11,48 @@ impl Sidebar {
         if self.front_page.target != client.target {
             self.dismiss_transients(cx);
         }
-        if client.is_remote() && self.remote_settings.is_none() {
-            let mut settings = self.app_store.read(cx).settings.clone();
-            settings.sidebar_collapsed_projects.clear();
-            settings.sidebar_collapsed_active_groups.clear();
-            settings.sidebar_collapsed_link_groups.clear();
-            settings.sidebar_projects_open = true;
-            settings.sidebar_chats_open = true;
-            settings.sidebar_active_only = false;
-            self.remote_settings = Some(settings);
-        }
         self.front_page = client;
+        if let crate::surfaces::front_page::FrontPageTarget::Remote { computer, .. } =
+            &self.front_page.target
+        {
+            let saved = self
+                .app_store
+                .read(cx)
+                .settings
+                .remote_sidebars
+                .get(computer)
+                .cloned();
+            if self.remote_settings.is_none() {
+                let mut settings = self.app_store.read(cx).settings.clone();
+                saved.clone().unwrap_or_default().apply_to(&mut settings);
+                self.remote_settings = Some(settings);
+                self.remote_sidebar_seed_pending = saved.is_none();
+            }
+            if let Some(saved) = saved.filter(|_| self.remote_sidebar_seed_pending) {
+                saved.apply_to(self.remote_settings.as_mut().unwrap());
+                self.remote_sidebar_seed_pending = false;
+            }
+            if self.remote_sidebar_seed_pending && self.remote_overview(cx).is_some() {
+                let nodes = self.source_nodes(cx);
+                let collapsed_projects = self
+                    .source_projects(cx)
+                    .into_iter()
+                    .filter(|project| {
+                        !nodes.iter().any(|node| {
+                            matches!(node.node_type, NodeType::Tab | NodeType::Mission)
+                                && node.pinned_position.is_none()
+                                && node.parent_id.as_deref() == Some(project.id.as_str())
+                        })
+                    })
+                    .map(|project| project.id)
+                    .collect();
+                self.remote_sidebar_seed_pending = false;
+                self.update_app_settings(cx, true, |settings| {
+                    settings.sidebar_collapsed_projects = collapsed_projects;
+                    true
+                });
+            }
+        }
         cx.notify();
     }
 
@@ -63,7 +94,7 @@ impl Sidebar {
             true
         });
     }
-    fn remote_overview(&self, cx: &App) -> Option<runner_core::companion::Overview> {
+    pub(super) fn remote_overview(&self, cx: &App) -> Option<runner_core::companion::Overview> {
         let crate::surfaces::front_page::FrontPageTarget::Remote { computer, .. } =
             &self.front_page.target
         else {
@@ -144,11 +175,21 @@ impl Sidebar {
                         return None;
                     }
                     let rollup = self.tab_status_rollup(&members, cx);
+                    let attention = super::rows::status_attention(rollup.priority_value()).max(
+                        if members
+                            .iter()
+                            .any(|member| self.archiving_sessions.contains(&member.session_id))
+                        {
+                            AttentionState::Working
+                        } else {
+                            AttentionState::None
+                        },
+                    );
                     Some(SidebarRow::Tab {
                         node,
                         layout,
                         members,
-                        attention: super::rows::status_attention(rollup.priority_value()),
+                        attention,
                     })
                 }
                 NodeType::Mission => {
@@ -197,6 +238,7 @@ impl Sidebar {
                             String::new(),
                             crate::surfaces::remote_client::model::agent_status(
                                 &runner_core::companion::SessionStatus {
+                                    startup_error: None,
                                     status: Status::NeedsYou,
                                     reason: Some(runner_core::companion::NeedsYouReason::Answer),
                                     unread: false,
@@ -235,6 +277,21 @@ impl Sidebar {
                     })
                 }
                 NodeType::Project => None,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remote_row_attentions(&self, cx: &App) -> HashMap<String, AttentionState> {
+        self.remote_rows(cx)
+            .into_iter()
+            .map(|row| match row {
+                SidebarRow::Tab {
+                    node, attention, ..
+                }
+                | SidebarRow::Mission {
+                    node, attention, ..
+                } => (node.ref_id.unwrap_or(node.id), attention),
             })
             .collect()
     }
@@ -289,8 +346,8 @@ impl Sidebar {
                 self.front_page.supports(&["close", "archive", "layout"])
             }
             SidebarMenuAction::ArchiveMission(_) => self.front_page.supports(&["archive"]),
-            // The companion protocol carries the link but no request to change it.
-            SidebarMenuAction::LinkToChat(_) | SidebarMenuAction::UnlinkMission(_) => false,
+            SidebarMenuAction::LinkToChat(_) => self.front_page.supports(&["linkMission"]),
+            SidebarMenuAction::UnlinkMission(_) => self.front_page.supports(&["unlinkMission"]),
             SidebarMenuAction::StopMission(_) => self.front_page.supports(&["stopMission"]),
             SidebarMenuAction::ResumeMission(_) => self.front_page.supports(&["resumeMission"]),
             SidebarMenuAction::DeleteProject(_) => self.front_page.supports(&["deleteProject"]),

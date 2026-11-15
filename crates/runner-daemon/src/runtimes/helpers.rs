@@ -167,9 +167,7 @@ pub(crate) fn is_broad_trust_root(cwd: &Path, home: Option<&Path>) -> bool {
     if cwd.parent().is_none() {
         return true;
     }
-    home.map(|home| std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()))
-        .as_deref()
-        == Some(cwd)
+    home.is_some_and(|home| cwd == home || std::fs::canonicalize(home).ok().as_deref() == Some(cwd))
 }
 
 pub(crate) fn resolve_project_trust_root(cwd: &Path) -> crate::error::Result<PathBuf> {
@@ -330,17 +328,8 @@ pub(super) fn hook_report_command(
             runtime.key()
         )
     } else {
-        let fallback = if runtime == Runtime::Antigravity {
-            if event == "PreInvocation" {
-                "{ if [ -n \"$RUNNER_ANTIGRAVITY_WORKSPACE_CONTEXT\" ]; then printf '%s\\n' \"$RUNNER_ANTIGRAVITY_WORKSPACE_CONTEXT\"; else printf '{}\\n'; fi; }"
-            } else {
-                "printf '{}\\n'"
-            }
-        } else {
-            ":"
-        };
         format!(
-            "{} hook report --runtime {} --event {event} 2>/dev/null || {fallback}",
+            "{} hook report --runtime {} --event {event} 2>/dev/null || :",
             crate::session::launch::shell_quote(&executable),
             runtime.key()
         )

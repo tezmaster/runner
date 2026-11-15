@@ -52,6 +52,7 @@ pub fn status_list(
         .clone();
     let config_env = crate::claude_accounts::sharing::config_env(pool, shell_env.vars.clone());
     let overrides = db::runtime_overrides(pool)?;
+    let launch_options = db::runtime_launch_options(pool)?;
     let path = direct_chat_path(&shell_env);
     let home = runner_core::app_paths::home_dir();
     let result = discovery.result.as_ref();
@@ -117,6 +118,10 @@ pub fn status_list(
                 .flatten()
                 .map(str::to_owned);
             RuntimeExecutableStatus {
+                launch_options: launch_options
+                    .get(runtime.name.key())
+                    .cloned()
+                    .unwrap_or_default(),
                 name: runtime.name,
                 display_name: runtime.display_name.to_string(),
                 command: runtime.command.to_string(),
@@ -128,6 +133,11 @@ pub fn status_list(
                 effective_source,
                 state,
                 invalid_reason,
+                below_minimum: versions::below_minimum(
+                    installed_version.as_deref(),
+                    runtime.min_version,
+                ),
+                min_version: runtime.min_version.map(str::to_owned),
                 installed_version,
                 available_version,
             }
@@ -367,6 +377,7 @@ pub fn refresh_background_discovery(
             return Ok(false);
         }
         state.checking = true;
+        state.versions.clear_help_flags(None);
     }
     events.emit("runtime/changed", &());
     start_background_discovery(events, pool, shell_env, discovery, true, model_runtimes);

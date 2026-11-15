@@ -135,6 +135,10 @@ pub(crate) fn codex_status_args(
     app_data_dir: &Path,
     _session_id: &str,
 ) -> Vec<String> {
+    codex_hook_args(role_args, app_data_dir, true)
+}
+
+fn codex_hook_args(role_args: &[String], app_data_dir: &Path, status: bool) -> Vec<String> {
     if !inject_codex_hooks(role_args, cfg!(windows)) {
         return Vec::new();
     }
@@ -151,6 +155,9 @@ pub(crate) fn codex_status_args(
         format!("mcp_servers.runner_hooks={{command={executable},args=[\"hook\",\"serve\"],env_vars=[\"{}\",\"{}\",\"{}\"],required=false,enabled=true}}", hook::ENDPOINT_ENV, hook::SESSION_ENV, hook::GENERATION_ENV),
     ]);
     for event in crate::runtimes::codex::codex_status::EVENTS {
+        if !status && !matches!(*event, "SessionStart" | "UserPromptSubmit") {
+            continue;
+        }
         if *event == "SessionEnd" {
             let command = toml_edit::Value::from(hook_report_command(
                 app_data_dir,
@@ -209,6 +216,32 @@ impl RuntimeAdapter for Codex {
                 .collect(),
         )
     }
+    fn classify_startup_error(
+        &self,
+        output: &str,
+    ) -> Option<runner_core::protocol::status::StartupError> {
+        let (_, cause) = output.split_once("Error loading config.toml:")?;
+        let cause = cause.trim();
+        let detail = cause
+            .lines()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(512)
+            .collect::<String>();
+        let message = if cause.contains("unknown variant `mcp_tool`") {
+            "This Codex does not recognize Runner's mcp_tool hook type.".into()
+        } else {
+            format!("Codex could not load Runner's configuration: {detail}")
+        };
+        Some(runner_core::protocol::status::StartupError {
+            runtime: Runtime::Codex,
+            message,
+            output: cause.to_owned(),
+        })
+    }
+
     fn status_semantics(&self) -> StatusSemantics {
         StatusSemantics {
             startup_ready_batch: true,
@@ -378,11 +411,18 @@ impl RuntimeAdapter for Codex {
                 format!("service_tier={}", speed.service_tier()),
             ]);
         }
-        out.extend(codex_status_args(
-            ctx.role_args,
-            ctx.app_data_dir,
-            ctx.session_id,
-        ));
+        if ctx
+            .env
+            .get(REMOTE_PLUGIN_ENV)
+            .is_some_and(|value| value == "false")
+        {
+            out.extend(strings(&["-c", "features.remote_plugin=false"]));
+        }
+        out.extend(if status_hooks_enabled(ctx.env) {
+            codex_status_args(ctx.role_args, ctx.app_data_dir, ctx.session_id)
+        } else {
+            codex_hook_args(ctx.role_args, ctx.app_data_dir, false)
+        });
         out.extend(self.first_turn_argv(if ctx.resuming { None } else { ctx.first_turn }));
         out
     }
@@ -450,3 +490,37 @@ static MCP: McpConfig = McpConfig {
     preserve_disabled: false,
     supports_http: true,
 };
+
+#[cfg(test)]
+mod startup_error_tests {
+    use super::*;
+    #[test]
+    fn config_failure_is_classified_but_normal_output_is_not() {
+        let adapter = crate::runtimes::adapter(Runtime::Codex);
+        let field_error = "Error loading config.toml: unknown variant `mcp_tool`, expected one of `command`, `prompt`, `agent` in `hooks`";
+        let error = adapter.classify_startup_error(field_error).unwrap();
+        assert_eq!(error.runtime, Runtime::Codex);
+        assert!(error.output.contains("unknown variant `mcp_tool`"));
+        assert_eq!(
+            error.message,
+            "This Codex does not recognize Runner's mcp_tool hook type."
+        );
+        let future = adapter.classify_startup_error("Error loading config.toml: invalid type: integer, expected a string in hooks.command").unwrap();
+        assert!(future
+            .message
+            .contains("invalid type: integer, expected a string in hooks.command"));
+        let bounded = adapter
+            .classify_startup_error(&format!(
+                "Error loading config.toml: {}",
+                "x".repeat(10_000)
+            ))
+            .unwrap();
+        assert!(bounded.message.len() < 600);
+        assert!(adapter
+            .classify_startup_error("Interrupted by user")
+            .is_none());
+        assert!(crate::runtimes::adapter(Runtime::Pi)
+            .classify_startup_error(field_error)
+            .is_none());
+    }
+}

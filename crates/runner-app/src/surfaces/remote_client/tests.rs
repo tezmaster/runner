@@ -55,6 +55,8 @@ impl TerminalSubscription for Frames {
         })
     }
 }
+type MarkViewedHook = Box<dyn FnMut(&Fake, &str) + Send>;
+
 pub(crate) struct Fake {
     base: runner_daemon::daemon::InProcessTransport,
     status: Mutex<RemoteStatus>,
@@ -62,6 +64,7 @@ pub(crate) struct Fake {
     enrolls: AtomicUsize,
     computers: Mutex<Vec<Computer>>,
     overview: Mutex<Overview>,
+    local_usage: Mutex<runner_core::protocol::usage::UsageSnapshot>,
     overview_calls: AtomicUsize,
     follow_push: AtomicBool,
     events: Mutex<Vec<futures::channel::mpsc::UnboundedSender<ClientEvent>>>,
@@ -92,6 +95,7 @@ pub(crate) struct Fake {
     local_requests: Mutex<Vec<std::mem::Discriminant<Request>>>,
     action_results:
         Mutex<HashMap<String, std::collections::VecDeque<Result<serde_json::Value, ClientError>>>>,
+    on_mark_viewed: Mutex<Option<MarkViewedHook>>,
     model_session_removal: AtomicBool,
 }
 impl Fake {
@@ -146,6 +150,11 @@ impl Fake {
                 overview.tabs.retain(|tab| tab.id != id);
                 Some(Ok(serde_json::Value::Null))
             }
+            "archive" if value["target"]["kind"] == "mission" => {
+                let id = value["target"]["id"].as_str().unwrap();
+                overview.missions.retain(|mission| mission.id != id);
+                Some(Ok(serde_json::Value::Null))
+            }
             "layout" => {
                 let id = value["target"]["id"].as_str().unwrap();
                 let Some(tab) = overview.tabs.iter_mut().find(|tab| tab.id == id) else {
@@ -163,6 +172,12 @@ impl Fake {
             .iter()
             .map(|feature| (*feature).to_owned())
             .collect();
+    }
+    pub(crate) fn without_features(&self, omit: &[&str]) {
+        self.features
+            .lock()
+            .unwrap()
+            .retain(|feature| !omit.contains(&feature.as_str()));
     }
     pub(crate) fn queue_result(&self, kind: &str, result: Result<serde_json::Value, ClientError>) {
         self.action_results
@@ -207,6 +222,9 @@ impl Fake {
 impl Transport for Fake {
     fn call(&self, request: Request) -> Result<Response, ClientError> {
         Ok(match request {
+            Request::usage_snapshot {} => {
+                Response::usage_snapshot(Ok(self.local_usage.lock().unwrap().clone()))
+            }
             Request::remote_status {} => {
                 Response::remote_status(Ok(self.status.lock().unwrap().clone()))
             }
@@ -262,6 +280,7 @@ impl Transport for Fake {
                     if let Some(result) = self.model_action(&value) { return result; }
                     Ok(match kind.as_str() {
                     "catalog" => serde_json::json!({"roles":[{"id":"host-role","name":"Host coder","handle":"host-coder","runtime":"codex","model":null,"effort":null,"speed":null}],"runtimes":[{"name":"codex","label":"Host Codex","available":true,"nativeFork":true,"defaultModel":null,"defaultEffort":null,"models":[],"efforts":[],"speeds":["standard","fast"]}],"accounts":[{"id":"host-account","name":"Host account"}],"activeAccount":"host-account","crews":[],"projects":[{"id":"host-project","name":"Host project","path":"C:\\work"}],"recentFolders":["C:\\work","\\\\nas\\share"]}),
+                    "usage" => host_usage(),
                     "folders" => serde_json::json!({"path":value["path"].as_str().unwrap_or("C:\\Users\\Jason"),"parent":null,"folders":[]}),
                     "startChat" | "startShell" | "fork" => serde_json::json!({"session":"started-session"}),
                     "resume" | "restart" => serde_json::json!({"session":value["session"]}),
@@ -273,6 +292,18 @@ impl Transport for Fake {
                     "deleteProject" => serde_json::json!({"archivedMissions":[],"archivedSessions":[]}),
                     _ => serde_json::Value::Null,
                 }) });
+                if result.is_ok() && kind == "markViewed" {
+                    if let Some(session) = value["session"].as_str() {
+                        let hook = self.on_mark_viewed.lock().unwrap().take();
+                        if let Some(mut hook) = hook {
+                            hook(self, session);
+                            let mut slot = self.on_mark_viewed.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some(hook);
+                            }
+                        }
+                    }
+                }
                 Response::remote_request(result.map(|result| runner_core::remote::RemoteResult {
                     result,
                     features: self.features.lock().unwrap().clone(),
@@ -517,10 +548,12 @@ pub(crate) fn fixture(
         directory_gate: Mutex::default(),
         directory_started: Mutex::default(),
         cancels: Arc::new(AtomicUsize::new(0)),
+        local_usage: Mutex::new(Default::default()),
         features: Mutex::new(Vec::new()),
         action_requests: Mutex::new(Vec::new()),
         local_requests: Mutex::new(Vec::new()),
         action_results: Mutex::new(HashMap::new()),
+        on_mark_viewed: Mutex::new(None),
         model_session_removal: AtomicBool::new(false),
     });
     let clients = cx.new(|cx| model::ClientState::new(fake.client(), cx));
@@ -1292,6 +1325,9 @@ fn remote_sidebar_node_metadata_preserves_mixed_order_and_updates_placement() {
         .unwrap();
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    let project = visual.debug_bounds("SIDEBAR_PROJECT:p").unwrap();
+    visual.simulate_click(project.center(), Default::default());
+    visual.run_until_parked();
     let before = |visual: &mut VisualTestContext, a, b| {
         assert!(
             visual.debug_bounds(a).unwrap().top() < visual.debug_bounds(b).unwrap().top(),
@@ -1394,6 +1430,7 @@ fn remote_status_adapter_keeps_reasons_and_shared_rollup_priority() {
     ] {
         for unread in [false, true] {
             let wire = SessionStatus {
+                startup_error: None,
                 status: status.clone(),
                 reason: reason.clone(),
                 unread,
@@ -1419,6 +1456,7 @@ fn remote_status_adapter_keeps_reasons_and_shared_rollup_priority() {
         }
     }
     let interrupted = model::agent_status(&SessionStatus {
+        startup_error: None,
         status: Status::Idle,
         reason: None,
         unread: false,
@@ -1453,6 +1491,7 @@ fn remote_status_adapter_keeps_reasons_and_shared_rollup_priority() {
             (
                 id.into(),
                 model::agent_status(&SessionStatus {
+                    startup_error: None,
                     status,
                     reason,
                     unread,
@@ -1674,6 +1713,9 @@ fn remote_sidebar_groups_pins_projects_and_recents_and_collapses_project_childre
         .unwrap();
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    let project = visual.debug_bounds("SIDEBAR_PROJECT:p").unwrap();
+    visual.simulate_click(project.center(), Default::default());
+    visual.run_until_parked();
     let local_settings = store.read_with(&visual, |store, _| {
         (
             store.settings.sidebar_projects_open,
@@ -1996,6 +2038,7 @@ fn remote_window_and_picker_render_all_connection_states_and_preserve_local_tabs
                     theme::with_alpha(theme::accent(), 0.4),
                 );
                 assert!(visual.debug_bounds("REMOTE_TAKEN_BACK").is_some());
+                assert!(visual.debug_bounds("REMOTE_RECONNECTING_PILL").is_none());
             }
             for (state, error, expected) in [
                 ("reconnecting", "", Connection::Reconnecting),
@@ -2025,10 +2068,28 @@ fn remote_window_and_picker_render_all_connection_states_and_preserve_local_tabs
                     .unwrap();
                 cx.run_until_parked();
                 let mut visual = VisualTestContext::from_window(window.into(), &cx);
+                if expected == Connection::Reconnecting {
+                    let pill = visual.debug_bounds("REMOTE_RECONNECTING_PILL").unwrap();
+                    let viewport = visual.update(|window, _| window.viewport_size());
+                    assert_eq!(pill.size.height, px(32.));
+                    assert!(pill.size.width <= px(600.) && pill.size.width < viewport.width);
+                    crate::theme_snapshot::assert_fill_color(
+                        &mut visual,
+                        "REMOTE_RECONNECTING_PILL",
+                        Some(theme::panel()),
+                    );
+                    crate::theme_snapshot::assert_border(
+                        &mut visual,
+                        "REMOTE_RECONNECTING_PILL",
+                        theme::with_alpha(theme::warning(), 0.4),
+                    );
+                } else {
+                    assert!(visual.debug_bounds("REMOTE_RECONNECTING_PILL").is_none());
+                }
                 crate::theme_snapshot::assert_border(
                     &mut visual,
                     "SIDEBAR_HOST_BUTTON",
-                    theme::with_alpha(picker::host_tone(expected), 0.4),
+                    theme::with_alpha(picker::host_tone(expected, false), 0.4),
                 );
                 assert!(visual.debug_bounds("REMOTE_CONNECTION_ROW").is_none());
                 assert!(visual.debug_bounds("COMPUTER_PICKER_CONNECTION").is_some());
@@ -2106,10 +2167,14 @@ fn host_button_sits_in_the_footer_and_the_popup_puts_this_computer_first() {
     visual.run_until_parked();
     for remote in [false, true] {
         let footer = visual.debug_bounds("SIDEBAR_FOOTER_ROW").unwrap();
-        let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
+        let usage = visual.debug_bounds("SIDEBAR_USAGE");
+        let status = visual.debug_bounds("SIDEBAR_LINK_STATUS");
+        assert_eq!(usage.is_some(), !remote);
+        assert!(status.is_none());
+        let left = usage;
         let button = visual.debug_bounds("SIDEBAR_HOST_BUTTON").unwrap();
         let gear = visual.debug_bounds("SIDEBAR_SETTINGS").unwrap();
-        assert!(usage.right() <= button.left());
+        assert!(left.is_none_or(|left| left.right() <= button.left()));
         assert!(button.right() <= gear.left());
         assert_eq!(button.size, gear.size);
         assert_eq!(button.top(), gear.top());
@@ -2241,71 +2306,327 @@ fn popup_keeps_the_shown_computer_when_the_directory_drops_it() {
 }
 
 #[test]
-fn usage_settings_actions_in_a_remote_window_open_this_computers_agents_pane() {
-    use runner_core::protocol::claude_accounts::{ClaudeAccount, ClaudeAccounts};
+fn switching_to_another_computer_closes_the_usage_popover_for_good() {
     let _theme = crate::theme_snapshot::ThemeGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     let (store, _, _) = fixture(&mut cx, temp.path());
-    let window = add_window(&mut cx, &store, temp.path(), "remote-usage-settings");
+    let window = add_window(&mut cx, &store, temp.path(), "usage-closes-remote");
     window
         .update(&mut cx, |root, _, cx| {
-            root.usage_installed = vec![runner_core::protocol::model::Runtime::ClaudeCode];
+            root.usage_installed = vec![runner_core::protocol::model::Runtime::Codex];
             cx.notify();
         })
         .unwrap();
     let mut visual = VisualTestContext::from_window(window.into(), &cx);
     visual.simulate_resize(size(px(1200.), px(900.)));
     visual.run_until_parked();
-    for control in ["USAGE_AGENT_SETTINGS", "STYLED_SELECT_OPTION_0"] {
-        window
-            .update(&mut visual, |root, window, cx| {
-                choose_host(root, window, cx)
-            })
-            .unwrap();
-        visual.run_until_parked();
-        window
-            .read_with(&visual, |root, _| assert!(root.remote_client.is_active()))
-            .unwrap();
-        store.update(&mut visual, |store, _| {
-            store.claude_accounts = ClaudeAccounts {
-                accounts: ["native", "work"]
-                    .map(|id| ClaudeAccount {
-                        id: id.into(),
-                        name: id.into(),
-                        folder: format!("/tmp/{id}"),
-                        native: id == "native",
-                    })
-                    .into(),
-                main_id: "native".into(),
-                active_id: "native".into(),
-                ..Default::default()
-            };
-        });
-        let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
-        visual.simulate_click(usage.center(), Default::default());
-        visual.run_until_parked();
-        if control == "STYLED_SELECT_OPTION_0" {
-            let trigger = visual.debug_bounds("STYLED_SELECT_TRIGGER").unwrap();
-            visual.simulate_click(trigger.center(), Default::default());
-            visual.run_until_parked();
-        }
-        let target = visual.debug_bounds(control).unwrap();
-        visual.simulate_click(target.center(), Default::default());
-        visual.run_until_parked();
-        window
-            .read_with(&visual, |root, _| {
-                assert!(root.remote_client.is_local(), "{control}");
-                assert!(!root.usage_open, "{control}");
-                assert_eq!(root.route, AppRoute::Settings, "{control}");
-                assert_eq!(
-                    root.settings_page.pane,
-                    crate::surfaces::settings::page::SettingsPane::Agents,
-                    "{control}"
-                );
-            })
-            .unwrap();
+    let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
+    visual.simulate_click(usage.center(), Default::default());
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_some());
+    window
+        .update(&mut visual, |root, window, cx| {
+            choose_host(root, window, cx)
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_none());
+    assert!(window
+        .read_with(&visual, |root, _| !root.usage_open)
+        .unwrap());
+    window
+        .update(&mut visual, |root, window, cx| {
+            root.return_to_this_computer(window, cx)
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_USAGE").is_some());
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_none());
+}
+
+#[test]
+fn popup_bars_and_colours_change_at_each_latency_boundary() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for (ms, bars) in [(99, 4), (100, 3), (199, 3), (200, 2), (499, 2), (500, 1)] {
+        let slow = ms >= 200;
+        let status =
+            picker::connection_status(Connection::Connected, Some(ms), false, slow, "Studio");
+        assert_eq!(status.mark, picker::LinkMark::Bars(bars));
+        assert_eq!(
+            status.mark_color,
+            if slow {
+                theme::warning()
+            } else {
+                theme::accent()
+            }
+        );
+        assert_eq!(
+            status.text_color,
+            if slow {
+                theme::warning()
+            } else {
+                theme::faint()
+            }
+        );
+        assert_eq!(status.text, format!("{ms} ms · relay · encrypted"));
+        assert_eq!(
+            picker::host_tone(Connection::Connected, slow),
+            status.mark_color
+        );
     }
+}
+
+#[test]
+fn popup_marks_cover_each_connection_state() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    use picker::LinkMark::{Icon, None as NoMark};
+    for (connection, lacks_ping, mark, mark_color, text_color) in [
+        (
+            Connection::Opening,
+            false,
+            Icon("loader-circle.svg"),
+            theme::muted(),
+            theme::faint(),
+        ),
+        (
+            Connection::Connected,
+            false,
+            Icon("loader-circle.svg"),
+            theme::muted(),
+            theme::faint(),
+        ),
+        (
+            Connection::Connected,
+            true,
+            NoMark,
+            theme::muted(),
+            theme::faint(),
+        ),
+        (
+            Connection::Reconnecting,
+            false,
+            Icon("refresh-cw.svg"),
+            theme::warning(),
+            theme::warning(),
+        ),
+        (
+            Connection::Unreachable,
+            false,
+            Icon("unplug.svg"),
+            theme::danger(),
+            theme::danger(),
+        ),
+        (
+            Connection::Revoked,
+            false,
+            NoMark,
+            theme::danger(),
+            theme::danger(),
+        ),
+        (
+            Connection::Forgotten,
+            false,
+            NoMark,
+            theme::muted(),
+            theme::muted(),
+        ),
+    ] {
+        let status = picker::connection_status(connection, None, lacks_ping, false, "Studio");
+        assert_eq!(status.mark, mark);
+        assert_eq!(status.mark_color, mark_color);
+        assert_eq!(status.text_color, text_color);
+        assert_eq!(
+            status.text,
+            picker::connection_subtitle(connection, None, false, "Studio").0
+        );
+    }
+}
+
+#[test]
+fn slow_margin_is_shared_by_the_host_button_and_popup_and_resets_on_disconnect() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (_, fake, clients) = fixture(&mut cx, temp.path());
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"host","state":"connected"}),
+    );
+    cx.run_until_parked();
+    for (ms, slow, bars) in [
+        (199, false, 3),
+        (200, true, 2),
+        (190, true, 3),
+        (180, true, 3),
+        (179, false, 3),
+    ] {
+        fake.emit(
+            "remote/latency",
+            serde_json::json!({"computer":"host","ms":ms}),
+        );
+        cx.run_until_parked();
+        clients.read_with(&cx, |clients, _| {
+            assert_eq!(clients.slow("host"), slow);
+            let status = picker::connection_status(
+                Connection::Connected,
+                clients.latency("host"),
+                false,
+                clients.slow("host"),
+                "Studio",
+            );
+            assert_eq!(status.mark, picker::LinkMark::Bars(bars));
+            assert_eq!(
+                status.mark_color,
+                picker::host_tone(Connection::Connected, clients.slow("host"))
+            );
+        });
+    }
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"host","ms":200}),
+    );
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"host","state":"reconnecting"}),
+    );
+    cx.run_until_parked();
+    assert!(!clients.read_with(&cx, |clients, _| clients.slow("host")));
+}
+
+#[test]
+fn the_connected_row_shows_latency_once_a_sample_has_arrived() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for (locale, measured, unmeasured) in [
+        (
+            Locale::English,
+            "42 ms · relay · encrypted",
+            "Connected · relay · encrypted",
+        ),
+        (
+            Locale::SimplifiedChinese,
+            "42 ms · 中继 · 已加密",
+            "已连接 · 中继 · 已加密",
+        ),
+    ] {
+        with_locale(locale, || {
+            let row = |latency| {
+                picker::connection_subtitle(Connection::Connected, latency, false, "Studio")
+            };
+            assert_eq!(row(Some(42)), (measured.to_owned(), theme::faint()));
+            assert_eq!(row(None), (unmeasured.to_owned(), theme::faint()));
+        });
+    }
+}
+
+#[test]
+fn latency_is_kept_per_computer_until_its_connection_leaves_connected() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (_store, fake, clients) = fixture(&mut cx, temp.path());
+    let latency = |cx: &TestAppContext, computer: &'static str| {
+        clients.read_with(cx, |clients, _| clients.latency(computer))
+    };
+    let connection = |state: &str| serde_json::json!({"computer":"host","state":state});
+    let sample = |ms: u64| serde_json::json!({"computer":"host","ms":ms});
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"other","ms":10}),
+    );
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "other"), None, "not connected yet");
+    fake.emit("remote/connection", connection("connected"));
+    fake.emit("remote/latency", sample(42));
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"other","state":"connected"}),
+    );
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"other","ms":7}),
+    );
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), Some(42));
+    assert_eq!(latency(&cx, "other"), Some(7));
+    fake.emit("remote/connection", connection("reconnecting"));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), None);
+    assert_eq!(latency(&cx, "other"), Some(7));
+    fake.emit("remote/latency", sample(11));
+    fake.emit("remote/connection", connection("connected"));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), None, "a reconnect starts again");
+    fake.emit("remote/latency", sample(50));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), Some(50));
+    fake.emit("daemon/disconnected", serde_json::json!({}));
+    cx.run_until_parked();
+    assert_eq!(latency(&cx, "host"), None);
+    assert_eq!(latency(&cx, "other"), None);
+}
+
+#[test]
+fn a_host_is_only_known_to_lack_ping_after_its_features_are_discovered() {
+    for (features, lacks) in [(vec!["overview", "ping"], false), (vec!["overview"], true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, clients) = fixture(&mut cx, temp.path());
+        fake.set_features(&features);
+        let window = add_window(&mut cx, &store, temp.path(), "ping-features");
+        assert!(!clients.read_with(&cx, |clients, _| clients.lacks_ping("host")));
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            clients.read_with(&cx, |clients, _| clients.lacks_ping("host")),
+            lacks,
+            "{features:?}"
+        );
+    }
+}
+
+#[test]
+fn popup_latency_mark_leads_the_status_line_at_the_designed_size() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview", "ping"]);
+    let window = add_window(&mut cx, &store, temp.path(), "popup-mark");
+    window.update(&mut cx, choose_host).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.run_until_parked();
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer":"host","ms":42}),
+    );
+    window
+        .update(&mut visual, |root, _, cx| {
+            root.remote_client.ui.picker_open = true;
+            cx.notify();
+        })
+        .unwrap();
+    visual.run_until_parked();
+    let bars = visual.debug_bounds("COMPUTER_PICKER_LATENCY_BARS").unwrap();
+    let status = visual.debug_bounds("COMPUTER_PICKER_CONNECTION").unwrap();
+    assert_eq!(bars.size, size(px(18.), px(9.)));
+    assert_eq!(bars.left(), status.left());
+    assert_eq!(
+        visual
+            .debug_bounds("COMPUTER_PICKER_STATUS_TEXT")
+            .unwrap()
+            .left()
+            - bars.right(),
+        px(5.)
+    );
+    assert!(visual.debug_bounds("SIDEBAR_LINK_STATUS").is_none());
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"host","state":"reconnecting"}),
+    );
+    visual.run_until_parked();
+    assert!(visual
+        .debug_bounds("COMPUTER_PICKER_LATENCY_BARS")
+        .is_none());
 }
 
 #[test]
@@ -2339,14 +2660,17 @@ fn every_connection_state_has_a_host_tone_and_a_row_label() {
     let _theme = crate::theme_snapshot::ThemeGuard::new();
     for (connection, tone, color) in [
         (Connection::Connected, theme::accent(), theme::faint()),
-        (Connection::Opening, theme::accent(), theme::muted()),
+        (Connection::Opening, theme::accent(), theme::faint()),
         (Connection::Reconnecting, theme::warning(), theme::warning()),
-        (Connection::Unreachable, theme::warning(), theme::warning()),
+        (Connection::Unreachable, theme::danger(), theme::danger()),
         (Connection::Revoked, theme::danger(), theme::danger()),
         (Connection::Forgotten, theme::muted(), theme::muted()),
     ] {
-        assert_eq!(picker::host_tone(connection), tone);
-        assert_eq!(picker::connection_subtitle(connection, "Studio").1, color);
+        assert_eq!(picker::host_tone(connection, false), tone);
+        assert_eq!(
+            picker::connection_subtitle(connection, None, false, "Studio").1,
+            color
+        );
     }
     for (locale, expected) in [
         (
@@ -2381,7 +2705,7 @@ fn every_connection_state_has_a_host_tone_and_a_row_label() {
                 Connection::Revoked,
                 Connection::Forgotten,
             ]
-            .map(|connection| picker::connection_subtitle(connection, "Studio").0);
+            .map(|connection| picker::connection_subtitle(connection, None, false, "Studio").0);
             assert_eq!(labels, expected);
         });
     }
@@ -4546,7 +4870,7 @@ fn take_control_failure_is_visible_and_reselecting_current_computer_preserves_th
 }
 
 #[test]
-fn switching_computers_restores_each_windows_remote_sidebar_view() {
+fn switching_computers_restores_each_hosts_saved_sidebar_view() {
     let _theme = crate::theme_snapshot::ThemeGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
@@ -4569,6 +4893,9 @@ fn switching_computers_restores_each_windows_remote_sidebar_view() {
         settings
             .sidebar_collapsed_active_groups
             .insert("agents".into());
+        settings
+            .sidebar_collapsed_link_groups
+            .insert("local-tab".into());
         settings.sidebar_projects_open = false;
         settings.sidebar_chats_open = false;
     });
@@ -4580,10 +4907,18 @@ fn switching_computers_restores_each_windows_remote_sidebar_view() {
             settings.sidebar_collapsed_active_groups.clone(),
             settings.sidebar_projects_open,
             settings.sidebar_chats_open,
+            settings.sidebar_collapsed_link_groups.clone(),
         )
     };
     let local = store.read_with(&cx, |store, _| view(&store.settings));
-    let defaults = (false, Default::default(), Default::default(), true, true);
+    let defaults = (
+        false,
+        Default::default(),
+        Default::default(),
+        true,
+        true,
+        Default::default(),
+    );
     let window = add_window(&mut cx, &store, temp.path(), "remember-remote-sidebar");
     let visit = |cx: &mut TestAppContext, computer: Computer| {
         window
@@ -4619,7 +4954,15 @@ fn switching_computers_restores_each_windows_remote_sidebar_view() {
         );
         visual.run_until_parked();
     }
-    sidebar(&cx).update(&mut cx, |sidebar, cx| sidebar.toggle_active_only(cx));
+    sidebar(&cx).update(&mut cx, |sidebar, cx| {
+        sidebar
+            .remote_settings
+            .as_mut()
+            .unwrap()
+            .sidebar_collapsed_link_groups
+            .insert("remote-tab".into());
+        sidebar.toggle_active_only(cx);
+    });
     visual.run_until_parked();
     let group = visual.debug_bounds("ACTIVE_GROUP_TOGGLE agents").unwrap();
     visual.simulate_click(group.center(), Default::default());
@@ -4629,6 +4972,7 @@ fn switching_computers_restores_each_windows_remote_sidebar_view() {
     assert!(!remembered.1.is_empty());
     assert!(remembered.2.contains("agents"));
     assert!(!remembered.3 && !remembered.4);
+    assert!(remembered.5.contains("remote-tab"));
 
     visit(&mut cx, computers()[0].clone());
     assert_eq!(
@@ -4654,15 +4998,29 @@ fn switching_computers_restores_each_windows_remote_sidebar_view() {
     });
     visit(&mut cx, other.clone());
     assert_eq!(remote_view(&cx), defaults);
+    clients.update(&mut cx, |clients, cx| {
+        clients
+            .overviews
+            .insert(other.id.clone(), sidebar_overview());
+        cx.notify();
+    });
+    cx.run_until_parked();
+    sidebar(&cx).update(&mut cx, |sidebar, cx| sidebar.toggle_active_only(cx));
+    let other_view = remote_view(&cx);
+    let saved = store.read_with(&cx, |store, _| store.settings.remote_sidebars.clone());
+    assert!(saved["other"].active_only);
+    assert_eq!(saved["host"].collapsed_projects, remembered.1);
+    assert_eq!(saved["other"].collapsed_projects, other_view.1);
+    assert_ne!(saved["host"], saved["other"]);
     visit(&mut cx, computers()[1].clone());
     assert_eq!(remote_view(&cx), remembered);
     visit(&mut cx, other);
-    assert_eq!(remote_view(&cx), defaults);
+    assert_eq!(remote_view(&cx), other_view);
     visit(&mut cx, computers()[1].clone());
     sidebar(&cx).update(&mut cx, |sidebar, cx| sidebar.toggle_active_only(cx));
     visit(&mut cx, computers()[0].clone());
     visit(&mut cx, computers()[1].clone());
-    let mut show_all = remembered;
+    let mut show_all = remembered.clone();
     show_all.0 = false;
     assert_eq!(remote_view(&cx), show_all);
     assert_eq!(
@@ -4676,16 +5034,334 @@ fn switching_computers_restores_each_windows_remote_sidebar_view() {
     second
         .read_with(&cx, |root, cx| {
             let sidebar = root.remote_client.workspace().unwrap().sidebar.read(cx);
-            assert_eq!(view(sidebar.remote_settings.as_ref().unwrap()), defaults);
+            assert_eq!(view(sidebar.remote_settings.as_ref().unwrap()), show_all);
         })
         .unwrap();
+    second
+        .update(&mut cx, |root, _, cx| {
+            root.remote_client
+                .workspace()
+                .unwrap()
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.toggle_active_only(cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        remote_view(&cx),
+        show_all,
+        "open windows keep their working copy"
+    );
 
     visit(&mut cx, computers()[0].clone());
     clients.update(&mut cx, |clients, _| {
         clients.overviews.remove("host");
     });
     visit(&mut cx, computers()[1].clone());
-    assert_eq!(remote_view(&cx), defaults);
+    assert_eq!(
+        remote_view(&cx),
+        remembered,
+        "dropping an overview does not discard the saved view"
+    );
+}
+
+#[test]
+fn first_remote_overview_seeds_only_empty_projects_once() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for explicit_sidebar in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, clients) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+        let mut data = sidebar_overview();
+        for id in ["empty", "pinned-only", "mission-only"] {
+            let mut project = data.projects[0].clone();
+            project.id = id.into();
+            project.name = id.into();
+            data.projects.push(project);
+        }
+        let mut pinned = data.tabs[0].clone();
+        pinned.id = "only-pinned-tab".into();
+        pinned.project = Some("pinned-only".into());
+        data.tabs.push(pinned);
+        let mut mission = data.missions[0].clone();
+        mission.id = "only-mission".into();
+        mission.project = Some("mission-only".into());
+        data.missions.push(mission.clone());
+        mission.id = "only-pinned-mission".into();
+        mission.project = Some("pinned-only".into());
+        mission.pinned = true;
+        data.missions.push(mission);
+        if explicit_sidebar {
+            data.sidebar = Some(workspace::sidebar_nodes(&data));
+        }
+        fake.set_overview(data.clone());
+        cx.run_until_parked();
+        assert!(store
+            .read_with(&cx, |store, _| store.settings.clone())
+            .remote_sidebars
+            .is_empty());
+        clients.update(&mut cx, |clients, _| {
+            clients.overviews.remove("host");
+        });
+        let window = add_window(&mut cx, &store, temp.path(), "seed-remote-sidebar");
+        window
+            .update(&mut cx, |root, window, cx| {
+                root.visit_computer(computers()[1].clone(), window, cx);
+            })
+            .unwrap();
+        assert!(
+            store
+                .read_with(&cx, |store, _| store.settings.clone())
+                .remote_sidebars
+                .is_empty(),
+            "seeding waits for the overview"
+        );
+        fake.set_overview(data.clone());
+        cx.run_until_parked();
+        let saved = store
+            .read_with(&cx, |store, _| store.settings.clone())
+            .remote_sidebars["host"]
+            .clone();
+        assert_eq!(
+            saved.collapsed_projects,
+            ["empty".into(), "pinned-only".into()].into()
+        );
+        assert!(saved.projects_open && saved.chats_open);
+        assert!(!saved.active_only);
+        assert!(saved.collapsed_active_groups.is_empty() && saved.collapsed_link_groups.is_empty());
+
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+        let project = visual.debug_bounds("SIDEBAR_PROJECT:empty").unwrap();
+        visual.simulate_click(project.center(), Default::default());
+        visual.run_until_parked();
+        let saved = store
+            .read_with(&cx, |store, _| store.settings.clone())
+            .remote_sidebars["host"]
+            .clone();
+        assert_eq!(saved.collapsed_projects, ["pinned-only".into()].into());
+        let mut tab = data.tabs[1].clone();
+        tab.id = "new-chat".into();
+        tab.project = Some("pinned-only".into());
+        data.tabs.push(tab);
+        data.sidebar = None;
+        fake.set_overview(data);
+        visual.run_until_parked();
+        assert_eq!(
+            store
+                .read_with(&cx, |store, _| store.settings.clone())
+                .remote_sidebars["host"],
+            saved
+        );
+        window
+            .update(&mut cx, |root, window, cx| {
+                root.choose_computer(computers()[0].clone(), false, window, cx);
+                root.choose_computer(computers()[1].clone(), false, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .read_with(&cx, |root, cx| {
+                let sidebar = root.remote_client.workspace().unwrap().sidebar.read(cx);
+                assert_eq!(
+                    crate::app_settings::RemoteSidebarSettings::from_settings(
+                        sidebar.remote_settings.as_ref().unwrap()
+                    ),
+                    saved
+                );
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn remote_sidebar_waits_for_the_seed_before_persisting_initial_window_views() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for window_count in [1, 2] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, clients) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+        clients.update(&mut cx, |clients, _| {
+            clients.overviews.remove("host");
+        });
+        let windows = (0..window_count)
+            .map(|index| {
+                let window = add_window(
+                    &mut cx,
+                    &store,
+                    temp.path(),
+                    &format!("pending-remote-sidebar-{index}"),
+                );
+                window
+                    .update(&mut cx, |root, window, cx| {
+                        root.visit_computer(computers()[1].clone(), window, cx);
+                        if window_count == 1 {
+                            root.remote_client.workspace().unwrap().sidebar.update(
+                                cx,
+                                |sidebar, cx| {
+                                    let settings = sidebar.remote_settings.as_mut().unwrap();
+                                    settings.sidebar_projects_open = false;
+                                    settings.sidebar_chats_open = false;
+                                    sidebar.toggle_active_only(cx);
+                                },
+                            );
+                        }
+                    })
+                    .unwrap();
+                window
+            })
+            .collect::<Vec<_>>();
+        assert!(store.read_with(&cx, |store, _| store.settings.remote_sidebars.is_empty()));
+        let targets = windows
+            .iter()
+            .map(|window| {
+                window
+                    .read_with(&cx, |root, _| {
+                        root.remote_client
+                            .workspace()
+                            .unwrap()
+                            .front_page
+                            .target
+                            .clone()
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        clients.update(&mut cx, |clients, _| {
+            clients.invalidate_capabilities("host")
+        });
+        for (window, target) in windows.iter().zip(targets) {
+            window
+                .update(&mut cx, |root, _, cx| root.sync_remote_state(cx))
+                .unwrap();
+            window
+                .read_with(&cx, |root, cx| {
+                    let remote = root.remote_client.workspace().unwrap();
+                    assert_ne!(remote.front_page.target, target);
+                    let settings = remote.sidebar.read(cx).remote_settings.as_ref().unwrap();
+                    assert_eq!(settings.sidebar_active_only, window_count == 1);
+                    assert_eq!(settings.sidebar_projects_open, window_count != 1);
+                    assert_eq!(settings.sidebar_chats_open, window_count != 1);
+                })
+                .unwrap();
+        }
+        assert!(store.read_with(&cx, |store, _| store.settings.remote_sidebars.is_empty()));
+        fake.set_overview(overview());
+        cx.run_until_parked();
+        let saved = store.read_with(&cx, |store, _| {
+            store.settings.remote_sidebars["host"].clone()
+        });
+        assert_eq!(saved.collapsed_projects, ["p".into()].into());
+        assert_eq!(saved.active_only, window_count == 1);
+        assert_eq!(saved.projects_open, window_count != 1);
+        assert_eq!(saved.chats_open, window_count != 1);
+        for window in &windows {
+            window
+                .read_with(&cx, |root, cx| {
+                    let sidebar = root.remote_client.workspace().unwrap().sidebar.read(cx);
+                    assert_eq!(
+                        crate::app_settings::RemoteSidebarSettings::from_settings(
+                            sidebar.remote_settings.as_ref().unwrap()
+                        ),
+                        saved
+                    );
+                })
+                .unwrap();
+        }
+        windows
+            .last()
+            .unwrap()
+            .update(&mut cx, |root, _, cx| {
+                root.remote_client
+                    .workspace()
+                    .unwrap()
+                    .sidebar
+                    .update(cx, |sidebar, cx| sidebar.toggle_active_only(cx));
+            })
+            .unwrap();
+        let changed = store.read_with(&cx, |store, _| {
+            store.settings.remote_sidebars["host"].clone()
+        });
+        assert_eq!(changed.collapsed_projects, saved.collapsed_projects);
+        assert_eq!(changed.active_only, !saved.active_only);
+    }
+}
+
+#[test]
+fn remote_sidebar_view_survives_a_fresh_store_loading_the_settings_file() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    let window = add_window(&mut cx, &store, temp.path(), "save-remote-sidebar");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        store
+            .read_with(&cx, |store, _| store.settings.clone())
+            .remote_sidebars["host"]
+            .collapsed_projects,
+        ["p".into()].into()
+    );
+    window
+        .update(&mut cx, |root, _, cx| {
+            root.remote_client
+                .workspace()
+                .unwrap()
+                .sidebar
+                .update(cx, |sidebar, cx| {
+                    let settings = sidebar.remote_settings.as_mut().unwrap();
+                    settings.sidebar_collapsed_projects.clear();
+                    settings
+                        .sidebar_collapsed_active_groups
+                        .insert("agents".into());
+                    settings
+                        .sidebar_collapsed_link_groups
+                        .insert("remote-tab".into());
+                    settings.sidebar_projects_open = false;
+                    settings.sidebar_chats_open = false;
+                    sidebar.toggle_active_only(cx);
+                });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let saved = store
+        .read_with(&cx, |store, _| store.settings.clone())
+        .remote_sidebars["host"]
+        .clone();
+    let path = temp.path().join("settings.json");
+    let settings = AppSettings::load(&path).unwrap();
+    assert_eq!(settings.remote_sidebars["host"], saved);
+    let core = store.read_with(&cx, |store, _| store.test_core.clone());
+    let restarted = cx.new(|cx| AppStore::new(core, None, None, path, settings, None, cx));
+    cx.run_until_parked();
+    restarted.update(&mut cx, |store, _| {
+        store.client = fake.client();
+        store.remote_clients = clients;
+        store.remote_status = Some(fake.status.lock().unwrap().clone());
+    });
+    let second = add_window(&mut cx, &restarted, temp.path(), "reload-remote-sidebar");
+    second.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    second
+        .read_with(&cx, |root, cx| {
+            let sidebar = root.remote_client.workspace().unwrap().sidebar.read(cx);
+            assert_eq!(
+                crate::app_settings::RemoteSidebarSettings::from_settings(
+                    sidebar.remote_settings.as_ref().unwrap()
+                ),
+                saved
+            );
+        })
+        .unwrap();
+    assert_eq!(
+        restarted
+            .read_with(&cx, |store, _| store.settings.clone())
+            .remote_sidebars["host"],
+        saved
+    );
 }
 
 #[test]
@@ -4915,6 +5591,8 @@ pub(crate) fn enable_front_page(fake: &Fake) {
         "deleteProject",
         "stopMission",
         "resumeMission",
+        "linkMission",
+        "unlinkMission",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -6839,4 +7517,2049 @@ fn reconnecting_to_or_leaving_a_host_restores_a_maximized_split() {
             assert!(root.maximized_panes.is_empty());
         })
         .unwrap();
+}
+
+fn host_usage() -> serde_json::Value {
+    serde_json::json!({"agents":[
+        {"name":"claude-code","value":{"windows":[{"name":"Week","usedPercent":41.,"resetsAt":null}],"updatedAt":"2026-11-09T06:00:00Z"},"error":null},
+        {"name":"codex","value":{"windows":[{"name":"Week","usedPercent":12.,"resetsAt":null}],"credits":{"balance":"1250.75","hasCredits":true,"unlimited":false},"updatedAt":"2026-11-09T06:00:00Z"},"error":null},
+        {"name":"future-agent","value":null,"error":"futureReason"}
+    ],"refreshing":false,"activeClaudeAccount":"Host Work"})
+}
+
+#[test]
+fn remote_footer_and_readonly_popover_use_the_hosts_usage_and_keep_it_while_disconnected() {
+    use runner_core::protocol::model::Runtime;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview", "usage", "ping"]);
+    store.update(&mut cx, |store, _| {
+        store.usage.runtimes.insert(
+            Runtime::Codex,
+            runner_core::protocol::usage::RuntimeUsage {
+                value: Some(runner_core::protocol::usage::AgentUsage {
+                    credits: Some(runner_core::protocol::UsageCredits {
+                        balance: Some("9.5".into()),
+                        has_credits: true,
+                        unlimited: false,
+                    }),
+                    windows: vec![runner_core::protocol::usage::UsageWindow {
+                        name: "Week".into(),
+                        used_percent: 88.,
+                        resets_at: None,
+                    }],
+                    updated_at: chrono::Utc::now(),
+                }),
+                error: None,
+            },
+        );
+        *fake.local_usage.lock().unwrap() = store.usage.clone();
+    });
+    let window = add_window(&mut cx, &store, temp.path(), "remote-usage");
+    window
+        .update(&mut cx, |root, _, cx| {
+            root.usage_installed = vec![Runtime::Codex];
+            cx.notify();
+        })
+        .unwrap();
+    window
+        .read_with(&cx, |root, cx| {
+            assert_eq!(
+                root.sidebar_usage(cx)
+                    .0
+                    .get(Runtime::Codex)
+                    .unwrap()
+                    .windows[0]
+                    .used_percent,
+                88.
+            )
+        })
+        .unwrap();
+    window.update(&mut cx, choose_host).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.simulate_resize(size(px(1200.), px(900.)));
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 1);
+    window
+        .read_with(&visual, |root, cx| {
+            let (snapshot, agents, dimmed) = root.sidebar_usage(cx);
+            assert_eq!(agents, vec![Runtime::Codex, Runtime::ClaudeCode]);
+            assert_eq!(
+                snapshot.get(Runtime::Codex).unwrap().windows[0].used_percent,
+                12.
+            );
+            assert_eq!(
+                snapshot.get(Runtime::ClaudeCode).unwrap().windows[0].used_percent,
+                41.
+            );
+            assert_eq!(
+                snapshot
+                    .get(Runtime::Codex)
+                    .unwrap()
+                    .credits
+                    .as_ref()
+                    .unwrap()
+                    .balance
+                    .as_deref(),
+                Some("1250.75")
+            );
+            assert!(!dimmed);
+            assert_eq!(root.remote_client.remote_usage(cx).unwrap().2, "Studio");
+        })
+        .unwrap();
+    let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
+    visual.simulate_click(usage.center(), Default::default());
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_some());
+    assert!(visual.debug_bounds("USAGE_CREDITS").is_some());
+    assert!(visual.debug_bounds("USAGE_AGENT_SETTINGS").is_none());
+    assert!(visual.debug_bounds("USAGE_REFRESH").is_none());
+    assert!(visual.debug_bounds("USAGE_REMOTE_ACCOUNT").is_some());
+    assert!(visual.debug_bounds("USAGE_SECTION_claude-code").is_some());
+    assert_eq!(fake.request_count("usage"), 2);
+    assert_eq!(action_trace(&fake, "usage")[1]["popover"], true);
+    for state in ["reconnecting", "unreachable"] {
+        fake.emit(
+            "remote/connection",
+            serde_json::json!({"computer":"host","state":state}),
+        );
+        visual.run_until_parked();
+        window
+            .read_with(&visual, |root, cx| {
+                let (snapshot, _, dimmed) = root.sidebar_usage(cx);
+                assert!(dimmed);
+                assert_eq!(
+                    snapshot
+                        .get(Runtime::Codex)
+                        .unwrap()
+                        .credits
+                        .as_ref()
+                        .unwrap()
+                        .balance
+                        .as_deref(),
+                    Some("1250.75")
+                );
+                assert_eq!(
+                    snapshot.get(Runtime::Codex).unwrap().windows[0].used_percent,
+                    12.
+                );
+            })
+            .unwrap();
+    }
+    assert!(clients.read_with(&visual, |clients, _| clients.usage.contains_key("host")));
+    window
+        .update(&mut visual, |root, window, cx| {
+            root.return_to_this_computer(window, cx)
+        })
+        .unwrap();
+    visual.run_until_parked();
+    window
+        .read_with(&visual, |root, cx| {
+            assert_eq!(
+                root.sidebar_usage(cx)
+                    .0
+                    .get(Runtime::Codex)
+                    .unwrap()
+                    .windows[0]
+                    .used_percent,
+                88.
+            )
+        })
+        .unwrap();
+    assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_none());
+}
+
+#[test]
+fn usage_requests_are_shared_by_windows_and_follow_the_periodic_and_popover_intervals() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview", "usage"]);
+    let first = add_window(&mut cx, &store, temp.path(), "usage-first");
+    let second = add_window(&mut cx, &store, temp.path(), "usage-second");
+    first.update(&mut cx, choose_host).unwrap();
+    second.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(58));
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 2);
+    let mut refreshing = host_usage();
+    refreshing["refreshing"] = true.into();
+    fake.queue_result("usage", Ok(refreshing));
+    let mut visual = VisualTestContext::from_window(first.into(), &cx);
+    visual.run_until_parked();
+    let trigger = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
+    visual.simulate_click(trigger.center(), Default::default());
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 3);
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 4);
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 4, "refresh completed");
+    for window in [first, second] {
+        window
+            .update(&mut visual, |root, window, cx| {
+                root.return_to_this_computer(window, cx)
+            })
+            .unwrap();
+    }
+    visual.run_until_parked();
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(60));
+    visual.run_until_parked();
+    assert_eq!(
+        fake.request_count("usage"),
+        4,
+        "no remote window showing the host"
+    );
+}
+
+#[test]
+fn a_host_without_usage_shows_the_update_hint_and_receives_no_usage_request() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview"]);
+    let window = add_window(&mut cx, &store, temp.path(), "no-usage");
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.usage_installed = vec![runner_core::protocol::model::Runtime::Codex];
+            choose_host(root, window, cx);
+        })
+        .unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.simulate_resize(size(px(1200.), px(900.)));
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_USAGE").is_none());
+    let hint = visual.debug_bounds("SIDEBAR_USAGE_UPDATE").unwrap();
+    visual.simulate_click(hint.center(), Default::default());
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("USAGE_OLDER_HOST").is_some());
+    assert!(visual.debug_bounds("USAGE_SECTION_codex").is_none());
+    assert_eq!(fake.request_count("usage"), 0);
+    window
+        .update(&mut visual, |root, window, cx| {
+            root.return_to_this_computer(window, cx)
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_USAGE_UPDATE").is_none());
+    assert!(visual.debug_bounds("SIDEBAR_USAGE").is_some());
+}
+
+#[test]
+fn the_update_hint_fits_beside_the_footer_buttons_at_every_width_zoom_and_language() {
+    use crate::i18n::{testing::with_locale, Locale};
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for locale in [Locale::English, Locale::SimplifiedChinese] {
+        with_locale(locale, || {
+            for width in [
+                crate::app_settings::SIDEBAR_MIN,
+                crate::app_settings::SIDEBAR_DEFAULT,
+            ] {
+                for zoom in [1., 1.5, 2.] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let mut cx = TestAppContext::single();
+                    let (store, fake, _) = fixture(&mut cx, temp.path());
+                    fake.set_features(&["overview"]);
+                    store.update(&mut cx, |store, _| {
+                        store.settings.sidebar_width = width;
+                        store.settings.app_zoom = zoom;
+                    });
+                    let window = add_window(&mut cx, &store, temp.path(), "hint-width");
+                    window.update(&mut cx, choose_host).unwrap();
+                    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+                    visual.simulate_resize(size(px(1200.), px(900.)));
+                    visual.run_until_parked();
+                    let footer = visual.debug_bounds("SIDEBAR_FOOTER").unwrap();
+                    let hint = visual.debug_bounds("SIDEBAR_USAGE_UPDATE").unwrap();
+                    let text = visual.debug_bounds("SIDEBAR_USAGE_UPDATE_TEXT").unwrap();
+                    let gear = visual.debug_bounds("SIDEBAR_SETTINGS").unwrap();
+                    let case = format!("{locale:?} {width} {zoom}");
+                    assert!(hint.left() >= footer.left(), "{case}");
+                    assert!(hint.right() <= gear.left(), "{case}: {hint:?} {gear:?}");
+                    assert!(
+                        gear.right() <= footer.right(),
+                        "{case}: {gear:?} {footer:?}"
+                    );
+                    assert!(text.right() <= hint.right(), "{case}: {text:?} {hint:?}");
+                    assert!(
+                        (hint.size.height - px(32. * zoom)).abs() <= px(1.),
+                        "{case}"
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn a_host_with_usage_shows_no_update_hint() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview", "usage"]);
+    let window = add_window(&mut cx, &store, temp.path(), "with-usage");
+    window.update(&mut cx, choose_host).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("SIDEBAR_USAGE_UPDATE").is_none());
+}
+
+#[test]
+fn usage_keeps_the_last_reply_after_failures_and_reentry_but_forget_removes_it() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    fake.set_features(&["overview", "usage"]);
+    let window = add_window(&mut cx, &store, temp.path(), "usage-cache");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 1);
+    fake.queue_result("usage", Err(ClientError::msg("temporary failure")));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 2);
+    assert!(clients.read_with(&cx, |clients, _| clients.usage.contains_key("host")));
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.return_to_this_computer(window, cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(clients.read_with(&cx, |clients, _| clients.usage.contains_key("host")));
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("usage"), 3);
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"host","state":"reconnecting"}),
+    );
+    cx.run_until_parked();
+    fake.emit(
+        "remote/connection",
+        serde_json::json!({"computer":"host","state":"connected"}),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        fake.request_count("usage"),
+        4,
+        "reconnection requests usage immediately"
+    );
+    clients.update(&mut cx, |clients, cx| {
+        clients.apply(model::Update::Forgotten("host".into(), true));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(!clients.read_with(&cx, |clients, _| clients.usage.contains_key("host")));
+}
+
+pub(crate) fn update_gate_error() -> ClientError {
+    ClientError {
+        message: "Codex needs an update".into(),
+        version_gate: Some(runner_core::protocol::RuntimeVersionGate {
+            runtime: runner_core::protocol::Runtime::Codex,
+            installed_version: "0.147.0".into(),
+            min_version: "0.149.0".into(),
+        }),
+    }
+}
+
+pub(crate) fn completed_update() -> serde_json::Value {
+    serde_json::to_value(runner_core::protocol::RuntimeUpdateTask {
+        id: "host-update".into(),
+        runtime: runner_core::protocol::Runtime::Codex,
+        state: runner_core::protocol::RuntimeUpdateState::Succeeded,
+        from_version: Some("0.147.0".into()),
+        to_version: Some("0.167.0".into()),
+        installed_version: Some("0.167.0".into()),
+        step: "Done".into(),
+        message: None,
+        exit_code: Some(0),
+        running_sessions: 0,
+    })
+    .unwrap()
+}
+
+/// Presses and releases where the element is drawn at each step: a frame landing between
+/// reading its bounds and the press can move it, and GPUI drops a click whose press or
+/// release misses its hitbox.
+fn click_drawn(visual: &mut VisualTestContext, selector: &'static str) {
+    let center = |visual: &mut VisualTestContext| {
+        visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing {selector}"))
+            .center()
+    };
+    let at = center(visual);
+    visual.simulate_mouse_move(at, None, Default::default());
+    visual.run_until_parked();
+    let at = center(visual);
+    visual.simulate_mouse_down(at, MouseButton::Left, Default::default());
+    visual.run_until_parked();
+    let at = center(visual);
+    visual.simulate_mouse_up(at, MouseButton::Left, Default::default());
+    visual.run_until_parked();
+}
+
+#[test]
+fn remote_resume_and_fork_refusals_offer_host_scoped_update_recovery() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for action in ["resume", "fork"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, _) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+        fake.features
+            .lock()
+            .unwrap()
+            .extend(["runtimeTaskStart".into(), "runtimeTask".into()]);
+        let mut data = overview();
+        data.sessions.get_mut("s").unwrap().status.status = runner_core::companion::Status::Stopped;
+        fake.set_overview(data);
+        fake.queue_result(action, Err(update_gate_error()));
+        fake.queue_result("runtimeTaskStart", Ok(completed_update()));
+        let window = add_window(&mut cx, &store, temp.path(), action);
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |root, window, cx| {
+                if action == "resume" {
+                    let pane = root.front_page_layout().unwrap().focused_pane_id.clone();
+                    root.resume_chat(&pane, "s", window, cx);
+                } else {
+                    root.fork_chat("s", window, cx);
+                    root.confirm_fork_chat(window, cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+        visual.run_until_parked();
+        let selector = if action == "resume" {
+            "AGENT_RECOVERY_UPDATE:s"
+        } else {
+            "launcher-update-wait-primary"
+        };
+        if action == "resume" {
+            assert!(
+                visual.debug_bounds(selector).is_some(),
+                "remote resume must render its update card"
+            );
+            click_drawn(&mut visual, selector);
+        } else {
+            // The fork refusal is a launcher card using the same stopped-card action.
+            click_drawn(&mut visual, "LAUNCHER_UPDATE_ACTION");
+        }
+        let chat_error = window
+            .read_with(&visual, |root, _| root.chat_error.clone())
+            .unwrap();
+        assert_eq!(
+            fake.request_count("runtimeTaskStart"),
+            1,
+            "{action}: chat error {chat_error:?}"
+        );
+        assert_eq!(
+            fake.request_count(action),
+            2,
+            "{action} retries the original host operation"
+        );
+        window
+            .read_with(&visual, |root, _| {
+                assert!(
+                    root.agent_tasks.tasks.is_empty(),
+                    "host tasks never enter the local list"
+                );
+                assert!(root.agent_update.is_none(), "no automatic dialog");
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn split_close_completion_restores_remote_keyboard_input_without_stealing_navigation() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for kind in ["shell", "chat", "empty"] {
+        for navigation in ["stay", "sibling", "tab", "input", "late-tab", "late-input"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut cx = TestAppContext::single();
+            let (store, fake, _) = fixture(&mut cx, temp.path());
+            enable_front_page(&fake);
+            fake.model_session_removal.store(true, Ordering::SeqCst);
+            let mut data = overview();
+            let mut survivor = data.sessions["s"].clone();
+            survivor.runtime = Some("shell".into());
+            data.sessions.insert("survivor".into(), survivor);
+            if kind == "shell" {
+                data.sessions.get_mut("s").unwrap().runtime = Some("shell".into());
+            }
+            data.tabs[0].panes = serde_json::from_value(serde_json::json!({
+                "split":"row","sizes":[0.5,0.5],
+                "a":{"id":"closing", "session": if kind == "empty" { None } else { Some("s") }},
+                "b":{"id":"surviving", "session":"survivor"}
+            }))
+            .unwrap();
+            let mut other = data.tabs[0].clone();
+            other.id = "other-tab".into();
+            other.panes =
+                serde_json::from_value(serde_json::json!({"id":"other", "session":"survivor"}))
+                    .unwrap();
+            data.tabs.push(other);
+            fake.set_overview(data);
+            let window = add_window(&mut cx, &store, temp.path(), "remote-close-focus");
+            window.update(&mut cx, choose_host).unwrap();
+            cx.run_until_parked();
+            let mut visual = VisualTestContext::from_window(window.into(), &cx);
+            let (closing, surviving) = window
+                .update(&mut visual, |root, _, _| {
+                    let leaves = root.front_page_layout().unwrap().root.leaves();
+                    (leaves[0].id.clone(), leaves[1].id.clone())
+                })
+                .unwrap();
+            window
+                .update(&mut visual, |root, window, cx| {
+                    root.focus_pane(
+                        if navigation == "sibling" {
+                            &surviving
+                        } else {
+                            &closing
+                        },
+                        cx,
+                    );
+                    root.focus_active_terminal(window, cx);
+                })
+                .unwrap();
+            visual.run_until_parked();
+            let mut input_focus = None;
+            window
+                .update(&mut visual, |root, window, cx| {
+                    match kind {
+                        "empty" => root.close_pane(&closing, window, cx),
+                        "shell" => root.close_terminal_pane(&closing, "s", window, cx),
+                        _ => {
+                            root.request_close_chat_pane(&closing, "s", window, cx);
+                            root.confirm_terminal_close(window, cx);
+                        }
+                    }
+                    match navigation {
+                        "tab" => {
+                            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+                            root.focus_active_terminal(window, cx);
+                        }
+                        "input" => {
+                            let find = root.remote_client.workspace().unwrap().terminals
+                                ["survivor"]
+                                .attachment
+                                .terminal_find
+                                .clone();
+                            find.update(cx, |find, cx| find.open(window, cx));
+                            input_focus = window.focused(cx);
+                        }
+                        _ => {}
+                    }
+                })
+                .unwrap();
+            visual.run_until_parked();
+            window
+                .update(&mut visual, |root, window, cx| match navigation {
+                    "late-tab" => {
+                        root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+                        root.focus_active_terminal(window, cx);
+                    }
+                    "late-input" => {
+                        let find = root.remote_client.workspace().unwrap().terminals["survivor"]
+                            .attachment
+                            .terminal_find
+                            .clone();
+                        find.update(cx, |find, cx| find.open(window, cx));
+                        input_focus = window.focused(cx);
+                    }
+                    _ => {}
+                })
+                .unwrap();
+            visual.run_until_parked();
+            let completed_overview = fake.overview.lock().unwrap().clone();
+            fake.set_overview(completed_overview);
+            visual.run_until_parked();
+            window
+                .update(&mut visual, |root, window, cx| {
+                    let layout = root.front_page_layout().unwrap();
+                    assert_eq!(
+                        layout.id,
+                        if matches!(navigation, "tab" | "late-tab") {
+                            "other-tab"
+                        } else {
+                            "remote-tab"
+                        }
+                    );
+                    assert_eq!(layout.root.leaves().len(), 1, "{kind}/{navigation}");
+                    if matches!(navigation, "input" | "late-input") {
+                        assert_eq!(window.focused(cx), input_focus, "{kind}/{navigation}");
+                    } else {
+                        assert!(
+                            root.remote_client.workspace().unwrap().terminals["survivor"]
+                                .attachment
+                                .terminal_focus
+                                .is_focused(window),
+                            "{kind}/{navigation}"
+                        );
+                    }
+                })
+                .unwrap();
+            if !matches!(navigation, "input" | "late-input") {
+                fake.input.lock().unwrap().clear();
+                visual.simulate_keystrokes("x");
+                visual.run_until_parked();
+                assert!(
+                    fake.input
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(address, bytes)| address.contains("survivor") && bytes == b"x"),
+                    "{kind}/{navigation}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn remote_archive_intermediate_launcher_waits_for_collapse_without_stealing_find_focus() {
+    use crate::surfaces::chat::PaneCloseFocus;
+    use crate::surfaces::front_page::actions::{Completion, WorkspaceAction};
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for navigation in ["stay", "find-before", "find-after"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, _) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+        fake.model_session_removal.store(true, Ordering::SeqCst);
+        let mut data = overview();
+        let mut survivor = data.sessions["s"].clone();
+        survivor.runtime = Some("shell".into());
+        data.sessions.insert("survivor".into(), survivor);
+        data.tabs[0].panes = serde_json::from_value(serde_json::json!({
+            "split":"row","sizes":[0.5,0.5],
+            "a":{"session":"s"},"b":{"session":"survivor"}
+        }))
+        .unwrap();
+        fake.set_overview(data);
+        let window = add_window(&mut cx, &store, temp.path(), "intermediate-remote-archive");
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+        let (focus, action, final_layout, mut input_focus) = window
+            .update(&mut visual, |root, window, cx| {
+                let layout = root.front_page_layout().unwrap().clone();
+                let pane = layout.root.leaves()[0].id.clone();
+                root.focus_pane(&pane, cx);
+                root.focus_active_terminal(window, cx);
+                let focus = PaneCloseFocus::capture(root, window, cx).unwrap();
+                let (action, _) = WorkspaceAction::archive(
+                    root,
+                    vec!["s".into()],
+                    None,
+                    Some(crate::PendingPaneClose {
+                        tab_id: layout.id.clone(),
+                        pane_id: pane,
+                    }),
+                    cx,
+                )
+                .unwrap();
+                let final_layout =
+                    root.remote_client.workspace().unwrap().closing_layouts[&layout.id].clone();
+                if navigation == "find-before" {
+                    let find = root.remote_client.workspace().unwrap().terminals["survivor"]
+                        .attachment
+                        .terminal_find
+                        .clone();
+                    find.update(cx, |find, cx| find.open(window, cx));
+                }
+                (focus, action, final_layout, window.focused(cx))
+            })
+            .unwrap();
+        action
+            .client
+            .archive(runner_core::companion::ActionTarget {
+                kind: runner_core::companion::ActionKind::Session,
+                id: "s".into(),
+            })
+            .unwrap();
+        let intermediate_overview = fake.overview.lock().unwrap().clone();
+        fake.set_overview(intermediate_overview);
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |root, window, cx| {
+                let layout = root.front_page_layout().unwrap();
+                assert_eq!(layout.root.leaves().len(), 2);
+                assert_eq!(layout.focused_session_id(), None);
+                assert!(
+                    !root.launchers.is_empty(),
+                    "the intermediate launcher must render"
+                );
+                assert_eq!(
+                    window.focused(cx),
+                    input_focus,
+                    "intermediate launcher stole focus: {navigation}"
+                );
+                if navigation == "find-after" {
+                    let find = root.remote_client.workspace().unwrap().terminals["survivor"]
+                        .attachment
+                        .terminal_find
+                        .clone();
+                    find.update(cx, |find, cx| find.open(window, cx));
+                    input_focus = window.focused(cx);
+                }
+            })
+            .unwrap();
+        action
+            .client
+            .layout(&final_layout, final_layout.parent_id.clone())
+            .unwrap();
+        window
+            .update(&mut visual, |root, window, cx| {
+                WorkspaceAction::complete_observed(
+                    root,
+                    action,
+                    Ok::<_, String>(Completion {
+                        layouts: vec![final_layout],
+                        ..Default::default()
+                    }),
+                    |done| done,
+                    |_, _, succeeded, cx| {
+                        assert!(succeeded);
+                        focus.defer_restore(window, cx);
+                    },
+                    cx,
+                );
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |root, window, cx| {
+                assert!(root.remote_client.pane_close_pending("remote-tab"));
+                assert_eq!(
+                    window.focused(cx),
+                    input_focus,
+                    "acknowledgement focused the interim launcher"
+                );
+            })
+            .unwrap();
+        let final_overview = fake.overview.lock().unwrap().clone();
+        fake.set_overview(final_overview);
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |root, window, cx| {
+                assert!(!root.remote_client.pane_close_pending("remote-tab"));
+                assert_eq!(root.front_page_layout().unwrap().root.leaves().len(), 1);
+                if navigation == "stay" {
+                    assert!(
+                        root.remote_client.workspace().unwrap().terminals["survivor"]
+                            .attachment
+                            .terminal_focus
+                            .is_focused(window)
+                    );
+                } else {
+                    assert_eq!(window.focused(cx), input_focus);
+                }
+            })
+            .unwrap();
+        fake.input.lock().unwrap().clear();
+        visual.simulate_keystrokes("x");
+        visual.run_until_parked();
+        if navigation == "stay" {
+            assert!(fake
+                .input
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(address, bytes)| address.contains("survivor") && bytes == b"x"));
+        } else {
+            assert!(
+                fake.input.lock().unwrap().is_empty(),
+                "Find input reached the terminal"
+            );
+        }
+    }
+}
+
+#[test]
+fn remote_chat_archive_prompts_for_linked_missions_and_supports_new_and_legacy_hosts() {
+    for legacy_host in [true, false] {
+        let _theme = crate::theme_snapshot::ThemeGuard::new();
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        let (store, fake, _) = fixture(&mut cx, temp.path());
+        enable_front_page(&fake);
+
+        let mut data = fake.overview.lock().unwrap().clone();
+        data.missions[0].linked_chat = Some(runner_core::companion::LinkedChat {
+            session_id: "s".into(),
+            title: "Remote chat".into(),
+            archived: false,
+            reports: true,
+        });
+        let mut other = data.missions[0].clone();
+        other.id = "other-mission".into();
+        other.title = "Other mission".into();
+        other.linked_chat = None;
+        data.missions.push(other);
+        fake.set_overview(data);
+        cx.run_until_parked();
+
+        let window = add_window(&mut cx, &store, temp.path(), "remote-linked-archive");
+        window.update(&mut cx, choose_host).unwrap();
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+
+        // Sidebar/tab archive on a remote chat with a linked mission opens Option A instead of archiving silently.
+        window
+            .update(&mut visual, |root, window, cx| {
+                window.activate_window();
+                root.request_archive_all(
+                    Some("remote-tab"),
+                    vec!["s".into()],
+                    crate::ArchiveAllSource::Sidebar,
+                    window,
+                    cx,
+                );
+                assert!(
+                    root.terminal_close_confirm.is_some(),
+                    "legacy_host={legacy_host}: linked remote chat opens confirmation"
+                );
+            })
+            .unwrap();
+        visual.update(|window, _| window.refresh());
+        visual.run_until_parked();
+        assert!(visual
+            .debug_bounds("CONFIRM_LINKED_MISSION remote-mission")
+            .is_some());
+        assert!(visual
+            .debug_bounds("CONFIRM_LINKED_MISSION other-mission")
+            .is_none());
+
+        // Escape cancels with zero archive requests.
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        assert_eq!(fake.request_count("archive"), 0);
+
+        if !legacy_host {
+            fake.queue_result(
+                "archive",
+                Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+            );
+        }
+
+        window
+            .update(&mut visual, |root, window, cx| {
+                root.request_archive_all(
+                    Some("remote-tab"),
+                    vec!["s".into()],
+                    crate::ArchiveAllSource::Sidebar,
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+
+        let archives = action_trace(&fake, "archive");
+        assert_eq!(archives[0]["target"]["kind"], "session");
+        assert_eq!(archives[0]["target"]["id"], "s");
+        assert_eq!(archives[0]["withMissions"], true);
+        if legacy_host {
+            assert_eq!(
+                archives.len(),
+                2,
+                "legacy host returning null triggers explicit mission archive fallback"
+            );
+            assert_eq!(archives[1]["target"]["kind"], "mission");
+            assert_eq!(archives[1]["target"]["id"], "remote-mission");
+            assert!(archives[1].get("withMissions").is_none());
+        } else {
+            assert_eq!(
+                archives.len(),
+                1,
+                "withMissions-aware host archives chat and linked missions in one request"
+            );
+        }
+    }
+}
+
+#[test]
+fn remote_chat_archive_tracks_linked_mission_pending_state_across_hosts_and_errors() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, _) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+
+    let host_a = computers()[1].clone();
+    let host_b = Computer {
+        id: "host-b".into(),
+        name: "Backup".into(),
+        online: true,
+        paired: true,
+        fingerprint: "host-b-key".into(),
+        ..Default::default()
+    };
+    fake.computers.lock().unwrap().push(host_b.clone());
+
+    let mut data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [{"id": "remote-tab", "project": "p", "name": "Remote tab", "pinned": true, "panes": {"session": "s"}, "shells": []}],
+        "missions": [{"id": "remote-mission", "title": "Remote mission", "project": null, "crew": "Duo", "state": "stopped", "pinned": false, "members": [], "asks": [], "shells": []}],
+        "sessions": {"s": {"kind": "chat", "title": "Remote session", "runtime": "codex", "status": "stopped", "unread": false}}
+    }))
+    .unwrap();
+    data.missions[0].linked_chat = Some(runner_core::companion::LinkedChat {
+        session_id: "s".into(),
+        title: "Remote session".into(),
+        archived: false,
+        reports: true,
+    });
+    fake.set_overview(data.clone());
+    fake.emit(
+        "remote/overview",
+        serde_json::json!({"computer": "host-b", "overview": data}),
+    );
+    cx.run_until_parked();
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-pending-archive");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+
+    // Case 1: Staying on Host A: in-flight state marks both chat and linked mission and blocks
+    // duplicates, then an error clears both marks and surfaces action_error for retry.
+    fake.queue_result("archive", Err(ClientError::msg("archive refused")));
+    window
+        .update(&mut cx, |root, window, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            assert!(root.terminal_close_confirm.is_some());
+            root.confirm_terminal_close(window, cx);
+
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Working));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::Working)
+            );
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            assert!(root.terminal_close_confirm.is_none());
+            root.remote_archive_sessions(vec!["s".into()], cx);
+        })
+        .unwrap();
+
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 1);
+    window
+        .read_with(&cx, |root, cx| {
+            assert!(root
+                .remote_client
+                .workspace()
+                .unwrap()
+                .action_error
+                .is_some());
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+        })
+        .unwrap();
+
+    // Case 2: Retry succeeds even across host switches (Host A -> Host B -> Local -> Host A while in
+    // flight, and finishing after epoch change).
+    fake.queue_result(
+        "archive",
+        Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+    );
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            assert!(root.terminal_close_confirm.is_some());
+            root.confirm_terminal_close(window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+
+            // Switching to another computer or This Computer never leaks Host A's pending marks.
+            root.visit_computer(host_b.clone(), window, cx);
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+
+            root.return_to_this_computer(window, cx);
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+
+            // Switching back to Host A while in flight restores the archiving state.
+            root.visit_computer(host_a.clone(), window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Working));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::Working)
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 2);
+    window
+        .read_with(&cx, |root, cx| {
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+        })
+        .unwrap();
+
+    // Case 3: Completing while viewing Host B cleans up Host A so returning shows no stale marks.
+    fake.queue_result(
+        "archive",
+        Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+    );
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            root.confirm_terminal_close(window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            root.visit_computer(host_b, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 3);
+
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.visit_computer(host_a, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(&cx, |root, cx| {
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+            assert_eq!(
+                attentions.get("remote-mission"),
+                Some(&AttentionState::None)
+            );
+        })
+        .unwrap();
+
+    // Case 4: Clearing pending archives for a disconnected host clears both marks cleanly.
+    fake.queue_result(
+        "archive",
+        Ok(serde_json::json!({"archivedMissions": ["remote-mission"]})),
+    );
+    window
+        .update(&mut cx, |root, window, cx| {
+            root.request_archive_all(
+                Some("remote-tab"),
+                vec!["s".into()],
+                crate::ArchiveAllSource::Sidebar,
+                window,
+                cx,
+            );
+            root.confirm_terminal_close(window, cx);
+            assert!(root.sidebar_archiving_session("s", cx));
+            assert!(root.sidebar_archiving_mission("remote-mission", cx));
+            root.remote_client.clear_pending_archives_for("host", cx);
+            assert!(!root.sidebar_archiving_session("s", cx));
+            assert!(!root.sidebar_archiving_mission("remote-mission", cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("archive"), 4);
+}
+
+#[test]
+fn remote_reading_running_codex_chat_clears_unread_and_survives_switching_and_stale_loads() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    {
+        let mut features = fake.features.lock().unwrap();
+        if !features.iter().any(|feature| feature == "markViewed") {
+            features.push("markViewed".into());
+        }
+    }
+    let initial: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [
+            {"id": "other-tab", "project": "p", "name": "Other tab", "pinned": true, "panes": {"session": "other"}, "shells": []},
+            {"id": "remote-tab", "project": "p", "name": "Remote tab", "pinned": true, "panes": {"session": "s"}, "shells": []}
+        ],
+        "missions": [],
+        "sessions": {
+            "other": {"kind": "chat", "title": "Other", "runtime": "shell", "status": "idle", "unread": false},
+            "s": {"kind": "chat", "title": "Codex chat", "runtime": "codex", "status": "idle", "unread": true}
+        }
+    }))
+    .unwrap();
+    fake.set_overview(initial.clone());
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-unread-running-codex");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+
+    // Initially viewing `other-tab`: running codex session `s` keeps its unread dot.
+    window
+        .read_with(&cx, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("other-tab"), Some(&AttentionState::None));
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Unread));
+        })
+        .unwrap();
+    assert_eq!(fake.request_count("markViewed"), 0);
+
+    // Selecting the running unread Codex tab sends `markViewed`, preserves `unread: true`
+    // until the host emits its status update, and then clears the dot locally.
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .status
+        .unread = false;
+    window
+        .update(&mut cx, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("remote-tab".into()), cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        action_trace(&fake, "markViewed")
+            .into_iter()
+            .map(|request| request["session"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["s".to_owned()]
+    );
+    // Ordered overview reconciliation clears local unread immediately after `markViewed` settles,
+    // without needing an unsolicited `remote/session-status` push.
+    assert!(
+        !clients.read_with(&cx, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&cx, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+        })
+        .unwrap();
+
+    // Switching away and back preserves the cleared state without spurious acks.
+    window
+        .update(&mut cx, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .update(&mut cx, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("remote-tab".into()), cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 1);
+    window
+        .read_with(&cx, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+        })
+        .unwrap();
+
+    // A later unviewed completion lights the dot again; an in-flight load started before
+    // `markViewed` cannot restore `unread: true` after viewing clears it.
+    window
+        .update(&mut cx, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .status
+        .unread = true;
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": true}
+        }),
+    );
+    cx.run_until_parked();
+    window
+        .read_with(&cx, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Unread));
+        })
+        .unwrap();
+
+    let (release_load, load_gate) = std::sync::mpsc::channel();
+    let (load_started_tx, load_started_rx) = std::sync::mpsc::channel();
+    fake.overview_gates
+        .lock()
+        .unwrap()
+        .insert("host".into(), load_gate);
+    *fake.overview_started.lock().unwrap() = Some(load_started_tx);
+    let load_client = fake.client();
+    let (load_updates, mut load_responses) = futures::channel::mpsc::unbounded();
+    let load_worker =
+        std::thread::spawn(move || model::load(&load_client, "host", &load_updates, &mut 1));
+    assert_eq!(
+        load_started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        "host"
+    );
+    let load_started = futures::executor::block_on(load_responses.next()).unwrap();
+    clients.update(&mut cx, |state, _| state.apply(load_started));
+
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .status
+        .unread = false;
+    window
+        .update(&mut cx, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("remote-tab".into()), cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 2);
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": false}
+        }),
+    );
+    release_load.send(()).unwrap();
+    load_worker.join().unwrap();
+    while let Ok(update) = load_responses.try_recv() {
+        clients.update(&mut cx, |state, _| state.apply(update));
+    }
+    cx.run_until_parked();
+    assert!(
+        !clients.read_with(&cx, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&cx, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+        })
+        .unwrap();
+
+    // Staying on `remote-tab` while Runner is unfocused leaves a new completion unread
+    // until the window becomes active; once active, passive status pushes auto-ack too.
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.deactivate_window();
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+    assert!(
+        clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    assert_eq!(fake.request_count("markViewed"), 2);
+
+    visual.update(|window, _| window.activate_window());
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 3);
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": false}
+        }),
+    );
+    visual.run_until_parked();
+    assert!(
+        !clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 4);
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": false}
+        }),
+    );
+    visual.run_until_parked();
+    assert!(
+        !clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+
+    // Switching away before a later turn completes keeps the green dot lit.
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    visual.run_until_parked();
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Unread));
+        })
+        .unwrap();
+}
+
+#[test]
+fn remote_focus_pane_and_take_control_mark_viewed_without_sync_spam() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    {
+        let mut features = fake.features.lock().unwrap();
+        if !features.iter().any(|feature| feature == "markViewed") {
+            features.push("markViewed".into());
+        }
+    }
+    let data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [{
+            "id": "split-tab",
+            "project": "p",
+            "name": "Split tab",
+            "pinned": true,
+            "panes": {
+                "split": "row",
+                "sizes": [0.5, 0.5],
+                "a": {"session": "a"},
+                "b": {"session": "b"}
+            },
+            "shells": []
+        }],
+        "missions": [],
+        "sessions": {
+            "a": {"kind": "chat", "title": "Pane A", "runtime": "codex", "status": "idle", "unread": false},
+            "b": {"kind": "chat", "title": "Pane B", "runtime": "codex", "status": "idle", "unread": false}
+        }
+    }))
+    .unwrap();
+    fake.set_overview(data);
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-focus-and-epoch");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+
+    // Unfocused window: `b` completes -> focusing `pane-b` sends `markViewed`.
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "b", "status": "idle", "unread": true}
+        }),
+    );
+    cx.run_until_parked();
+    window
+        .update(&mut cx, |root, _window, cx| {
+            let pane_b = root.front_page_layout().unwrap().root.leaves()[1]
+                .id
+                .clone();
+            root.focus_pane(&pane_b, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 1);
+    assert!(
+        !clients.read_with(&cx, |state, _| state.overviews["host"].sessions["b"]
+            .status
+            .unread)
+    );
+
+    // Taking remote control while unread on a running chat also sends `markViewed`.
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "a", "status": "idle", "unread": true}
+        }),
+    );
+    cx.run_until_parked();
+    window
+        .update(&mut cx, |root, _window, cx| {
+            root.remote_client.take_remote_control("a", cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 2);
+    assert!(
+        !clients.read_with(&cx, |state, _| state.overviews["host"].sessions["a"]
+            .status
+            .unread)
+    );
+
+    // After a failed reconciliation, passive `sync_remote_state` deduplicates per `(session,
+    // status_epoch)` across `remote/latency` ticks until a newer push arrives.
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.update(|window, _| window.activate_window());
+    visual.run_until_parked();
+    fake.queue_result("markViewed", Err(ClientError::msg("transient failure")));
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "a", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 3);
+
+    fake.emit(
+        "remote/latency",
+        serde_json::json!({"computer": "host", "ms": 25}),
+    );
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 3);
+
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "a", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 4);
+    assert!(
+        !clients.read_with(&visual, |state, _| state.overviews["host"].sessions["a"]
+            .status
+            .unread)
+    );
+}
+
+#[test]
+fn remote_delayed_mark_viewed_preserves_newer_unread_without_intermediate_clear() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    {
+        let mut features = fake.features.lock().unwrap();
+        if !features.iter().any(|feature| feature == "markViewed") {
+            features.push("markViewed".into());
+        }
+    }
+    let data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [
+            {"id": "other-tab", "project": "p", "name": "Other tab", "pinned": true, "panes": {"session": "other"}, "shells": []},
+            {"id": "tab-status", "project": "p", "name": "Status tab", "pinned": true, "panes": {"session": "s1"}, "shells": []},
+            {"id": "tab-overview", "project": "p", "name": "Overview tab", "pinned": true, "panes": {"session": "s2"}, "shells": []},
+            {"id": "tab-load", "project": "p", "name": "Load tab", "pinned": true, "panes": {"session": "s3"}, "shells": []}
+        ],
+        "missions": [],
+        "sessions": {
+            "other": {"kind": "chat", "title": "Other", "runtime": "shell", "status": "idle", "unread": false},
+            "s1": {"kind": "chat", "title": "Status session", "runtime": "codex", "status": "idle", "unread": true},
+            "s2": {"kind": "chat", "title": "Overview event session", "runtime": "codex", "status": "idle", "unread": true},
+            "s3": {"kind": "chat", "title": "Load overview session", "runtime": "codex", "status": "idle", "unread": true}
+        }
+    }))
+    .unwrap();
+    fake.set_overview(data.clone());
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-delayed-ack-no-false");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+
+    // 1) Status-push path: user opens `tab-status`, switches away while Turn 1 `markViewed` is in
+    // flight, and receives a coalesced Turn 2 `unread: true` status push with NO preceding false.
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("tab-status".into()), cx);
+        })
+        .unwrap();
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    clients.update(&mut visual, |state, cx| {
+        state.apply_event(ClientEvent {
+            name: "remote/session-status".into(),
+            payload: serde_json::json!({
+                "computer": "host",
+                "status": {"session": "s1", "status": "idle", "unread": true}
+            }),
+        });
+        cx.notify();
+    });
+    visual.run_until_parked();
+    assert!(
+        clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s1"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("tab-status"), Some(&AttentionState::Unread));
+        })
+        .unwrap();
+
+    // 2) `remote/overview` event path: user opens `tab-overview`, switches away while Turn 1
+    // `markViewed` is in flight, and receives a Turn 2 `unread: true` overview with NO false.
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("tab-overview".into()), cx);
+        })
+        .unwrap();
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    clients.update(&mut visual, |state, cx| {
+        state.apply_event(ClientEvent {
+            name: "remote/overview".into(),
+            payload: serde_json::json!({"computer": "host", "overview": data}),
+        });
+        cx.notify();
+    });
+    visual.run_until_parked();
+    assert!(
+        clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s2"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(
+                attentions.get("tab-overview"),
+                Some(&AttentionState::Unread)
+            );
+        })
+        .unwrap();
+
+    // 3) `Update::Overview` path: user opens `tab-load`, switches away while Turn 1 `markViewed`
+    // is in flight, and an initial/reconnect `Update::Overview` arrives with `s3.unread == true`.
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("tab-load".into()), cx);
+        })
+        .unwrap();
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    clients.update(&mut visual, |state, cx| {
+        state.apply(model::Update::LoadStarted("host".into(), 9));
+        state.apply(model::Update::Overview("host".into(), 9, data.clone()));
+        cx.notify();
+    });
+    visual.run_until_parked();
+    assert!(
+        clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s3"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("tab-load"), Some(&AttentionState::Unread));
+        })
+        .unwrap();
+    assert_eq!(fake.request_count("markViewed"), 3);
+}
+
+#[test]
+fn remote_coalesced_turn_completion_with_delayed_ack_preserves_unread() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    {
+        let mut features = fake.features.lock().unwrap();
+        if !features.iter().any(|feature| feature == "markViewed") {
+            features.push("markViewed".into());
+        }
+    }
+    let data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [
+            {"id": "other-tab", "project": "p", "name": "Other tab", "pinned": true, "panes": {"session": "other"}, "shells": []},
+            {"id": "remote-tab", "project": "p", "name": "Remote Codex", "pinned": true, "panes": {"session": "s"}, "shells": []}
+        ],
+        "missions": [],
+        "sessions": {
+            "other": {"kind": "chat", "title": "Other", "runtime": "codex", "status": "idle", "unread": false},
+            "s": {"kind": "chat", "title": "Codex", "runtime": "codex", "status": "idle", "unread": false}
+        }
+    }))
+    .unwrap();
+    fake.set_overview(data);
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-coalesced-unread");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.update(|window, _| window.activate_window());
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    visual.run_until_parked();
+    let coalesced_calls = Arc::new(AtomicUsize::new(0));
+    let hook_calls = coalesced_calls.clone();
+    *fake.on_mark_viewed.lock().unwrap() = Some(Box::new(move |fake, session| {
+        let cleared = hook_calls.fetch_add(1, Ordering::SeqCst) > 0;
+        fake.overview
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(session)
+            .unwrap()
+            .status
+            .unread = !cleared;
+    }));
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .status
+        .unread = true;
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 0);
+
+    // User selects `remote-tab` (Turn 1 `markViewed` dispatched) and navigates away to
+    // `other-tab` before its ack completes. Zero host status/overview pushes arrive (modeling
+    // a fast Turn 1 clear -> busy -> Turn 2 `idle+unread=true` cycle coalesced away on host).
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("remote-tab".into()), cx);
+        })
+        .unwrap();
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("other-tab".into()), cx);
+        })
+        .unwrap();
+    visual.run_until_parked();
+
+    assert_eq!(fake.request_count("markViewed"), 1);
+    assert!(
+        clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::Unread));
+        })
+        .unwrap();
+
+    // Switching back to `remote-tab` even with unchanged `status_epoch` still sends a fresh
+    // `markViewed`, and post-ack reconciliation clears the dot without an unsolicited push.
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("remote-tab".into()), cx);
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 2);
+    assert!(
+        !clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+        })
+        .unwrap();
+}
+
+#[test]
+fn remote_coalesced_turn_completion_while_visible_acknowledges_turn_two() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    {
+        let mut features = fake.features.lock().unwrap();
+        if !features.iter().any(|feature| feature == "markViewed") {
+            features.push("markViewed".into());
+        }
+    }
+    let data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [
+            {"id": "remote-tab", "project": "p", "name": "Remote Codex", "pinned": true, "panes": {"session": "s"}, "shells": []}
+        ],
+        "missions": [],
+        "sessions": {
+            "s": {"kind": "chat", "title": "Codex", "runtime": "codex", "status": "idle", "unread": false}
+        }
+    }))
+    .unwrap();
+    fake.set_overview(data);
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-coalesced-visible");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.update(|window, _| window.activate_window());
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 0);
+
+    // Call 1 models Turn 1 clear -> busy -> Turn 2 `idle+unread=true` with zero host pushes;
+    // Call 2 clears Turn 2 while the user stays active on `remote-tab`.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook_calls = calls.clone();
+    *fake.on_mark_viewed.lock().unwrap() = Some(Box::new(move |fake, session| {
+        let cleared = hook_calls.fetch_add(1, Ordering::SeqCst) > 0;
+        fake.overview
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(session)
+            .unwrap()
+            .status
+            .unread = !cleared;
+    }));
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .status
+        .unread = true;
+    fake.emit(
+        "remote/session-status",
+        serde_json::json!({
+            "computer": "host",
+            "status": {"session": "s", "status": "idle", "unread": true}
+        }),
+    );
+    visual.run_until_parked();
+
+    assert_eq!(fake.request_count("markViewed"), 2);
+    assert!(
+        !clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+        })
+        .unwrap();
+}
+
+#[test]
+fn remote_unread_push_while_mark_viewed_pending_retries_after_completion() {
+    use crate::surfaces::sidebar::AttentionState;
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (store, fake, clients) = fixture(&mut cx, temp.path());
+    enable_front_page(&fake);
+    {
+        let mut features = fake.features.lock().unwrap();
+        if !features.iter().any(|feature| feature == "markViewed") {
+            features.push("markViewed".into());
+        }
+    }
+    let data: Overview = serde_json::from_value(serde_json::json!({
+        "projects": [{"id": "p", "name": "Remote project"}],
+        "tabs": [
+            {"id": "remote-tab", "project": "p", "name": "Remote Codex", "pinned": true, "panes": {"session": "s"}, "shells": []},
+            {"id": "other-tab", "project": "p", "name": "Other tab", "pinned": true, "panes": {"session": "other"}, "shells": []}
+        ],
+        "missions": [],
+        "sessions": {
+            "s": {"kind": "chat", "title": "Codex", "runtime": "codex", "status": "idle", "unread": false},
+            "other": {"kind": "chat", "title": "Other", "runtime": "codex", "status": "idle", "unread": false}
+        }
+    }))
+    .unwrap();
+    fake.set_overview(data.clone());
+
+    let window = add_window(&mut cx, &store, temp.path(), "remote-pending-retry");
+    window.update(&mut cx, choose_host).unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), &cx);
+    visual.update(|window, _| window.activate_window());
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.select_remote_item(RemoteItem::Tab("remote-tab".into()), cx);
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert_eq!(fake.request_count("markViewed"), 0);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook_calls = calls.clone();
+    *fake.on_mark_viewed.lock().unwrap() = Some(Box::new(move |fake, session| {
+        let cleared = hook_calls.fetch_add(1, Ordering::SeqCst) > 0;
+        fake.overview
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(session)
+            .unwrap()
+            .status
+            .unread = !cleared;
+    }));
+
+    // Dispatch Turn 1 `markViewed` so `"mark-viewed:s"` enters `actions_pending`.
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .status
+        .unread = true;
+    clients.update(&mut visual, |state, cx| {
+        state.apply_event(ClientEvent {
+            name: "remote/session-status".into(),
+            payload: serde_json::json!({
+                "computer": "host",
+                "status": {"session": "s", "status": "idle", "unread": true}
+            }),
+        });
+        cx.notify();
+    });
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.sync_remote_state(cx);
+            assert!(root
+                .remote_client
+                .workspace
+                .as_ref()
+                .unwrap()
+                .actions_pending
+                .contains("mark-viewed:s"));
+        })
+        .unwrap();
+
+    // While Turn 1 is still pending in `actions_pending`, a newer Turn 2 push arrives and hits
+    // the `prepare_action` pending guard. Settling with ZERO extra status/latency events
+    // must immediately retry `markViewed` for Turn 2 and clear it.
+    clients.update(&mut visual, |state, cx| {
+        state.apply_event(ClientEvent {
+            name: "remote/session-status".into(),
+            payload: serde_json::json!({
+                "computer": "host",
+                "status": {"session": "s", "status": "idle", "unread": true}
+            }),
+        });
+        cx.notify();
+    });
+    window
+        .update(&mut visual, |root, _window, cx| {
+            root.sync_remote_state(cx);
+            assert!(root
+                .remote_client
+                .workspace
+                .as_ref()
+                .unwrap()
+                .actions_pending
+                .contains("mark-viewed:s"));
+        })
+        .unwrap();
+    visual.run_until_parked();
+
+    assert_eq!(fake.request_count("markViewed"), 2);
+    assert!(
+        !clients.read_with(&visual, |state, _| state.overviews["host"].sessions["s"]
+            .status
+            .unread)
+    );
+    window
+        .read_with(&visual, |root, cx| {
+            let attentions = root.front_page_sidebar().read(cx).remote_row_attentions(cx);
+            assert_eq!(attentions.get("remote-tab"), Some(&AttentionState::None));
+        })
+        .unwrap();
+
+    // Direct race check on `reconcile_session_overview`:
+    // 1) A pre-Turn-2 `unread: false` overview cannot clobber a push that arrived after overview began.
+    clients.update(&mut visual, |state, cx| {
+        let epoch_at_start = state.session_status_epoch("host", "s");
+        let load_gen = state.begin_reconcile_load("host");
+        state.apply_event(ClientEvent {
+            name: "remote/session-status".into(),
+            payload: serde_json::json!({
+                "computer": "host",
+                "status": {"session": "s", "status": "idle", "unread": true}
+            }),
+        });
+        state.reconcile_session_overview("host", load_gen, "s", epoch_at_start, data.clone(), cx);
+        assert!(state.overviews["host"].sessions["s"].status.unread);
+    });
+
+    // 2) An unrelated push for `other` while `s`'s overview is in flight still lets `s` reconcile
+    // to `unread: false` without losing `other`'s `unread: true`.
+    clients.update(&mut visual, |state, cx| {
+        let epoch_s = state.session_status_epoch("host", "s");
+        let load_gen = state.begin_reconcile_load("host");
+        state.apply_event(ClientEvent {
+            name: "remote/session-status".into(),
+            payload: serde_json::json!({
+                "computer": "host",
+                "status": {"session": "other", "status": "idle", "unread": true}
+            }),
+        });
+        state.reconcile_session_overview("host", load_gen, "s", epoch_s, data.clone(), cx);
+        assert!(!state.overviews["host"].sessions["s"].status.unread);
+        assert!(state.overviews["host"].sessions["other"].status.unread);
+    });
+
+    // 3) A competing `LoadStarted` while `R` is in flight forces `R` through the per-session
+    // fallback; delivering stale `L` afterward (with no intervening status push) must not
+    // overwrite `R`'s reconciled status.
+    clients.update(&mut visual, |state, cx| {
+        let epoch_s = state.session_status_epoch("host", "s");
+        let r_gen = state.begin_reconcile_load("host");
+        state.apply(model::Update::LoadStarted("host".into(), 42));
+        let mut r_overview = data.clone();
+        r_overview.sessions.get_mut("s").unwrap().status.unread = true;
+        state.reconcile_session_overview("host", r_gen, "s", epoch_s, r_overview, cx);
+        assert!(state.overviews["host"].sessions["s"].status.unread);
+        state.apply(model::Update::Overview("host".into(), 42, data.clone()));
+        assert!(state.overviews["host"].sessions["s"].status.unread);
+    });
 }

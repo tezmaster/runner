@@ -4,6 +4,7 @@ pub(crate) mod claude_code;
 pub(crate) mod codex;
 pub(crate) mod copilot;
 pub(crate) mod cursor_agent;
+pub(crate) mod custom_flags;
 pub(crate) mod grok;
 mod helpers;
 pub(crate) mod muse;
@@ -40,6 +41,33 @@ pub fn catalogs() -> Vec<RuntimeCatalog> {
         .into_iter()
         .filter_map(|runtime| adapter(runtime).catalog())
         .collect()
+}
+
+pub(crate) const STATUS_HOOKS_ENV: &str = "RUNNER_STATUS_HOOKS";
+pub(crate) const REMOTE_PLUGIN_ENV: &str = "RUNNER_CODEX_REMOTE_PLUGIN";
+
+pub(crate) fn status_hooks_enabled(env: &std::collections::BTreeMap<String, String>) -> bool {
+    env.get(STATUS_HOOKS_ENV)
+        .is_none_or(|value| value != "false")
+}
+
+pub(crate) fn apply_launch_options(
+    role: &crate::model::Role,
+    mission: bool,
+    options: &runner_core::protocol::runtime::RuntimeLaunchOptions,
+) -> crate::model::Role {
+    let mut role = role.clone();
+    let permissions = for_key(&role.runtime).permissions();
+    if !mission
+        && options.bypass
+        && matches!(
+            Runtime::parse(&role.runtime),
+            Some(Runtime::Codex | Runtime::ClaudeCode | Runtime::Antigravity)
+        )
+    {
+        role.args = permissions.apply_mission(&role.args);
+    }
+    role
 }
 
 pub struct LaunchContext<'a> {
@@ -133,6 +161,10 @@ pub struct CaptureContext {
     pub manager: Weak<crate::session::manager::SessionManager>,
     pub session_id: String,
     pub mission_id: Option<String>,
+    pub role_args: Vec<String>,
+    pub role_env: std::collections::HashMap<String, String>,
+    pub cwd: Option<String>,
+    pub initial_key: Option<String>,
     pub app_data_dir: PathBuf,
     pub row_started_at: String,
     pub stop: Arc<AtomicBool>,
@@ -223,12 +255,73 @@ pub struct ModelDiscoverySource {
     pub config_home: fn() -> Option<PathBuf>,
 }
 
+/// Token counts of one session, or the sum of several. `input` already
+/// includes `cached` where a runtime counts it that way (Muse does).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenSums {
+    pub input: i64,
+    pub output: i64,
+    pub cached: i64,
+    pub reasoning: i64,
+}
+
+impl TokenSums {
+    pub fn add(&mut self, other: &TokenSums) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cached += other.cached;
+        self.reasoning += other.reasoning;
+    }
+
+    /// Input and output, cached input counted in full.
+    pub fn total_basis(&self) -> i64 {
+        self.input + self.output
+    }
+
+    /// Input that was not cached, plus output: the reading of the allowance
+    /// that treats a cache hit as free.
+    pub fn uncached_basis(&self) -> i64 {
+        (self.input - self.cached).max(0) + self.output
+    }
+}
+
+/// One model call of a session, from the runtime's own log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallRecord {
+    /// The runtime's own id for the usage record, unique per call.
+    pub usage_id: String,
+    pub session_key: String,
+    /// When the call was recorded, in microseconds since the Unix epoch.
+    pub at_us: i64,
+    pub tokens: TokenSums,
+}
+
+/// What a scan of a runtime's logs found since a time.
+#[derive(Debug, Clone, Default)]
+pub struct TokenScan {
+    /// Every session on this machine, by session key.
+    pub by_session: std::collections::BTreeMap<String, TokenSums>,
+    /// Each model call of the sessions asked for, oldest first.
+    pub calls: Vec<CallRecord>,
+}
+
+/// Reads what every session of a runtime on this machine has used since a
+/// time from the runtime's own logs, and each call of the sessions in `keys`.
+/// Whether a cached token counts against an allowance is not known, so
+/// callers keep the parts.
+pub struct TokenHistory {
+    pub read: fn(
+        since: chrono::DateTime<chrono::Utc>,
+        keys: &std::collections::HashSet<String>,
+    ) -> Result<TokenScan, String>,
+}
+
 pub struct UsageSource {
     pub fetch: fn(
         &str,
         &crate::shell_path::LoginShellEnv,
         bool,
-    ) -> Result<Vec<crate::usage::UsageWindow>, crate::usage::UnavailableReason>,
+    ) -> Result<crate::usage::UsageReading, crate::usage::UnavailableReason>,
 }
 
 pub type SkillState = Box<dyn Fn(&crate::skills::SkillEntry) -> crate::skills::GlobalState>;
@@ -282,6 +375,13 @@ pub fn unbatched_status_semantics() -> StatusSemantics {
 }
 
 pub trait RuntimeAdapter: Send + Sync {
+    fn classify_startup_error(
+        &self,
+        _output: &str,
+    ) -> Option<runner_core::protocol::status::StartupError> {
+        None
+    }
+
     fn status_semantics(&self) -> StatusSemantics {
         StatusSemantics::default()
     }
@@ -314,6 +414,9 @@ pub trait RuntimeAdapter: Send + Sync {
     }
     fn npm_dist_tag(&self) -> &'static str {
         "latest"
+    }
+    fn token_history(&self) -> Option<&'static TokenHistory> {
+        None
     }
     fn usage(&self) -> Option<&'static UsageSource> {
         None

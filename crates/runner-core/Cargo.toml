@@ -6,8 +6,15 @@ authors.workspace = true
 license.workspace = true
 description = "Shared types and event-log primitives for the Runner app and CLI."
 
+[lints]
+workspace = true
+
 [lib]
 name = "runner_core"
+
+[[test]]
+name = "daemon_environment"
+harness = false
 
 [features]
 schemars = ["dep:schemars"]
@@ -26,6 +33,7 @@ log = "0.4"
 sha2 = "=0.10.9"
 base64 = "0.22"
 snow = "0.9.6"
+zeroize = "1.8"
 curve25519-dalek = "=4.1.3"
 hostname = "0.4"
 url = "2"

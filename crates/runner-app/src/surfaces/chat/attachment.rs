@@ -360,6 +360,7 @@ impl NativeRoot {
             if let Some(layout) = self.front_page_layout_mut() {
                 layout.focus_pane(pane_id);
             }
+            self.remote_client.mark_remote_sessions_viewed(cx);
             cx.notify();
             return;
         }
@@ -698,20 +699,33 @@ impl NativeRoot {
         let target = session_id.to_owned();
         let resume_target = target.clone();
         let resume = cx.background_spawn(async move {
-            core.resume(&resume_target, size)
-                .map_err(|error| error.to_string())
+            let result = core.resume(&resume_target, size);
+            let gate = result
+                .as_ref()
+                .err()
+                .and_then(|error| error.version_gate.clone());
+            (result.map_err(|error| error.to_string()), gate)
         });
         let origin_epoch = self.remote_client.ui.epoch;
         cx.spawn_in(window, async move |weak, cx| {
-            let result = resume.await;
+            let (result, gate) = resume.await;
             let _ = weak.update_in(cx, |this, window, cx| {
-                let Some(result) = WorkspaceAction::complete(
+                let Some(result) = WorkspaceAction::complete_observed(
                     this,
                     operation,
                     result,
                     |session| crate::surfaces::front_page::actions::Completion {
                         session: Some(session),
                         ..Default::default()
+                    },
+                    |root, client, succeeded, _| {
+                        root.record_session_gate(
+                            &client.target,
+                            &target,
+                            gate,
+                            crate::surfaces::agent_recovery::RecoveryAction::Resume,
+                            succeeded,
+                        );
                     },
                     cx,
                 ) else {

@@ -98,6 +98,11 @@ pub(super) fn output_view(command: &Command) -> output::View {
             MissionCommand::RemoveRole { .. } => View::RoleChange("Removed role"),
             MissionCommand::Answer { .. } => View::Confirmation("Answered question"),
             MissionCommand::Link { .. } | MissionCommand::Unlink { .. } => View::MissionLink,
+            MissionCommand::Rate { .. } => View::Confirmation("Rated mission"),
+            MissionCommand::UsageRecord { .. } => View::Confirmation("Recorded usage"),
+            MissionCommand::Review { .. } => View::MissionReview,
+            MissionCommand::Usage { .. } => View::MissionUsageList,
+            MissionCommand::UsageBackfill { .. } => View::MissionBackfill,
             MissionCommand::Start { .. }
             | MissionCommand::Stop { .. }
             | MissionCommand::Archive { .. }
@@ -112,7 +117,7 @@ pub(super) fn output_view(command: &Command) -> output::View {
             SessionCommand::List => View::SessionList,
             SessionCommand::Show { .. } => View::SessionShow,
             SessionCommand::Stop { .. } => View::Confirmation("Stopped session"),
-            SessionCommand::Archive { .. } => View::Confirmation("Archived session"),
+            SessionCommand::Archive { .. } => View::SessionArchive,
             SessionCommand::Resume { .. } => View::Confirmation("Resumed session"),
             SessionCommand::Restart { .. } => View::Confirmation("Restarted session"),
         },

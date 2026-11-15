@@ -167,6 +167,8 @@ impl SessionManager {
             let mut drop_streak: u64 = 0;
             let mut drop_total: u64 = 0;
             let mut pending = None;
+            let mut startup_tail = Vec::new();
+            let mut turn_started = false;
             #[cfg(windows)]
             let mut first_turn_pending = true;
             loop {
@@ -228,6 +230,12 @@ impl SessionManager {
                                 Err(_) => break,
                             }
                         }
+                        if started_at.elapsed() < Duration::from_secs(10) {
+                            startup_tail.extend_from_slice(&bytes);
+                            if startup_tail.len() > 8192 {
+                                startup_tail.drain(..startup_tail.len() - 8192);
+                            }
+                        }
                         manager_t.startup_output(
                             &session_id,
                             &stop,
@@ -251,6 +259,7 @@ impl SessionManager {
                         event,
                         feedback: reply,
                     }) => {
+                        turn_started |= has_started_turn(&event);
                         let feedback = manager_t.publish_model_event_for_launch(
                             &session_id,
                             SessionEvent::Agent { event, live: true },
@@ -516,6 +525,23 @@ impl SessionManager {
                 exit_code,
                 final_status == crate::model::SessionStatus::Crashed,
             );
+            if exit_code.is_some_and(|code| code != 0)
+                && !was_killed
+                && elapsed < Duration::from_secs(10)
+                && !turn_started
+            {
+                let output = String::from_utf8_lossy(&startup_tail);
+                if let Some(error) =
+                    crate::runtimes::for_key(&role.runtime).classify_startup_error(&output)
+                {
+                    if let Some(state) = manager_t.session_state(&session_id) {
+                        state.lock().unwrap().model.apply(
+                            SessionEvent::StartupError(error),
+                            super::super::clock::state_now(),
+                        );
+                    }
+                }
+            }
             events.exit(&ExitEvent {
                 session_id: session_id.clone(),
                 mission_id: mission_id.clone(),
@@ -852,23 +878,25 @@ impl SessionManager {
         let rt_session = self.live_runtime_session(session_id)?;
         self.runtime.send_bytes(&rt_session, payload)?;
         std::thread::sleep(std::time::Duration::from_millis(120));
-        let result = if let Some(session) = self.session_state(session_id) {
-            let mut session = session.lock().unwrap();
-            let result = self
+        let result = match self.session_state(session_id) {
+            Some(session) => {
+                let mut session = session.lock().unwrap();
+                let result = self
+                    .runtime
+                    .send_key(&rt_session, "Enter")
+                    .map_err(Into::into);
+                if result.is_ok() {
+                    session.model.apply(
+                        SessionEvent::ArmCompletion,
+                        crate::session::clock::state_now(),
+                    );
+                }
+                result
+            }
+            _ => self
                 .runtime
                 .send_key(&rt_session, "Enter")
-                .map_err(Into::into);
-            if result.is_ok() {
-                session.model.apply(
-                    SessionEvent::ArmCompletion,
-                    crate::session::clock::state_now(),
-                );
-            }
-            result
-        } else {
-            self.runtime
-                .send_key(&rt_session, "Enter")
-                .map_err(Into::into)
+                .map_err(Into::into),
         };
         if result.is_ok() {
             if let Some(ctx) = self.rollout_capture_context(session_id) {
@@ -1109,12 +1137,23 @@ impl SessionManager {
     }
 
     pub fn forget_session_state(&self, session_id: &str) {
+        let _control = self.terminal_control.lock().unwrap();
         if let Some(state) = self.raw_session_state(session_id) {
             let mut state = state.lock().unwrap();
+            if state.handle.is_some() {
+                return;
+            }
+            let workers = state.release_terminal();
             state.output_seq = 0;
             state.last_requested_size = None;
             state.last_requested_size_dirty = false;
             state.pending_resize = None;
+            drop(state);
+            // Worker callbacks acquire the session lock. Finish them before a new
+            // terminal can install, even when a reader still holds the old model.
+            for worker in workers {
+                let _ = worker.join();
+            }
         }
         self.prune_empty_session_state(session_id);
     }
@@ -1139,7 +1178,7 @@ impl SessionManager {
     ) {
         let _ = mission_id;
         let state = self.session_state_or_insert(session_id);
-        let (model, observation, program_status, launch) = {
+        let (model, observation, program_statuses, launch) = {
             let mut state = state.lock().unwrap();
             if launch.is_some_and(|launch| {
                 launch.load(Ordering::Acquire)
@@ -1166,24 +1205,30 @@ impl SessionManager {
             let observation = model
                 .as_ref()
                 .and_then(|model| model.feed_output(seq, bytes));
-            let program_status = model.as_ref().and_then(|model| model.take_program_status());
+            let program_statuses = model
+                .as_ref()
+                .map(|model| model.take_program_statuses())
+                .unwrap_or_default();
             let launch = state.handle.as_ref().map(|handle| handle.stop.clone());
-            (model, observation, program_status, launch)
+            (model, observation, program_statuses, launch)
         };
         if let Some(model) = model {
             model.publish_input(observation);
         }
-        if let (Some((seq, report)), Some(launch)) = (program_status, launch) {
-            self.publish_model_event_for_launch(
-                session_id,
-                SessionEvent::ProgramStatus {
-                    seq,
-                    report,
-                    live: true,
-                },
-                Some(&launch),
-                events,
-            );
+        if let Some(launch) = launch {
+            for (subseq, (seq, report)) in program_statuses.into_iter().enumerate() {
+                self.publish_model_event_for_launch(
+                    session_id,
+                    SessionEvent::ProgramStatus {
+                        seq,
+                        subseq,
+                        report,
+                        live: true,
+                    },
+                    Some(&launch),
+                    events,
+                );
+            }
         }
     }
 
@@ -1205,5 +1250,14 @@ impl SessionManager {
             seq,
             bytes: bytes.to_vec(),
         }
+    }
+}
+
+fn has_started_turn(event: &crate::session::state::agent::AgentEvent) -> bool {
+    use crate::session::state::agent::AgentEvent;
+    match event {
+        AgentEvent::TurnStarted | AgentEvent::Working { .. } | AgentEvent::TurnEnded { .. } => true,
+        AgentEvent::Batch { events, .. } => events.iter().any(has_started_turn),
+        _ => false,
     }
 }

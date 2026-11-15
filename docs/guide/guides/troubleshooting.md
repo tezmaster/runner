@@ -8,6 +8,12 @@ Runner starts its background service before showing a window. If that fails, Run
 
 If a copy of Runner from another version or build is open on the same data, a new copy does not take over the background service; it stops with a message that another Runner build is using this data. Quit the other copy, then open Runner again. If the background service changes hands while Runner is open, the same message appears in a banner: quit the other copy, then click **Try again**. Versions of Runner released before this check still take over the background service without asking.
 
+## Codex starts slowly or chat status is less detailed
+
+Codex can download its remote plugin catalog on every start. Turn **Settings → Agents → Codex → Launch → Remote plugin catalog** off to skip that download; catalog plugins will no longer load. Start a new session to apply the change.
+
+If **Status hooks** is off, Runner uses native terminal status or terminal activity. Update Codex to 0.163.0+, Claude Code to 2.1.295+ or pi to 1.1.0+ for native status, or turn hooks back on for detailed reports. Resume still uses the identity hook. Missions always use status hooks.
+
 ## An agent is missing or fails to start
 
 1. Run the agent in your usual terminal. If it cannot start or sign in there, finish its own setup first.
@@ -72,3 +78,15 @@ For source builds, graphics prerequisites, packages and WSL setup see [Linux dev
 Linux notification permissions are managed by your desktop. Runner cannot query a universal permission status; confirm the desktop notification daemon and portal backend are available. Clipboard text is supported by GPUI; clipboard file paths are not available. For application updates, use **Settings → Updates**. System deb installation needs a desktop polkit authentication agent and `pkexec`. Authorization cancellation, a busy package manager or dependency errors are shown in Runner; retry after resolving the cause. **Settings → About** shows the installation log. Source builds and unmanaged installations cannot replace themselves; install a managed package first. WSL systemd services do not keep an idle distro alive.
 
 In a normal Linux window, drag an edge or corner to resize. The middle caption button toggles maximize and restore; maximized/fullscreen windows have no resize border. New windows use the desktop's reported logical display bounds. If the compositor does not report a separate work area, panel/taskbar space may be included in those bounds. Include the desktop/session type and whether maximize, restore or edge dragging failed when reporting a window-control problem.
+
+## Codex is too old for Runner
+
+Runner requires Codex **0.149.0 or newer**. **Update needed** appears only on Codex’s agent row; role rows have no update labels or actions. Start Codex or any role using it to update Codex before launching, or choose **Update Codex** on a refused chat's card. The pane starts after a successful update. If an old version still appears, check the executable override in **Settings → Agents → Codex** and refresh detection.
+
+## Codex didn't accept Runner's launch flags
+
+If Codex rejects its startup configuration and exits before the first turn, the stopped card explains the configuration failure and offers **Update Codex**. Update, then let Runner retry the waiting chat. An ordinary stopped chat keeps its usual Resume behavior. If updating does not resolve the error, retain the displayed cause and relevant terminal output for a bug report.
+
+## An agent update needs attention
+
+**May be waiting for your input** is a guess based on a quiet installer prompt. Nothing opens automatically. Open the background task list and choose **Answer** to focus the installer terminal; **Hide**, Escape and the close button leave it running. A failed update offers **Retry** and **Show output**. If stopping an update breaks the executable, choose **Reinstall** on its retained task row.

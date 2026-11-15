@@ -273,6 +273,7 @@ pub(crate) struct NativeRoot {
     pub(crate) window_label: String,
     pub(crate) log_dir: PathBuf,
     pub(crate) closing: bool,
+    pub(crate) window_active: bool,
     pub(crate) app_store: Entity<AppStore>,
     pub(crate) store_revisions: StoreRevisions,
     pub(crate) tabs: TabSet,
@@ -306,12 +307,14 @@ pub(crate) struct NativeRoot {
     pub(crate) pane_drop: Option<(PaneKey, DropSide)>,
     pub(crate) pane_rename: Option<PaneRename>,
     pub(crate) _pane_rename_focus_subscription: Option<Subscription>,
+    pub(crate) _pane_close_focus_subscription: Option<Subscription>,
     pub(crate) terminal_close_confirm: Option<TerminalCloseConfirm>,
     pub(crate) pending_pane_closes: HashMap<String, PendingPaneClose>,
     pub(crate) pending_tab_close: Option<PendingTabClose>,
     pub(crate) tab_landed_at: Option<Instant>,
     pub(crate) update_popover: surfaces::update_ui::UpdatePopoverState,
     pub(crate) quit_dialog: Option<Entity<surfaces::quit_dialog::QuitDialog>>,
+    pub(crate) agent_tasks: surfaces::background_tasks::BackgroundTasks,
     pub(crate) agent_update: Option<Entity<surfaces::agent_update::AgentUpdateDialog>>,
     pub(crate) fork_confirm: Option<ForkConfirm>,
     pub(crate) forking_sessions: HashMap<String, String>,
@@ -328,11 +331,14 @@ pub(crate) struct NativeRoot {
     pub(crate) route: AppRoute,
     pub(crate) settings_return_route: AppRoute,
     pub(crate) usage_open: bool,
+    pub(crate) usage_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) mission_usage: crate::surfaces::app_shell::MissionUsageState,
+    pub(crate) mission_control: crate::surfaces::mission_control::MissionControlState,
     pub(crate) claude_account_picker: Option<Entity<runner_app::ui::select::StyledSelect>>,
     pub(crate) usage_anchor: Option<Bounds<Pixels>>,
     pub(crate) usage_installed: Vec<runner_core::protocol::model::Runtime>,
-    /// Agents with a newer version on npm; enabled ones dot the usage
-    /// popover's Agent settings gear.
+    pub(crate) usage_checked: Option<Vec<runner_core::Runtime>>,
+    /// Enabled agents with an update dot the sidebar Settings gear.
     pub(crate) agent_updates: Vec<runner_core::protocol::model::Runtime>,
     pub(crate) runtime_navigation_history: Vec<RuntimeLocation>,
     pub(crate) runtime_navigation_index: Option<usize>,
@@ -366,6 +372,7 @@ pub(crate) struct NativeRoot {
     pub(crate) _project_cwd_subscription: Option<Subscription>,
     pub(crate) _updater_subscription: Subscription,
     pub(crate) _store_subscription: Subscription,
+    pub(crate) _event_tasks: [gpui::Task<()>; 4],
 }
 
 impl NativeRoot {

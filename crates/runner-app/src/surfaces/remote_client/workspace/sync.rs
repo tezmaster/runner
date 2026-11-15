@@ -106,6 +106,15 @@ impl RemoteClient {
                 }
                 remote.layouts.insert(tab.id.clone(), layout);
             }
+            remote.closing_layouts.retain(|id, layout| {
+                overview
+                    .tabs
+                    .iter()
+                    .find(|tab| &tab.id == id)
+                    .is_some_and(|tab| {
+                        !crate::surfaces::front_page::model::same_topology(&layout.root, &tab.panes)
+                    })
+            });
         }
         if let Some(overview) = clients.read(cx).overviews.get(&remote.computer.id) {
             let live = remote
@@ -236,6 +245,7 @@ impl RemoteClient {
             remote.delete_project = None;
             *remote.shell_placement.lock().unwrap() = None;
             remote.actions_pending.clear();
+            remote.closing_layouts.clear();
             remote.layout_hints.clear();
             remote.reopen_sessions.clear();
             remote.activate_session = None;
@@ -253,6 +263,9 @@ impl RemoteClient {
             remote.errors.clear();
         }
         remote.connection = connection;
+        let disconnected_computer =
+            (!matches!(connection, Connection::Opening | Connection::Connected))
+                .then(|| remote.computer.id.clone());
         let access = clients.update(cx, |state, cx| {
             state.front_page_access(&remote.computer, cx)
         });
@@ -315,6 +328,9 @@ impl RemoteClient {
         workspace.update(cx, |workspace, cx| {
             workspace.sync_remote(client, mission, overview, clients, cx)
         });
+        if let Some(computer) = disconnected_computer {
+            self.clear_pending_archives_for(&computer, cx);
+        }
         self.ensure_remote_library(cx);
         self.load_remote_metadata(cx);
         self.attach_remote_panes(cx);
@@ -385,7 +401,19 @@ impl RemoteClient {
         changed
     }
 
-    pub(crate) fn mark_remote_stopped_sessions_viewed(&mut self, cx: &mut Context<NativeRoot>) {
+    pub(crate) fn mark_remote_sessions_viewed(&mut self, cx: &mut Context<NativeRoot>) {
+        self.mark_remote_sessions_viewed_inner(false, cx);
+    }
+
+    pub(crate) fn mark_remote_sessions_viewed_on_sync(&mut self, cx: &mut Context<NativeRoot>) {
+        self.mark_remote_sessions_viewed_inner(true, cx);
+    }
+
+    fn mark_remote_sessions_viewed_inner(
+        &mut self,
+        only_new_sync_epoch: bool,
+        cx: &mut Context<NativeRoot>,
+    ) {
         let clients = state(&self.app_store, cx);
         let Some(remote) = self.workspace.as_ref() else {
             return;
@@ -395,31 +423,127 @@ impl RemoteClient {
         {
             return;
         }
-        let Some(overview) = clients.read(cx).overviews.get(&remote.computer.id) else {
-            return;
-        };
-        let sessions = remote
-            .visible_sessions(overview, cx)
-            .into_iter()
-            .filter(|id| {
-                overview.sessions.get(id).is_some_and(|session| {
-                    let status = &session.status;
-                    matches!(status.status, Status::Stopped | Status::Error)
-                        && (status.unread
-                            || (status.status == Status::Error && !status.error_acknowledged))
+        let computer_id = remote.computer.id.clone();
+        let front_page = remote.front_page.clone();
+        let sessions: Vec<(String, u64)> = {
+            let state = clients.read(cx);
+            let Some(overview) = state.overviews.get(&computer_id) else {
+                return;
+            };
+            remote
+                .visible_sessions(overview, cx)
+                .into_iter()
+                .filter(|id| {
+                    overview.sessions.get(id).is_some_and(|session| {
+                        super::super::model::ClientState::session_needs_viewed_ack(&session.status)
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        for session in sessions {
-            self.remote_action(
+                .filter_map(|id| {
+                    let epoch = state.session_status_epoch(&computer_id, &id);
+                    let already_acked_in_sync =
+                        only_new_sync_epoch && remote.sync_viewed_epochs.get(&id) == Some(&epoch);
+                    (!already_acked_in_sync).then_some((id, epoch))
+                })
+                .collect()
+        };
+        for (session, dispatched_status_epoch) in sessions {
+            let Some(operation) = self.prepare_action(
+                front_page.clone(),
                 format!("mark-viewed:{session}"),
                 &["markViewed"],
-                move |client| {
-                    client.mark_viewed(session)?;
-                    Ok(Default::default())
-                },
                 cx,
-            );
+            ) else {
+                continue;
+            };
+            let workspace_epoch = operation.epoch;
+            let client = operation.client.clone();
+            let ack_session = session.clone();
+            let work = cx.background_spawn(async move {
+                client
+                    .mark_viewed(ack_session)
+                    .map_err(|error| error.to_string())
+            });
+            let computer_id = computer_id.clone();
+            let clients = clients.clone();
+            cx.spawn(async move |weak, cx| {
+                let result = work.await;
+                if let Err(error) = result {
+                    let _ = weak.update(cx, |root, cx| {
+                        let now_epoch = clients
+                            .read(cx)
+                            .session_status_epoch(&computer_id, &session);
+                        if now_epoch == dispatched_status_epoch {
+                            record_sync_viewed_epoch(root, workspace_epoch, &session, now_epoch);
+                        }
+                        crate::surfaces::front_page::actions::WorkspaceAction::complete(
+                            root,
+                            operation,
+                            Err(error),
+                            |()| crate::surfaces::front_page::actions::Completion::default(),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+
+                // Sample an authoritative overview ordered after `markViewed` settles before
+                // recording `sync_viewed_epochs` or re-evaluating current window visibility.
+                let reconcile = weak
+                    .update(cx, |root, cx| {
+                        if root.remote_client.ui.epoch != workspace_epoch
+                            || !operation.client.valid()
+                        {
+                            return None;
+                        }
+                        Some(clients.update(cx, |state, _| {
+                            (
+                                state.session_status_epoch(&computer_id, &session),
+                                state.begin_reconcile_load(&computer_id),
+                                state.client.clone(),
+                            )
+                        }))
+                    })
+                    .ok()
+                    .flatten();
+                let Some((epoch_at_start, load_generation, daemon)) = reconcile else {
+                    let _ = weak.update(cx, |root, cx| {
+                        crate::surfaces::front_page::actions::WorkspaceAction::complete(
+                            root,
+                            operation,
+                            Ok(()),
+                            |()| crate::surfaces::front_page::actions::Completion::default(),
+                            cx,
+                        );
+                    });
+                    return;
+                };
+
+                let overview_computer = computer_id.clone();
+                let overview_result = cx
+                    .background_spawn(async move { daemon.remote_overview(overview_computer) })
+                    .await;
+                let _ = weak.update(cx, |root, cx| {
+                    reconcile_mark_viewed_result(
+                        root,
+                        &clients,
+                        workspace_epoch,
+                        &computer_id,
+                        load_generation,
+                        &session,
+                        epoch_at_start,
+                        overview_result,
+                        cx,
+                    );
+                    crate::surfaces::front_page::actions::WorkspaceAction::complete(
+                        root,
+                        operation,
+                        Ok(()),
+                        |()| crate::surfaces::front_page::actions::Completion::default(),
+                        cx,
+                    );
+                });
+            })
+            .detach();
         }
     }
 
@@ -622,6 +746,65 @@ impl RemoteClient {
                 });
             })
             .detach();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_mark_viewed_result(
+    root: &mut NativeRoot,
+    clients: &Entity<model::ClientState>,
+    workspace_epoch: u64,
+    computer_id: &str,
+    load_generation: u64,
+    session: &str,
+    epoch_at_start: u64,
+    overview_result: runner_core::protocol::ClientResult<runner_core::remote::RemoteOverview>,
+    cx: &mut Context<NativeRoot>,
+) {
+    match overview_result {
+        Ok(runner_core::remote::RemoteOverview(overview)) => {
+            let (now_epoch, still_needs_ack) = clients.update(cx, |state, cx| {
+                state.reconcile_session_overview(
+                    computer_id,
+                    load_generation,
+                    session,
+                    epoch_at_start,
+                    overview,
+                    cx,
+                );
+                let now_epoch = state.session_status_epoch(computer_id, session);
+                let still_needs_ack = state
+                    .overviews
+                    .get(computer_id)
+                    .and_then(|current| current.sessions.get(session))
+                    .is_some_and(|entry| {
+                        super::super::model::ClientState::session_needs_viewed_ack(&entry.status)
+                    });
+                (now_epoch, still_needs_ack)
+            });
+            if !still_needs_ack {
+                record_sync_viewed_epoch(root, workspace_epoch, session, now_epoch);
+            }
+        }
+        Err(_) => {
+            let now_epoch = clients.read(cx).session_status_epoch(computer_id, session);
+            if now_epoch == epoch_at_start {
+                record_sync_viewed_epoch(root, workspace_epoch, session, now_epoch);
+            }
+        }
+    }
+}
+
+fn record_sync_viewed_epoch(
+    root: &mut NativeRoot,
+    workspace_epoch: u64,
+    session: &str,
+    epoch: u64,
+) {
+    if root.remote_client.ui.epoch == workspace_epoch {
+        if let Some(remote) = root.remote_client.workspace.as_mut() {
+            remote.sync_viewed_epochs.insert(session.to_owned(), epoch);
         }
     }
 }

@@ -157,9 +157,6 @@ pub(super) struct RoleFields {
     /// Read the system prompt from a file, or - for stdin.
     #[arg(long, conflicts_with = "prompt")]
     pub(super) prompt_file: Option<PathBuf>,
-    /// Append one runtime argument; repeat for multiple arguments.
-    #[arg(long = "arg")]
-    pub(super) args: Vec<String>,
     /// Set one KEY=VALUE environment entry; repeat as needed.
     #[arg(long = "env")]
     pub(super) env: Vec<String>,
@@ -388,6 +385,44 @@ pub(super) enum MissionCommand {
     },
     /// Remove a mission's link to its chat.
     Unlink { mission: String },
+    /// Rate a finished mission up or down, or clear its rating (person only).
+    Rate {
+        mission: String,
+        /// `up` or `down`; leave out with --clear.
+        verdict: Option<String>,
+        /// One line on what went well or badly. Never customer or service-user data.
+        #[arg(long)]
+        note: Option<String>,
+        /// Remove the mission's rating.
+        #[arg(long, conflicts_with_all = ["verdict", "note"])]
+        clear: bool,
+    },
+    /// Show a mission's rating, its share of the plan allowance and what each slot used.
+    Review {
+        mission: Option<String>,
+        /// Take a fresh allowance reading first (only while the mission is running).
+        #[arg(long)]
+        sample: bool,
+    },
+    /// Measure missions that already ran against the week that is still open (person only).
+    UsageBackfill {
+        /// How many days back to look (1 to 90).
+        #[arg(long, default_value_t = 14)]
+        days: u32,
+    },
+    /// List recent missions by the share of the weekly allowance they used.
+    Usage {
+        /// How many days back to look (1 to 90).
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+    },
+    /// Record what each slot used, from JSON (person only).
+    UsageRecord {
+        mission: String,
+        /// Read `{"slots": [...]}` (or a bare array of slots) from a file, or - for stdin.
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Print a window from the mission event feed.
     Feed {
         mission: Option<String>,
@@ -462,7 +497,12 @@ pub(super) enum SessionCommand {
     /// Stop a session and leave it resumable.
     Stop { session: String },
     /// Stop and archive a direct chat.
-    Archive { session: String },
+    Archive {
+        session: String,
+        /// Stop and archive unarchived missions linked to this chat too.
+        #[arg(long)]
+        with_missions: bool,
+    },
     /// Resume a stopped session.
     Resume { session: String },
     /// Restart a mission session with a fresh conversation.

@@ -1,17 +1,17 @@
 ---
 name: release
-description: Cut a Runner production release — bump the workspace version, tag vX.Y.Z, let release.yml build the draft for macOS, Windows and Linux, write bilingual release notes (English, with 中文 collapsed in a details block), hand the publish switch to the user, and once the release is live write one Chinese plain-text post for the WeChat group and linux.do and sweep the shipped work's docs
+description: Cut or check a Runner production release, write bilingual release notes, draft Chinese WeChat/linux.do and English Discord and X posts in the social repo, and sweep shipped docs. Publishing remains the user's action.
 ---
 
 # Release
 
-A production release is a `vX.Y.Z` tag on a `main` commit whose workspace version is exactly `X.Y.Z`. `release.yml` builds the signed, notarized macOS DMGs for arm64 and x64, each with its own one-item Sparkle appcast (`appcast.xml` and `appcast-x64.xml`), and the Windows x64 installer with its minisign signature, plus Linux ARM64/x86_64 tar/deb packages, then attaches everything to a **draft** release. Publishing the draft is the user's switch: it moves `releases/latest` and the production Sparkle feed. Contract: `docs/arch/arch.md` §14; nightlies are a separate channel handled by the `nightly` skill.
+A production release is a `vX.Y.Z` tag on a commit whose workspace version is exactly `X.Y.Z`: a `main` commit, or for a [hotfix](#hotfix-version-pr) the tip of a `release/X.Y.Z` branch. `release.yml` builds the signed, notarized macOS DMGs for arm64 and x64, each with its own one-item Sparkle appcast (`appcast.xml` and `appcast-x64.xml`), and the Windows x64 installer with its minisign signature, plus Linux ARM64/x86_64 tar/deb packages, then attaches everything to a **draft** release. Publishing the draft is the user's switch: it moves `releases/latest` and the production Sparkle feed. Contract: `docs/arch/arch.md` §14; nightlies are a separate channel handled by the `nightly` skill.
 
-An explicit request to `run` authorizes the bump commit, the push, the tag, and editing the draft's notes; after the user publishes, it also authorizes the sweep's docs commit and push. An explicit `sweep` request authorizes that commit and push on its own. Nothing in this skill publishes the draft, deletes a release, moves an existing tag, or posts to a forum or social media. Record only observed results.
+An explicit request to `run` authorizes the bump commit, the push, the tag, and editing the draft's notes; after the user publishes, it also authorizes the sweep's docs commit and push. An explicit `hotfix` request authorizes the same, plus the release branch, its worktree, the cherry-picks and pushing the branch. An explicit `sweep` request authorizes that commit and push on its own. Nothing in this skill publishes the draft, deletes a release, moves an existing tag, or posts to a forum or social media. Record only observed results.
 
 ## Usage
 
-`/release [run <version> | notes <version> | post <version> | check <version> | sweep <version>]` — no action means `run`.
+`/release [run <version> | hotfix <version> <pr>… | notes <version> | post <version> | check <version> | sweep <version>]` — no action means `run`.
 
 ## `run <version>`
 
@@ -25,14 +25,24 @@ An explicit request to `run` authorizes the bump commit, the push, the tag, and 
 4. **Watch.** Find the run with `gh run list --workflow release.yml --limit 1 --json databaseId,status,headSha` and `gh run watch <id> --exit-status`. All platform build jobs (including both Linux matrix instances) and the publish job must succeed. On failure, `gh run view <id> --log-failed`, report the failing step, and stop; the tag stays, the draft may be partial.
 5. **Notes.** Follow `notes <version>` below and set them on the draft: `gh release edit v<version> --notes-file <file>`. Do not pass `--draft=false`.
 6. **Report.** The draft URL, every platform asset name, and the reminder that publishing is the user's action. A draft's `untagged-…` URL changes each time it is edited, so link the latest one. After the user publishes, confirm `gh release view v<version> --json isDraft` is `false` before anything that assumes the release is live, then verify `gh api repos/yicheng47/runner/releases/latest --jq .tag_name` is `v<version>` and that `releases/latest/download/appcast.xml` and `appcast-x64.xml` name the new arm64 and x64 DMGs.
-7. **Post.** Once the release is live, follow `post <version>` below.
+7. **Posts.** Once the release is live, follow `post <version>` below to draft the WeChat/linux.do, Discord and X posts and record all three in the social repo.
 8. **Sweep.** Then follow `sweep <version>` below.
+
+## `hotfix <version> <pr>…`
+
+The exception to releasing from `main`, for when something bad has shipped and `main` holds unreleased work that must not go out with the fix (Jason, 2026-11-13). Every other release is `run`. Each fix lands on `main` first through its own reviewed PR; the hotfix carries those PRs onto the release being patched. A change that only makes sense on the old release, such as a revert that `main` has already moved past, is committed on the branch instead and reviewed like any other fix before it is tagged.
+
+1. **Preflight — stop on any failure and report it.** `<version>` passes the `run` checks, and `<previous>` is the current tag from `gh release list`, the release being patched. Each `<pr>` is merged (`gh pr view <pr> --json state,mergeCommit`) and CI on its merge commit is green (`gh run list --commit <merge> --workflow ci.yaml --json conclusion`). No release run is in flight.
+2. **Branch.** From the root checkout, `git fetch origin && git worktree add .worktrees/release-<version> -b release/<version> v<previous>`. In the worktree, for each PR in merge order, `git cherry-pick -x <merge>^1..<merge>^2`, which brings over the PR's own commits. Stop and report a conflict: the fix depends on work being held back, and a hand-made backport needs its own review.
+3. **Bump.** As `run` step 2, in the worktree, committing on the branch; the worktree builds into its own `target/`. Push with `git push -u origin release/<version>`. CI runs on `release/**` pushes, and `release.yml` waits for that run before it creates the draft.
+4. **Tag and finish.** Tag the branch tip as `run` step 3, then follow `run` steps 4–8 unchanged; the sweep still runs on `main`.
+5. **Afterwards.** `main` keeps its own workspace version, and the next `run` from `main` bumps past `<version>`. Once the release is published, the tag keeps the hotfix commits; ask before removing the worktree and the `release/<version>` branch. A second hotfix before `main` is shippable again branches from this hotfix's tag the same way.
 
 ## `notes <version>`
 
 Release notes are **bilingual**: the full English text first, then the same content in 中文 inside a `<details>` block so the page reads as English-only until a reader expands it (GitHub has no tabs; a collapsed block is the nearest thing, and the in-app updaters open the release page in a browser where it renders). 0.8.3 used a horizontal rule instead; every release since 0.8.4 ships the collapsed form. A draft with only the workflow's one-line stub is not ready to publish.
 
-Source the content from `git log v<previous>..v<version> --no-merges --format='- %s (%h)'` and the closed issues those commits reference. Write for users, not for the repo: what changed for them, in their words, one bullet per change with the issue number at the end. Skip internal work (tests, CI, docs, refactors) unless it changes what users see.
+Source the content from `git log v<previous>..v<version> --no-merges --format='- %s (%h)'` and the closed issues those commits reference. When `<previous>` was a hotfix, `main` reaches it only through the cherry-picks, so use `git log --cherry-pick --right-only --no-merges --format='- %s (%h)' v<previous>...v<version>` to leave out the fixes it already shipped. Write for users, not for the repo: what changed for them, in their words, one bullet per change with the issue number at the end. Skip internal work (tests, CI, docs, refactors) unless it changes what users see.
 
 Structure, both languages:
 
@@ -85,7 +95,13 @@ Rules for the 中文 half: translate the meaning, not the words; keep product te
 
 ## `post <version>`
 
-One Chinese plain-text release post for the user to paste into Runner's WeChat user group and its linux.do thread (Jason, 2026-11-05: one post for both, no separate markdown version). It needs the published release (`gh release view v<version> --json isDraft` is `false`), because linux.do turns the release link into a preview card only for a public page. Build it from the published body's 中文 half (`gh release view v<version> --json body`), not from the git log, so the post agrees with the release page:
+Draft three posts: one Chinese plain-text post shared by Runner's WeChat user group and its linux.do thread (Jason, 2026-11-05: one post for both, no separate markdown version), one English post for Runner's Discord, and one English release post for X (Jason, 2026-11-12). Record all three in `~/repos/yicheng47/social`. Read that repo's `AGENTS.md`, relevant platform README files and voice notes first, including `x/AGENTS.md`, `x/playbook.md` and `x/voice.md` for X; check for existing drafts for the version and preserve Jason's edits.
+
+Confirm the release is published (`gh release view v<version> --json isDraft` is `false`), then read its body with `gh release view v<version> --json body`. Build the Chinese post from the 中文 half and the Discord and X posts from the English half so all three agree with the release page. Keep the changes users notice; omit issue numbers, internal work and minor polish. Include Nightly changes only when the release is about that channel. Use the published release URL, which linux.do can render as a preview card.
+
+### WeChat / linux.do
+
+Use this plain-text shape, omitting empty sections:
 
 ```text
 【Runner <version> 发布】
@@ -106,10 +122,26 @@ https://github.com/yicheng47/runner/releases/tag/v<version>
 ```
 
 - Plain text only: WeChat renders no markdown, so no `#` headings, `**bold**` or `[links](…)`. Number the items under the ✨ 新功能 and 🛠 问题修复 lines; omit a section that is empty.
-- Shorten each 中文 bullet to one line in plain words, keeping product terms as the app shows them and dropping issue numbers. Keep the changes users notice; drop internal ones and minor polish, which the release page still lists. Leave out Nightly 渠道 unless the release is about it.
+- Shorten each 中文 bullet to one line in plain words, keeping product terms as the app shows them.
 - The release URL sits bare on its own line, which linux.do renders as a card and WeChat as a link.
 
-Write it to `/tmp/runner-v<version>-release-note.zh-CN.txt`, print the same text in the reply inside a `text` fence, and give the file path. Do not post it anywhere; the user does that.
+### Discord
+
+Write a concise English announcement for existing Runner users: version, supported platforms and update path, followed by the notable new features and fixes, the release URL on its own line, and a short invitation for feedback. Light Discord Markdown is fine: a bold title and short bullet lists. Keep the complete post within 2,000 characters so it fits in one ordinary message. Preserve product labels and relevant qualifications from the English release notes; do not add personal anecdotes or promotional claims.
+
+### X
+
+Write one English plain-text post within 280 weighted characters, counting each URL as 23 and CJK characters as 2. Lead with the version and a useful change, explaining what it lets a user do; include other highlights only if they fit comfortably. Put the published release URL on its own line. Keep the wording concrete and grounded in the release notes, without invented personal experience. Check and record the weighted length. This release workflow includes original-post drafting for X; publication remains the user's action.
+
+### Save and hand off
+
+- Canonical Chinese draft: `social/references/platforms/wechat/runner-<version>-user-group.md`, shared with linux.do by reference rather than a duplicate post file.
+- Canonical Discord draft: `social/references/platforms/discord/runner-<version>-release.md`.
+- Canonical X draft: `social/x/drafts/runner-<version>-release.md`. Follow the existing original-post format: draft date and status, agent authorship, weighted length, a copyable `text` fence, source release URL and space for Jason's response. Link it from `social/x/runner/README.md`.
+- For WeChat/linux.do and Discord, follow the existing draft metadata pattern: date, `status: draft`, intended venue(s), language, agent authorship and source release URL, then the copyable post body. Update the platform README indexes and link the shared Chinese draft from `social/linux-do/README.md`. A draft is not evidence of publication; preserve published copy if one already exists.
+- Also export the bodies without metadata to `/tmp/runner-v<version>-release-note.zh-CN.txt`, `/tmp/runner-v<version>-release-note.en.md` (Discord) and `/tmp/runner-v<version>-release-note.x.en.txt` for easy copying. The social repo is the durable record; `/tmp` is only a convenience copy.
+- Review the social diff and follow its standing commit/push authorization, preserving unrelated edits. This does not authorize git writes in the Runner repo.
+- Show the requested platform or language in the reply (all three posts when neither is specified), with `text` fences for Chinese and X, and link all three saved drafts. Do not post to any platform; the user does that.
 
 ## `sweep <version>`
 

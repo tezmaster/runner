@@ -12,7 +12,7 @@ Stopped and crashed sessions have no running agent to receive input. Read the te
 
 ## Open terminal links
 
-Hover a URL or file path to highlight it, then ⌘-click or Ctrl-click on macOS, or Ctrl-click on Windows, to open it. URLs open in your browser. A file path, including a `:line[:column]` suffix, opens in a tab in the side panel at that line when the path is inside the folder its Files view shows, and otherwise in the editor picked with **Open in**; see [Read a file in the side panel](../guides/chats-and-windows.md#read-a-file-in-the-side-panel).
+Hover a URL or file path to highlight it, then ⌘-click or Ctrl-click on macOS, or Ctrl-click on Windows, to open it. Web URLs (`http://` and `https://`) open in your browser. Local `file://` URLs (plain text or terminal hyperlinks targeting this machine or `localhost`, such as `file:///C:/...` on Windows) and file paths—including Windows drive-letter paths (`C:\...` and `C:/...`), UNC paths (`\\server\share\...`), and `:line[:column]`, `(line,column)`, or `#Lline` suffixes—open in a tab in the side panel at that line when the path is inside the folder its Files view shows, and otherwise in the editor picked with **Open in**; see [Read a file in the side panel](../guides/chats-and-windows.md#read-a-file-in-the-side-panel).
 
 When a runtime wraps an underlined URL onto indented rows or a hyperlink inside a table cell, hovering any fragment highlights the complete link; modifier-clicking any fragment opens the same destination. Links remain usable after reopening the session.
 
@@ -25,6 +25,8 @@ When a runtime wraps an underlined URL onto indented rows or a hyperlink inside 
 | Restart a mission slot | Starts a fresh conversation for that member |
 | Fork a chat | Creates another chat from the conversation, for runtimes that support forking |
 | Archive a chat | Stops it and removes it from active chat lists; find it in Settings → Archived |
+
+Archiving preserves the agent's saved conversation and history. Restore the chat in **Settings → Archived**, then resume it to continue that conversation in a fresh terminal.
 
 Shells have no Stop, Resume or Restart controls. Interrupt commands with Ctrl+C. Closing a terminal or exiting its shell with any exit code closes the pane rather than archiving it. Terminal pane ×, the close shortcut, sidebar terminal close and mission-drawer shell close act immediately without confirmation, locally and remotely, even while a command runs. Archiving a chat still asks for confirmation, and Archive all keeps its chat/terminal counts. Closing a window saves its layout and can leave its sessions running.
 

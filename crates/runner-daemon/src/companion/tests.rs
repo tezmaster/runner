@@ -11,6 +11,8 @@ pub struct Fake {
     pub snapshots: AtomicU64,
     overview_calls: AtomicU64,
     overview_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    status_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    status_started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     overview_started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     capture_overview_before_gate: AtomicBool,
     fail_overview: AtomicBool,
@@ -18,6 +20,9 @@ pub struct Fake {
     feed_calls: AtomicU64,
     feed_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     feed_started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    feed_since_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    feed_since_started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    fail_feed_since: AtomicBool,
     requests_enabled: AtomicBool,
     request_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     request_started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -45,6 +50,8 @@ impl Default for Fake {
             snapshots: AtomicU64::new(0),
             overview_calls: AtomicU64::new(0),
             overview_gate: Default::default(),
+            status_gate: Default::default(),
+            status_started: Default::default(),
             overview_started: Default::default(),
             capture_overview_before_gate: Default::default(),
             fail_overview: Default::default(),
@@ -52,6 +59,9 @@ impl Default for Fake {
             feed_calls: AtomicU64::new(0),
             feed_gate: Default::default(),
             feed_started: Default::default(),
+            feed_since_gate: Default::default(),
+            feed_since_started: Default::default(),
+            fail_feed_since: Default::default(),
             requests_enabled: AtomicBool::new(false),
             request_gate: Default::default(),
             request_started: Default::default(),
@@ -70,6 +80,7 @@ impl Fake {
             return Err(Failure(
                 ErrorCode::UnknownRequest,
                 "The host does not serve that request.",
+                None,
             ));
         }
         self.request_order.lock().unwrap().push(name);
@@ -118,9 +129,20 @@ impl Core for Fake {
             return Err(Failure(
                 ErrorCode::UnknownRequest,
                 "The host does not serve that request.",
+                None,
             ));
         }
         let entries = std::mem::take(&mut *self.appended.lock().unwrap());
+        let gate = self.feed_since_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            if let Some(started) = self.feed_since_started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            gate.recv().unwrap();
+        }
+        if self.fail_feed_since.load(Ordering::Relaxed) {
+            return Err(Failure(ErrorCode::Failed, "test feed failure", None));
+        }
         Ok(feed::Updates {
             cursor: cursor + entries.len() as u64,
             entries,
@@ -143,6 +165,7 @@ impl Core for Fake {
             return Err(Failure(
                 ErrorCode::UnknownRequest,
                 "The host does not serve that request.",
+                None,
             ));
         }
         self.feed_calls.fetch_add(1, Ordering::Relaxed);
@@ -159,14 +182,22 @@ impl Core for Fake {
         })
     }
     fn statuses(&self) -> core::Result<BTreeMap<String, SessionStatus>> {
-        Ok(self
+        let snapshot = self
             .overview
             .lock()
             .unwrap()
             .sessions
             .iter()
             .map(|(id, session)| (id.clone(), session.status.clone()))
-            .collect())
+            .collect();
+        let gate = self.status_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            if let Some(started) = self.status_started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            gate.recv().unwrap();
+        }
+        Ok(snapshot)
     }
     fn overview(&self) -> core::Result<Overview> {
         self.overview_calls.fetch_add(1, Ordering::Relaxed);
@@ -183,7 +214,7 @@ impl Core for Fake {
             gate.recv().unwrap();
         }
         if fail {
-            return Err(Failure(ErrorCode::Failed, "test overview failure"));
+            return Err(Failure(ErrorCode::Failed, "test overview failure", None));
         }
         Ok(captured.unwrap_or_else(|| self.overview.lock().unwrap().clone()))
     }
@@ -257,6 +288,8 @@ async fn next(adapter: &mut Adapter) -> serde_json::Value {
             adapter.overview_work.is_some()
                 || adapter.request_work.is_some()
                 || adapter.status_work.is_some()
+                || adapter.feed_read.is_some()
+                || adapter.feed_ready.is_some()
                 || adapter.output_due.is_some()
                 || adapter.overview_due.is_some()
                 || adapter.action_work.is_some()
@@ -1458,7 +1491,7 @@ async fn a_held_stream_does_not_hold_back_other_streams_or_feeds() {
             dirty: true,
         },
     );
-    let feed = sent(&mut adapter).await.expect("a feed does not wait");
+    let feed = delivered(&mut adapter).await;
     assert_eq!(feed["type"], "feedAppended");
     assert!(sent(&mut adapter).await.is_none());
     let held = delivered(&mut adapter).await;
@@ -1913,12 +1946,302 @@ async fn snapshot_continuation_survives_chunking_attach_and_resync() {
     }
 }
 
+#[tokio::test]
+async fn a_ping_is_answered_with_its_id_while_overview_and_feed_work_runs() {
+    let fake = Arc::new(Fake::default());
+    fake.feed_enabled.store(true, Ordering::Relaxed);
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    let (release_overview, gate) = std::sync::mpsc::channel();
+    let (started, overview_ready) = tokio::sync::oneshot::channel();
+    *fake.overview_gate.lock().unwrap() = Some(gate);
+    *fake.overview_started.lock().unwrap() = Some(started);
+    adapter
+        .request(request(serde_json::json!({"type":"overview","id":1})))
+        .await
+        .unwrap();
+    overview_ready.await.unwrap();
+    let (release_feed, gate) = std::sync::mpsc::channel();
+    let (started, feed_ready) = tokio::sync::oneshot::channel();
+    *fake.feed_gate.lock().unwrap() = Some(gate);
+    *fake.feed_started.lock().unwrap() = Some(started);
+    adapter
+        .request(request(
+            serde_json::json!({"type":"feed","id":2,"mission":"m","before":null,"limit":10}),
+        ))
+        .await
+        .unwrap();
+    feed_ready.await.unwrap();
+
+    adapter
+        .request(request(serde_json::json!({"type":"ping","id":7})))
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut adapter).await,
+        serde_json::json!({"type":"pong","id":7})
+    );
+
+    release_overview.send(()).unwrap();
+    release_feed.send(()).unwrap();
+    let mut replies = BTreeMap::new();
+    while replies.len() < 2 {
+        let message = next(&mut adapter).await;
+        replies.insert(message["id"].as_u64().unwrap(), message["type"].clone());
+    }
+    assert_eq!(replies[&1], "result");
+    assert_eq!(replies[&2], "result");
+}
+
+fn feed_entry(id: &str) -> FeedEntry {
+    FeedEntry {
+        id: id.into(),
+        ts: "2026-11-09T00:00:00Z".into(),
+        from: "human".into(),
+        to: vec![],
+        content: FeedContent::Message { text: id.into() },
+    }
+}
+/// A followed mission whose first feed read has started and is held by the returned gate.
+async fn held_feed_read(fake: &Arc<Fake>, adapter: &mut Adapter) -> std::sync::mpsc::Sender<()> {
+    fake.requests_enabled.store(true, Ordering::Relaxed);
+    let (release, gate) = std::sync::mpsc::channel();
+    let (started, read_started) = tokio::sync::oneshot::channel();
+    *fake.feed_since_gate.lock().unwrap() = Some(gate);
+    *fake.feed_since_started.lock().unwrap() = Some(started);
+    fake.appended.lock().unwrap().push(feed_entry("first"));
+    adapter
+        .request(request(
+            serde_json::json!({"type":"follow","id":1,"mission":"m"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delivered(adapter).await["id"], 1);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while adapter.feed_read.is_none() {
+            if adapter.next(true).await.unwrap().is_none() && adapter.feed_read.is_none() {
+                adapter.changed().await.unwrap();
+            }
+        }
+    })
+    .await
+    .expect("the followed mission's first read must start");
+    read_started.await.unwrap();
+    release
+}
+
+#[tokio::test]
+async fn a_ping_is_answered_while_a_followed_feed_read_is_held() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    let release = held_feed_read(&fake, &mut adapter).await;
+
+    adapter
+        .request(request(serde_json::json!({"type":"ping","id":7})))
+        .await
+        .unwrap();
+    assert_eq!(
+        delivered(&mut adapter).await,
+        serde_json::json!({"type":"pong","id":7})
+    );
+    assert!(adapter.feed_read.is_some(), "the read is still held");
+
+    release.send(()).unwrap();
+    let batch = delivered(&mut adapter).await;
+    assert_eq!(batch["type"], "feedAppended");
+    assert_eq!(batch["entries"][0]["id"], "first");
+}
+
+#[tokio::test]
+async fn an_append_during_a_feed_read_is_read_after_it() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    let release = held_feed_read(&fake, &mut adapter).await;
+
+    fake.appended.lock().unwrap().push(feed_entry("second"));
+    fake.events
+        .emit("event/appended", &serde_json::json!({"mission_id":"m"}));
+    drain(&mut adapter).await;
+
+    release.send(()).unwrap();
+    for (expected, cursor) in [("first", 18), ("second", 19)] {
+        let batch = loop {
+            let message = delivered(&mut adapter).await;
+            if message["type"] == "feedAppended" {
+                break message;
+            }
+        };
+        assert_eq!(batch["entries"][0]["id"], expected);
+        assert_eq!(adapter.feeds["m"].cursor, cursor);
+    }
+}
+
+#[tokio::test]
+async fn unfollowing_during_a_feed_read_delivers_no_later_batch() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    let release = held_feed_read(&fake, &mut adapter).await;
+
+    adapter
+        .request(request(
+            serde_json::json!({"type":"unfollow","id":2,"mission":"m"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delivered(&mut adapter).await["id"], 2);
+
+    release.send(()).unwrap();
+    while adapter.feed_read.is_some() {
+        adapter.changed().await.unwrap();
+    }
+    assert!(adapter.feed_ready.is_none());
+    assert!(adapter.feeds.is_empty());
+    assert!(adapter.next(true).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_finished_batch_is_dropped_if_its_mission_is_unfollowed_before_sending() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    let release = held_feed_read(&fake, &mut adapter).await;
+    release.send(()).unwrap();
+    while adapter.feed_read.is_some() {
+        adapter.changed().await.unwrap();
+    }
+    assert!(adapter.feed_ready.is_some());
+
+    adapter
+        .request(request(
+            serde_json::json!({"type":"unfollow","id":2,"mission":"m"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delivered(&mut adapter).await["id"], 2);
+    assert!(adapter.feed_ready.is_none());
+    assert!(adapter.next(true).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_read_from_before_a_refollow_does_not_reach_the_new_subscription() {
+    for cursor in [17, 40] {
+        let fake = Arc::new(Fake::default());
+        let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+        let release = held_feed_read(&fake, &mut adapter).await;
+
+        adapter
+            .request(request(
+                serde_json::json!({"type":"unfollow","id":2,"mission":"m"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(delivered(&mut adapter).await["id"], 2);
+        adapter.feeds.insert(
+            "m".into(),
+            FeedSubscription {
+                cursor,
+                dirty: true,
+            },
+        );
+
+        release.send(()).unwrap();
+        while adapter.feed_read.is_some() {
+            adapter.changed().await.unwrap();
+        }
+        assert!(adapter.feed_ready.is_none(), "cursor {cursor}");
+        assert_eq!(adapter.feeds["m"].cursor, cursor);
+        assert!(adapter.feeds["m"].dirty);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_read_from_before_a_same_cursor_refollow_leaves_the_new_subscription_working() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    let release = held_feed_read(&fake, &mut adapter).await;
+    let cursor = adapter.feeds["m"].cursor;
+    fake.fail_feed_since.store(true, Ordering::Relaxed);
+
+    for (id, kind) in [(2, "unfollow"), (3, "follow")] {
+        adapter
+            .request(request(
+                serde_json::json!({"type":kind,"id":id,"mission":"m"}),
+            ))
+            .await
+            .unwrap();
+        let reply = delivered(&mut adapter).await;
+        assert_eq!(
+            (reply["id"].as_u64(), &reply["type"]),
+            (Some(id), &"result".into())
+        );
+    }
+    assert_eq!(adapter.feeds["m"].cursor, cursor);
+    assert!(adapter.feed_read.is_some(), "the old read is still running");
+
+    release.send(()).unwrap();
+    while adapter.feed_read.is_some() {
+        adapter.changed().await.unwrap();
+    }
+    assert!(
+        adapter.feeds.contains_key("m"),
+        "the new subscription stays"
+    );
+
+    fake.fail_feed_since.store(false, Ordering::Relaxed);
+    fake.appended.lock().unwrap().push(feed_entry("after"));
+    fake.events
+        .emit("event/appended", &serde_json::json!({"mission_id":"m"}));
+    let batch = loop {
+        let message = delivered(&mut adapter).await;
+        if message["type"] == "feedAppended" {
+            break message;
+        }
+    };
+    assert_eq!(batch["entries"][0]["id"], "after");
+    assert_eq!(batch["mission"], "m");
+}
+
+#[tokio::test]
+async fn a_feed_read_waits_for_room_in_the_reply_queue() {
+    let fake = Arc::new(Fake::default());
+    fake.feed_enabled.store(true, Ordering::Relaxed);
+    fake.appended.lock().unwrap().push(feed_entry("first"));
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    adapter.feeds.insert(
+        "m".into(),
+        FeedSubscription {
+            cursor: 0,
+            dirty: true,
+        },
+    );
+    adapter.in_flight(MAX_MESSAGE_SIZE - 10);
+    assert!(adapter.next(true).await.unwrap().is_none());
+    assert!(adapter.feed_read.is_none());
+    adapter.in_flight(0);
+    assert_eq!(delivered(&mut adapter).await["type"], "feedAppended");
+}
+
+#[tokio::test]
+async fn a_ping_never_fails_the_channel_however_full_its_reply_queue_is() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake, 1, String::new()).unwrap();
+    adapter.in_flight(MAX_MESSAGE_SIZE);
+    for id in [9, 10] {
+        adapter
+            .request(request(serde_json::json!({"type":"ping","id":id})))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        next(&mut adapter).await,
+        serde_json::json!({"type":"pong","id":10})
+    );
+}
+
 #[test]
 fn every_action_and_served_feed_request_is_advertised() {
     for name in ActionRequest::NAMES
         .iter()
         .copied()
-        .chain(["feed", "follow", "unfollow", "answer", "post"])
+        .chain(["feed", "follow", "unfollow", "answer", "post", "ping"])
     {
         assert!(FEATURES.contains(&name), "{name}");
     }
@@ -2064,4 +2387,491 @@ async fn clipboard_and_selection_writes_both_complete_once() {
         ],
         "the latest write lands last, where both targets share one clipboard"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn overview_pushes_ignore_unchanged_state_and_status_but_keep_real_changes_and_replies() {
+    async fn settle(adapter: &mut Adapter) -> Vec<serde_json::Value> {
+        let mut messages = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                while let Some(bytes) = adapter.next(true).await.unwrap() {
+                    messages.push(serde_json::from_slice(&bytes).unwrap());
+                }
+                if adapter.events.is_empty()
+                    && adapter.overview_due.is_none()
+                    && adapter.overview_work.is_none()
+                    && adapter.status_work.is_none()
+                {
+                    break;
+                }
+                adapter.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        messages
+    }
+    let fake = Arc::new(Fake::default());
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    adapter.initialize().await.unwrap();
+    fake.events.emit("session/status-changed", &());
+    assert_eq!(
+        settle(&mut adapter)
+            .await
+            .iter()
+            .filter(|m| m["type"] == "overview")
+            .count(),
+        1
+    );
+    fake.events.emit("event/appended", &());
+    assert!(settle(&mut adapter).await.is_empty());
+    {
+        let mut overview = fake.overview.lock().unwrap();
+        let session = overview.sessions.values_mut().next().unwrap();
+        session.status.unread = !session.status.unread;
+        session.status.interrupted_since = Some(123);
+    }
+    fake.events.emit("session/status-changed", &());
+    let messages = settle(&mut adapter).await;
+    assert!(messages.iter().any(|m| m["type"] == "status"));
+    assert!(!messages.iter().any(|m| m["type"] == "overview"));
+    for change in 0..5 {
+        {
+            let mut overview = fake.overview.lock().unwrap();
+            match change {
+                0 => {
+                    let mut tab = overview.tabs[0].clone();
+                    tab.id = "new-chat".into();
+                    overview.tabs.push(tab);
+                }
+                1 => overview.tabs.last_mut().unwrap().name = "renamed".into(),
+                2 => {
+                    overview.tabs.pop();
+                }
+                3 => {
+                    let mut mission = overview.missions[0].clone();
+                    mission.id = "new-mission".into();
+                    overview.missions.push(mission);
+                }
+                _ => {
+                    let mut project = overview.projects[0].clone();
+                    project.id = "new-project".into();
+                    overview.projects.push(project);
+                }
+            }
+        }
+        fake.events.emit("chat/layout-changed", &());
+        assert_eq!(
+            settle(&mut adapter)
+                .await
+                .iter()
+                .filter(|m| m["type"] == "overview")
+                .count(),
+            1,
+            "change {change}"
+        );
+    }
+    adapter
+        .request(request(serde_json::json!({"type":"overview","id":42})))
+        .await
+        .unwrap();
+    let messages = settle(&mut adapter).await;
+    assert!(messages
+        .iter()
+        .any(|m| m["type"] == "result" && m["id"] == 42));
+    let mut second = Adapter::new(fake.clone(), 2, String::new()).unwrap();
+    fake.events.emit("session/status-changed", &());
+    assert!(settle(&mut second)
+        .await
+        .iter()
+        .any(|m| m["type"] == "overview"));
+}
+
+#[tokio::test]
+async fn a_flood_resync_finishes_the_current_snapshot_before_starting_another() {
+    let fake = Arc::new(Fake::default());
+    *fake.bytes.lock().unwrap() = vec![b'x'; TERMINAL_CHUNK_SIZE * 2 + 1];
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    attach(&mut adapter, "flood").await;
+    let first = next(&mut adapter).await;
+    assert_eq!(first["type"], "snapshot");
+    assert_eq!(first["more"], true);
+    let seq = first["seq"].clone();
+    for more in [true, false] {
+        stream_queue(&adapter, "flood")
+            .lock()
+            .unwrap()
+            .push(TerminalFrame::Resync);
+        assert!(adapter.next_paced(true, true).await.unwrap().is_none());
+        let chunk = next(&mut adapter).await;
+        assert_eq!(chunk["type"], "snapshot");
+        assert_eq!(
+            chunk["seq"], seq,
+            "queue overflow interrupted an in-progress snapshot"
+        );
+        assert_eq!(chunk["more"], more);
+    }
+    stream_queue(&adapter, "flood")
+        .lock()
+        .unwrap()
+        .push(TerminalFrame::Resync);
+    assert!(adapter.next_paced(true, true).await.unwrap().is_none());
+    let end = next(&mut adapter).await;
+    assert_eq!(end["type"], "resized");
+    assert_eq!(end["seq"], seq);
+    let fresh = next(&mut adapter).await;
+    assert_eq!(fresh["type"], "snapshot");
+    assert!(fresh["seq"].as_u64().unwrap() > seq.as_u64().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_pacing_holds_output_but_preserves_priority_and_order() {
+    let fake = Arc::new(Fake::default());
+    let mut adapter = streaming(&fake, &["terminal"]).await;
+    push_output(&adapter, "terminal", b"first ");
+    push_output(&adapter, "terminal", b"second");
+    adapter
+        .request(ClientMessage::Ping(PingRequest { id: 1 }))
+        .await
+        .unwrap();
+    adapter
+        .push(HostMessage::Result(ResultMessage {
+            id: 2,
+            result: serde_json::Value::Null,
+        }))
+        .unwrap();
+    adapter
+        .push(HostMessage::Status(StatusPush {
+            session: "terminal".into(),
+            status: fake
+                .overview
+                .lock()
+                .unwrap()
+                .sessions
+                .values()
+                .next()
+                .unwrap()
+                .status
+                .clone(),
+        }))
+        .unwrap();
+    adapter.feed_ready = Some((
+        "mission".into(),
+        serde_json::to_vec(&HostMessage::FeedAppended(FeedAppended {
+            mission: "mission".into(),
+            entries: vec![],
+        }))
+        .unwrap(),
+    ));
+    adapter.feed_turn = false;
+    for expected in ["pong", "result", "status", "feedAppended"] {
+        let bytes = adapter.next_paced(true, true).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["type"],
+            expected
+        );
+    }
+    assert!(adapter.next_paced(true, true).await.unwrap().is_none());
+    let output: HostMessage =
+        serde_json::from_slice(&adapter.next_paced(true, false).await.unwrap().unwrap()).unwrap();
+    let HostMessage::Output(output) = output else {
+        panic!("expected the paused output");
+    };
+    assert_eq!(output.data.0, b"first second");
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_pacing_keeps_a_quiet_stream_responsive_beside_a_slow_link_flood() {
+    use runner_core::{
+        companion::channel::{self, BrowserConnect, NoiseKeys, Records},
+        remote::HostKey,
+    };
+    async fn simulate(pacing: bool) -> (Vec<Duration>, usize) {
+        let host = HostKey::generate().unwrap();
+        let device = HostKey::generate().unwrap();
+        let (connect, first) = BrowserConnect::start(
+            NoiseKeys {
+                private: &device.private,
+                fixed_ephemeral: None,
+            },
+            &host.public,
+        )
+        .unwrap();
+        let (transport, accept, _) = channel::connect(
+            NoiseKeys {
+                private: &host.private,
+                fixed_ephemeral: None,
+            },
+            &first,
+            |_| true,
+        )
+        .unwrap();
+        let mut sender = Records::new(transport);
+        let mut receiver = Records::new(connect.accept(&accept).unwrap());
+        let fake = Arc::new(Fake::default());
+        let mut adapter = streaming(&fake, &["flood", "quiet"]).await;
+        let start = Instant::now();
+        let mut tail = start;
+        let mut forward = VecDeque::<(Instant, Vec<u8>)>::new();
+        let mut credits = VecDeque::<(Instant, Vec<u8>)>::new();
+        let mut sent = BTreeMap::new();
+        let mut echoes = Vec::new();
+        let mut pauses = 0;
+        let mut produced = 0;
+        let mut delivered = 0;
+        let mut next_quiet = 300;
+        for step in 0..1800u64 {
+            let now = Instant::now();
+            while credits.front().is_some_and(|(due, _)| *due <= now) {
+                sender.receive(&credits.pop_front().unwrap().1).unwrap();
+            }
+            while forward.front().is_some_and(|(due, _)| *due <= now) {
+                if let Some(bytes) = receiver.receive(&forward.pop_front().unwrap().1).unwrap() {
+                    let message: HostMessage = serde_json::from_slice(&bytes).unwrap();
+                    if let HostMessage::Output(output) = message {
+                        if output.session == "flood" {
+                            delivered += output.data.0.len();
+                        }
+                        if output.session == "quiet" {
+                            for id in output.data.0.chunks_exact(8) {
+                                let id = u64::from_be_bytes(id.try_into().unwrap());
+                                assert_eq!(id, next_quiet, "quiet output was reordered");
+                                next_quiet += 20;
+                                echoes.push(now - sent.remove(&id).unwrap());
+                            }
+                        }
+                    }
+                    receiver.handled();
+                }
+                while let Some(credit) = receiver.next_frame().unwrap() {
+                    credits.push_back((now + Duration::from_millis(20), credit));
+                }
+            }
+            if step < 1500 {
+                if stream_queue(&adapter, "flood")
+                    .lock()
+                    .unwrap()
+                    .frames
+                    .is_empty()
+                {
+                    assert!(push_output(
+                        &adapter,
+                        "flood",
+                        &vec![b'x'; TERMINAL_CHUNK_SIZE]
+                    ));
+                    produced += TERMINAL_CHUNK_SIZE;
+                }
+                if (300..1300).contains(&step) && step % 20 == 0 {
+                    sent.insert(step, now);
+                    assert!(push_output(&adapter, "quiet", &step.to_be_bytes()));
+                }
+            }
+            for _ in 0..64 {
+                let paused = pacing && sender.output_paced(now.into_std());
+                pauses += usize::from(paused);
+                if !sender.sending() {
+                    if let Some(message) = adapter
+                        .next_paced(sender.send_credit() > 0, paused)
+                        .await
+                        .unwrap()
+                    {
+                        sender.queue(message).unwrap();
+                    }
+                }
+                let Some(frame) = sender.next_frame_at(now.into_std()).unwrap() else {
+                    break;
+                };
+                tail = tail.max(now)
+                    + Duration::from_nanos(frame.len() as u64 * 1_000_000_000 / 500_000);
+                forward.push_back((tail + Duration::from_millis(10), frame));
+            }
+            tokio::time::advance(Duration::from_millis(10)).await;
+        }
+        assert!(sent.is_empty(), "a quiet echo was lost");
+        assert_eq!(echoes.len(), 50);
+        assert_eq!(delivered, produced, "flood output was lost across pacing");
+        echoes.sort();
+        (echoes, pauses)
+    }
+    let (unpaced, _) = simulate(false).await;
+    let (paced, pauses) = simulate(true).await;
+    let baseline = unpaced[unpaced.len() / 2];
+    let median = paced[paced.len() / 2];
+    eprintln!(
+        "simulated flooded echo: paced={}ms, unpaced={}ms",
+        median.as_millis(),
+        baseline.as_millis()
+    );
+    assert!(pauses > 0);
+    assert!(baseline > Duration::from_millis(800));
+    assert!(
+        median <= Duration::from_millis(700),
+        "paced median {median:?}, unpaced {baseline:?}"
+    );
+    assert!(
+        median + Duration::from_millis(200) < baseline,
+        "paced {median:?}, unpaced {baseline:?}"
+    );
+}
+
+#[tokio::test]
+async fn stale_status_worker_before_attention_changed_cannot_push_stale_unread() {
+    let fake = Arc::new(Fake::default());
+    let id = fake
+        .overview
+        .lock()
+        .unwrap()
+        .sessions
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    adapter
+        .request(request(serde_json::json!({"type": "overview", "id": 1})))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut adapter).await["type"], "result");
+
+    // Start from `unread = false` so an accepted stale `unread: true` snapshot would
+    // differ from `adapter.statuses` and emit a stale `status` push.
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut(&id)
+        .unwrap()
+        .status
+        .unread = true;
+    let (release, gate) = std::sync::mpsc::channel();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    *fake.status_gate.lock().unwrap() = Some(gate);
+    *fake.status_started.lock().unwrap() = Some(started);
+    fake.events.emit("chat/tab-attention-changed", &());
+    adapter.changed().await.unwrap();
+    ready.await.unwrap();
+
+    // Let the status worker finish with its pre-clear `unread: true` snapshot before
+    // draining the queued attention-clear event, then force `finish_status_work` to run
+    // directly as if `tokio::select!` chose the worker arm before `events.recv()`.
+    release.send(()).unwrap();
+    let result = adapter.status_work.as_mut().unwrap().await;
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut(&id)
+        .unwrap()
+        .status
+        .unread = false;
+    fake.events.emit("chat/tab-attention-changed", &());
+    adapter.finish_status_work(result).unwrap();
+
+    while adapter.status_work.is_some() {
+        adapter.changed().await.unwrap();
+    }
+    assert!(adapter.next(false).await.unwrap().is_none());
+
+    adapter
+        .request(request(serde_json::json!({"type": "overview", "id": 2})))
+        .await
+        .unwrap();
+    let msg = next(&mut adapter).await;
+    assert_eq!(msg["type"], "result");
+    let overview: runner_core::companion::Overview =
+        serde_json::from_value(msg["result"].clone()).unwrap();
+    assert!(!overview.sessions[&id].status.unread);
+}
+
+#[tokio::test]
+async fn overview_waits_for_newer_status_revision_before_publishing_clean_status() {
+    let fake = Arc::new(Fake::default());
+    let id = fake
+        .overview
+        .lock()
+        .unwrap()
+        .sessions
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut(&id)
+        .unwrap()
+        .status
+        .unread = true;
+    let mut adapter = Adapter::new(fake.clone(), 1, String::new()).unwrap();
+    adapter
+        .request(request(serde_json::json!({"type": "overview", "id": 1})))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut adapter).await["type"], "result");
+
+    fake.capture_overview_before_gate
+        .store(true, Ordering::Relaxed);
+    let (release_ov, ov_gate) = std::sync::mpsc::channel();
+    let (ov_started, ov_ready) = tokio::sync::oneshot::channel();
+    *fake.overview_gate.lock().unwrap() = Some(ov_gate);
+    *fake.overview_started.lock().unwrap() = Some(ov_started);
+    adapter
+        .request(request(serde_json::json!({"type": "overview", "id": 2})))
+        .await
+        .unwrap();
+    ov_ready.await.unwrap();
+
+    // Host clears unread while `overview_work` already captured `unread: true`,
+    // and the newer status worker is still in flight.
+    fake.overview
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut(&id)
+        .unwrap()
+        .status
+        .unread = false;
+    let (release_st, st_gate) = std::sync::mpsc::channel();
+    let (st_started, st_ready) = tokio::sync::oneshot::channel();
+    *fake.status_gate.lock().unwrap() = Some(st_gate);
+    *fake.status_started.lock().unwrap() = Some(st_started);
+    fake.events.emit("chat/tab-attention-changed", &());
+    adapter.changed().await.unwrap();
+    st_ready.await.unwrap();
+
+    release_ov.send(()).unwrap();
+    while adapter.overview_work.is_some() {
+        adapter.changed().await.unwrap();
+    }
+    assert!(adapter.next(true).await.unwrap().is_none());
+    assert!(adapter.pending_overview.is_some());
+    assert!(adapter.status_work.is_some());
+
+    release_st.send(()).unwrap();
+    let mut seen_status_false = false;
+    let mut seen_overview_false = false;
+    for _ in 0..2 {
+        let msg = next(&mut adapter).await;
+        match msg["type"].as_str().unwrap() {
+            "status" => {
+                let status: runner_core::companion::StatusPush =
+                    serde_json::from_value(msg).unwrap();
+                assert_eq!(status.session, id);
+                assert!(!status.status.unread);
+                seen_status_false = true;
+            }
+            "result" => {
+                assert_eq!(msg["id"], 2);
+                let overview: runner_core::companion::Overview =
+                    serde_json::from_value(msg["result"].clone()).unwrap();
+                assert!(!overview.sessions[&id].status.unread);
+                seen_overview_false = true;
+            }
+            other => panic!("unexpected companion message {other}: {msg}"),
+        }
+    }
+    assert!(seen_status_false && seen_overview_false);
+    assert!(adapter.next(false).await.unwrap().is_none());
 }

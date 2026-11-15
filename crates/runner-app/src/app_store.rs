@@ -17,9 +17,8 @@ use runner_core::protocol::ClientEvent as AppEvent;
 use runner_core::protocol::DaemonClient;
 use runner_terminal::terminal::TerminalBridge;
 
-use crate::app_settings::{
-    AppSettings, DarkTerminalTheme, LightTerminalTheme, TerminalCursorStyle, TerminalFontFamily,
-};
+use crate::app_settings::{AppSettings, TerminalCursorStyle, TerminalFontFamily};
+use crate::theme::{DarkTheme, LightTheme};
 
 mod command_default;
 mod mcp_removal;
@@ -172,8 +171,8 @@ impl StoreRevisions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TerminalSettingsSnapshot {
-    light_theme: LightTerminalTheme,
-    dark_theme: DarkTerminalTheme,
+    light_theme: LightTheme,
+    dark_theme: DarkTheme,
     is_light: bool,
     font_family: TerminalFontFamily,
     font_size: u16,
@@ -193,8 +192,8 @@ impl From<&AppSettings> for TerminalSettingsSnapshot {
 impl TerminalSettingsSnapshot {
     fn for_variant(settings: &AppSettings, variant: crate::theme::ThemeVariant) -> Self {
         Self {
-            light_theme: settings.light_terminal_theme,
-            dark_theme: settings.dark_terminal_theme,
+            light_theme: settings.light_app_theme,
+            dark_theme: settings.dark_app_theme,
             is_light: variant.is_light(),
             font_family: settings.terminal_font_family.clone(),
             font_size: settings.terminal_font_size,
@@ -240,8 +239,6 @@ impl From<&AppSettings> for ShellSettingsSnapshot {
         std::mem::discriminant(&settings.light_app_theme).hash(&mut hasher);
         std::mem::discriminant(&settings.dark_app_theme).hash(&mut hasher);
         settings.app_zoom.to_bits().hash(&mut hasher);
-        std::mem::discriminant(&settings.light_terminal_theme).hash(&mut hasher);
-        std::mem::discriminant(&settings.dark_terminal_theme).hash(&mut hasher);
         settings.terminal_font_family.hash(&mut hasher);
         settings.terminal_font_size.hash(&mut hasher);
         std::mem::discriminant(&settings.terminal_cursor_style).hash(&mut hasher);
@@ -265,6 +262,13 @@ impl From<&AppSettings> for ShellSettingsSnapshot {
         settings.default_runtime.hash(&mut hasher);
         settings.disabled_agents.hash(&mut hasher);
         settings.enabled_agents.hash(&mut hasher);
+        settings.usage.sidebar.hash(&mut hasher);
+        settings.usage.codex.hash(&mut hasher);
+        settings.usage.claude_code.hash(&mut hasher);
+        settings.usage.antigravity.hash(&mut hasher);
+        settings.usage.five_hour.hash(&mut hasher);
+        settings.notifications.usage.near_limit.hash(&mut hasher);
+        settings.notifications.usage.threshold.hash(&mut hasher);
         settings.runner_skill_enabled.hash(&mut hasher);
         settings.keymap_overrides.hash(&mut hasher);
         Self(hasher.finish())
@@ -461,15 +465,18 @@ impl AppStore {
                     .update(cx, |this, cx| {
                         let mut labels_changed = false;
                         for id in changed {
-                            if let Some(terminal) = this.bridge.session(&id) {
-                                let label =
-                                    (terminal.title(), terminal.live_cwd(), terminal.control());
-                                if this.terminal_labels.get(&id) != Some(&label) {
-                                    this.terminal_labels.insert(id.clone(), label);
-                                    labels_changed = true;
+                            match this.bridge.session(&id) {
+                                Some(terminal) => {
+                                    let label =
+                                        (terminal.title(), terminal.live_cwd(), terminal.control());
+                                    if this.terminal_labels.get(&id) != Some(&label) {
+                                        this.terminal_labels.insert(id.clone(), label);
+                                        labels_changed = true;
+                                    }
                                 }
-                            } else {
-                                labels_changed |= this.terminal_labels.remove(&id).is_some();
+                                _ => {
+                                    labels_changed |= this.terminal_labels.remove(&id).is_some();
+                                }
                             }
                             this.terminal_updates.update(cx, |_, cx| cx.emit(id));
                         }
@@ -1522,9 +1529,9 @@ mod tests {
         );
 
         let mut light_pick = settings.clone();
-        light_pick.light_terminal_theme = LightTerminalTheme::Runner;
+        light_pick.light_app_theme = LightTheme::GruvboxLight;
         let mut dark_pick = settings.clone();
-        dark_pick.dark_terminal_theme = DarkTerminalTheme::CatppuccinMocha;
+        dark_pick.dark_app_theme = DarkTheme::CatppuccinMocha;
         for variant in [ThemeVariant::Carbon, ThemeVariant::RunnerLight] {
             assert_ne!(
                 TerminalSettingsSnapshot::for_variant(&settings, variant),
@@ -1555,7 +1562,7 @@ mod tests {
     #[test]
     fn terminal_settings_snapshot_ignores_unrelated_preferences() {
         let before = AppSettings {
-            dark_terminal_theme: DarkTerminalTheme::CatppuccinMocha,
+            dark_app_theme: DarkTheme::CatppuccinMocha,
             ..AppSettings::default()
         };
         let mut after = before.clone();
@@ -1592,7 +1599,7 @@ mod tests {
     #[test]
     fn shell_settings_snapshot_ignores_mission_preferences() {
         let before = AppSettings {
-            dark_terminal_theme: DarkTerminalTheme::CatppuccinMocha,
+            dark_app_theme: DarkTheme::CatppuccinMocha,
             ..AppSettings::default()
         };
         let mut after = before.clone();
@@ -1726,4 +1733,35 @@ mod roster_change_tests {
             );
         }
     }
+}
+
+#[test]
+fn usage_controls_invalidate_shell_but_alert_history_does_not() {
+    let settings = AppSettings::default();
+    let before = ShellSettingsSnapshot::from(&settings);
+    let changes: [fn(&mut AppSettings); 7] = [
+        |s| s.usage.sidebar = false,
+        |s| s.usage.codex = false,
+        |s| s.usage.claude_code = false,
+        |s| s.usage.antigravity = false,
+        |s| s.usage.five_hour = false,
+        |s| s.notifications.usage.near_limit = false,
+        |s| s.notifications.usage.threshold = 50,
+    ];
+    for change in changes {
+        let mut next = settings.clone();
+        change(&mut next);
+        assert_ne!(ShellSettingsSnapshot::from(&next), before);
+    }
+    let mut next = settings;
+    next.notifications
+        .usage
+        .alerted
+        .push(crate::app_settings::UsageAlertPeriod {
+            runtime: runner_core::Runtime::Codex,
+            account: String::new(),
+            window: "Week".into(),
+            resets_at: None,
+        });
+    assert_eq!(ShellSettingsSnapshot::from(&next), before);
 }

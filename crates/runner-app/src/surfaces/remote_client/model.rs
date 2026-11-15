@@ -18,6 +18,7 @@ pub(crate) fn agent_status(status: &SessionStatus) -> runner_core::protocol::Age
     let marker = i64::MAX;
     let kind = status.status.effective();
     AgentStatus {
+        startup_error: status.startup_error.clone(),
         lifecycle: match kind {
             Status::Starting => Lifecycle::Starting,
             Status::Stopped => Lifecycle::Stopped,
@@ -99,6 +100,7 @@ impl Connection {
 
 pub(crate) enum Command {
     Refresh,
+    UsageWatch(String, bool, bool),
     Acquire(String),
     Release(String),
     Retry(String),
@@ -108,6 +110,7 @@ pub(crate) enum Command {
 }
 
 pub(super) enum Update {
+    UsageWatch(String, bool, bool),
     Access(bool),
     Computers(Result<Vec<Computer>, ()>),
     LoadStarted(String, u64),
@@ -140,9 +143,15 @@ pub(crate) struct ClientState {
     pub(crate) overviews: HashMap<String, Overview>,
     pub(crate) overview_revisions: HashMap<String, u64>,
     data_revisions: HashMap<String, u64>,
+    status_epochs: HashMap<(String, String), u64>,
     connection_revisions: HashMap<String, u64>,
     loads: HashMap<String, LoadRevision>,
+    reconcile_generation: u64,
     pub(crate) connections: HashMap<String, Connection>,
+    latencies: HashMap<String, u64>,
+    slow_links: HashSet<String>,
+    pub(super) usage: HashMap<String, runner_core::companion::Usage>,
+    pub(super) usage_polling: HashMap<String, super::usage::UsagePolling>,
     pub(crate) changed_identities: HashSet<String>,
     pub(crate) directory_error: bool,
     pub(crate) loading: bool,
@@ -150,12 +159,12 @@ pub(crate) struct ClientState {
     pub(crate) terminal_epoch: u64,
     pub(super) client: DaemonClient,
     pub(super) mission_feeds: HashMap<(String, String, String), super::feed::SharedMissionFeed>,
-    capabilities: HashMap<String, Arc<RemoteAccess>>,
+    pub(super) capabilities: HashMap<String, Arc<RemoteAccess>>,
     capability_generation: u64,
     pub(super) pair_epochs: HashMap<String, u64>,
     signed_in: Option<bool>,
     attention_follows: HashMap<String, Follow>,
-    commands: mpsc::UnboundedSender<Command>,
+    pub(super) commands: mpsc::UnboundedSender<Command>,
     _tasks: Vec<gpui::Task<()>>,
 }
 
@@ -181,6 +190,7 @@ impl ClientState {
                             "remote/overview"
                                 | "remote/session-status"
                                 | "remote/connection"
+                                | "remote/latency"
                                 | "remote/status"
                                 | "daemon/disconnected"
                         ) =>
@@ -211,6 +221,7 @@ impl ClientState {
                 if weak
                     .update(cx, |state, cx| {
                         state.apply(update);
+                        state.poll_usage(cx);
                         cx.notify();
                     })
                     .is_err()
@@ -219,14 +230,28 @@ impl ClientState {
                 }
             }
         });
+        let usage_task = cx.spawn(async move |weak, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            if weak.update(cx, |state, cx| state.poll_usage(cx)).is_err() {
+                break;
+            }
+        });
         Self {
             computers: Vec::new(),
             overviews: HashMap::new(),
+            status_epochs: HashMap::new(),
             overview_revisions: HashMap::new(),
             data_revisions: HashMap::new(),
             connection_revisions: HashMap::new(),
             loads: HashMap::new(),
+            reconcile_generation: 0,
             connections: HashMap::new(),
+            latencies: HashMap::new(),
+            slow_links: HashSet::new(),
+            usage: HashMap::new(),
+            usage_polling: HashMap::new(),
             changed_identities: HashSet::new(),
             directory_error: false,
             loading: false,
@@ -240,7 +265,7 @@ impl ClientState {
             signed_in: None,
             attention_follows: HashMap::new(),
             commands,
-            _tasks: vec![event_task, command_task, response_task],
+            _tasks: vec![event_task, command_task, response_task, usage_task],
         }
     }
 
@@ -278,7 +303,10 @@ impl ClientState {
             let task = cx.background_spawn(async move { client.discover() });
             cx.spawn(async move |weak, cx| {
                 let _ = task.await;
-                let _ = weak.update(cx, |_, cx| cx.notify());
+                let _ = weak.update(cx, |state, cx| {
+                    state.poll_usage(cx);
+                    cx.notify();
+                });
             })
             .detach();
         } else {
@@ -307,8 +335,22 @@ impl ClientState {
     pub(crate) fn connection(&self, computer: &str) -> Connection {
         self.connections.get(computer).copied().unwrap_or_default()
     }
+    pub(crate) fn latency(&self, computer: &str) -> Option<u64> {
+        self.latencies.get(computer).copied()
+    }
+    pub(crate) fn slow(&self, computer: &str) -> bool {
+        self.slow_links.contains(computer)
+    }
+    pub(crate) fn lacks_ping(&self, computer: &str) -> bool {
+        self.capabilities
+            .get(computer)
+            .is_some_and(|access| access.lacks("ping"))
+    }
     pub(super) fn apply(&mut self, update: Update) {
         match update {
+            Update::UsageWatch(computer, popover, acquire) => {
+                self.update_usage_watch(computer, popover, acquire)
+            }
             Update::Access(enabled) => self.signed_in = Some(enabled),
             Update::Computers(result) => {
                 self.loading = false;
@@ -366,6 +408,7 @@ impl ClientState {
                 }
                 if self.connection(&computer) != Connection::Forgotten {
                     *self.overview_revisions.entry(computer.clone()).or_default() += 1;
+                    self.record_overview_status_epochs(&computer, &overview);
                     self.overviews.insert(computer, overview);
                 }
             }
@@ -380,6 +423,13 @@ impl ClientState {
                     && (connection != Connection::Connected
                         || self.connection(&computer) != Connection::Revoked)
                 {
+                    if connection == Connection::Connected
+                        && self.connection(&computer) != Connection::Connected
+                    {
+                        if let Some(polling) = self.usage_polling.get_mut(&computer) {
+                            polling.reconnected();
+                        }
+                    }
                     self.connections.insert(computer, connection);
                 }
             }
@@ -387,6 +437,7 @@ impl ClientState {
             Update::Forgotten(computer, success) => {
                 self.action_failed = !success;
                 if success {
+                    self.usage.remove(&computer);
                     self.loads.remove(&computer);
                     self.invalidate_capabilities(&computer);
                     self.connections
@@ -399,6 +450,11 @@ impl ClientState {
                 }
             }
         }
+        let connections = &self.connections;
+        self.slow_links
+            .retain(|computer| connections.get(computer) == Some(&Connection::Connected));
+        self.latencies
+            .retain(|computer, _| connections.get(computer) == Some(&Connection::Connected));
         self.sync_attention_follows();
     }
     fn load_data_is_current(&self, computer: &str, generation: u64) -> bool {
@@ -468,6 +524,8 @@ impl ClientState {
             event.name.as_str(),
             "daemon/disconnected" | "daemon/reconnected"
         ) {
+            self.latencies.clear();
+            self.slow_links.clear();
             self.loads.clear();
             for (_, access) in self.capabilities.drain() {
                 access.invalidate();
@@ -521,6 +579,7 @@ impl ClientState {
                 if let Ok(overview) = serde_json::from_value(event.payload["overview"].clone()) {
                     *self.data_revisions.entry(computer.clone()).or_default() += 1;
                     *self.overview_revisions.entry(computer.clone()).or_default() += 1;
+                    self.record_overview_status_epochs(&computer, &overview);
                     self.overviews.insert(computer, overview);
                 }
             }
@@ -529,6 +588,12 @@ impl ClientState {
                     serde_json::from_value::<StatusPush>(event.payload["status"].clone())
                 {
                     *self.data_revisions.entry(computer.clone()).or_default() += 1;
+                    // Advance on every authoritative session update so passive sync can emit
+                    // a fresh `markViewed` whenever a newer unread status push arrives.
+                    *self
+                        .status_epochs
+                        .entry((computer.clone(), status.session.clone()))
+                        .or_default() += 1;
                     if let Some(session) = self
                         .overviews
                         .get_mut(&computer)
@@ -563,6 +628,12 @@ impl ClientState {
                 };
                 if state != Connection::Connected {
                     self.invalidate_capabilities(&computer);
+                    self.latencies.remove(&computer);
+                    self.slow_links.remove(&computer);
+                } else if self.connection(&computer) != Connection::Connected {
+                    if let Some(polling) = self.usage_polling.get_mut(&computer) {
+                        polling.reconnected();
+                    }
                 }
                 self.connections.insert(computer.clone(), state);
                 if state == Connection::Revoked {
@@ -571,7 +642,113 @@ impl ClientState {
                     }
                 }
             }
+            "remote/latency" => {
+                if let Some(ms) = event.payload["ms"].as_u64() {
+                    if self.connection(&computer) == Connection::Connected {
+                        if ms >= 200 {
+                            self.slow_links.insert(computer.clone());
+                        } else if ms < 180 {
+                            self.slow_links.remove(&computer);
+                        }
+                        self.latencies.insert(computer, ms);
+                    }
+                }
+            }
             _ => {}
+        }
+    }
+
+    pub(crate) fn session_needs_viewed_ack(status: &SessionStatus) -> bool {
+        status.unread || (status.status == Status::Error && !status.error_acknowledged)
+    }
+
+    pub(crate) fn session_status_epoch(&self, computer: &str, session: &str) -> u64 {
+        self.status_epochs
+            .get(&(computer.to_owned(), session.to_owned()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn begin_reconcile_load(&mut self, computer: &str) -> u64 {
+        self.reconcile_generation = self.reconcile_generation.wrapping_add(1).max(1);
+        let generation = (1u64 << 63) | self.reconcile_generation;
+        let data = self
+            .data_revisions
+            .get(computer)
+            .copied()
+            .unwrap_or_default();
+        let connection = self
+            .connection_revisions
+            .get(computer)
+            .copied()
+            .unwrap_or_default();
+        self.loads.insert(
+            computer.to_owned(),
+            LoadRevision {
+                generation,
+                data,
+                connection,
+            },
+        );
+        generation
+    }
+
+    pub(crate) fn reconcile_session_overview(
+        &mut self,
+        computer: &str,
+        generation: u64,
+        session: &str,
+        overview_start_epoch: u64,
+        overview: Overview,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection(computer) == Connection::Forgotten {
+            return;
+        }
+        if self.load_data_is_current(computer, generation) {
+            *self.data_revisions.entry(computer.to_owned()).or_default() += 1;
+            *self
+                .overview_revisions
+                .entry(computer.to_owned())
+                .or_default() += 1;
+            self.record_overview_status_epochs(computer, &overview);
+            self.overviews.insert(computer.to_owned(), overview);
+            cx.notify();
+            return;
+        }
+        // Another session push or newer load invalidated the whole-overview revision. Still
+        // reconcile this session if nothing touched it after its overview request started.
+        if self.session_status_epoch(computer, session) != overview_start_epoch {
+            return;
+        }
+        let Some(fresh_status) = overview
+            .sessions
+            .get(session)
+            .map(|entry| entry.status.clone())
+        else {
+            return;
+        };
+        if let Some(existing) = self
+            .overviews
+            .get_mut(computer)
+            .and_then(|current| current.sessions.get_mut(session))
+        {
+            existing.status = fresh_status;
+            *self.data_revisions.entry(computer.to_owned()).or_default() += 1;
+            *self
+                .status_epochs
+                .entry((computer.to_owned(), session.to_owned()))
+                .or_default() += 1;
+            cx.notify();
+        }
+    }
+
+    fn record_overview_status_epochs(&mut self, computer: &str, overview: &Overview) {
+        for session_id in overview.sessions.keys() {
+            *self
+                .status_epochs
+                .entry((computer.to_owned(), session_id.clone()))
+                .or_default() += 1;
         }
     }
 }
@@ -617,6 +794,10 @@ pub(super) async fn run_commands(
     let mut workers = HashMap::<String, mpsc::UnboundedSender<ComputerCommand>>::new();
     while let Some(command) = requests.next().await {
         let (computer, command) = match command {
+            Command::UsageWatch(computer, popover, acquire) => {
+                let _ = updates.unbounded_send(Update::UsageWatch(computer, popover, acquire));
+                continue;
+            }
             Command::Refresh => {
                 let _ = directory.unbounded_send(());
                 continue;

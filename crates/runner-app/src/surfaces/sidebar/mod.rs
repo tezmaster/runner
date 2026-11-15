@@ -9,6 +9,7 @@ mod link;
 mod link_picker;
 #[cfg(test)]
 mod link_tests;
+mod logic;
 mod menus;
 mod model;
 mod project;
@@ -24,18 +25,20 @@ use elements::sidebar_tab_target;
 
 pub(crate) use archive::{
     archive_all_confirmation_body, archive_confirmation_counts, archive_targets_for_chats,
+    LinkedMissionArchiveItem, LinkedMissionIdleState,
 };
 pub(crate) use elements::{
     default_session_label, direct_chat_display_status, project_children, session_label,
     session_label_live, sidebar_section_header, SidebarItemView,
 };
+pub(crate) use logic::AttentionState;
 
 use super::*;
 use crate::surfaces::front_page::model::{
     MissionDisplay as MissionSummary, SessionDisplay, SidebarNodeDisplay as NodeRow,
 };
-use crate::surfaces::sidebar_logic::{
-    AttentionState, DropTarget, NumberedSidebarRow, SidebarActivationTarget, SidebarShortcutRow,
+use crate::surfaces::sidebar::logic::{
+    DropTarget, NumberedSidebarRow, SidebarActivationTarget, SidebarShortcutRow,
 };
 use crate::*;
 use gpui::WeakEntity;
@@ -245,12 +248,16 @@ enum WorkspaceEntry {
     NewTab,
     Role,
     Crew,
+    Usage,
+    MissionControl,
 }
 
-const WORKSPACE_ENTRIES: [WorkspaceEntry; 3] = [
+const WORKSPACE_ENTRIES: [WorkspaceEntry; 5] = [
     WorkspaceEntry::NewTab,
     WorkspaceEntry::Role,
     WorkspaceEntry::Crew,
+    WorkspaceEntry::Usage,
+    WorkspaceEntry::MissionControl,
 ];
 
 impl WorkspaceEntry {
@@ -265,6 +272,8 @@ impl WorkspaceEntry {
                 route,
                 AppRoute::Crews | AppRoute::NewCrew | AppRoute::CrewEditor(_)
             ),
+            Self::Usage => *route == AppRoute::Usage,
+            Self::MissionControl => *route == AppRoute::MissionControl,
         }
     }
 }
@@ -274,6 +283,7 @@ pub(crate) struct Sidebar {
     app_store: Entity<AppStore>,
     front_page: crate::surfaces::front_page::FrontPageClient,
     pub(crate) remote_settings: Option<AppSettings>,
+    remote_sidebar_seed_pending: bool,
     remote_layouts: HashMap<String, PaneLayout>,
     remote_sessions: HashMap<String, SessionDisplay>,
     remote_selection: Option<crate::surfaces::remote_client::RemoteItem>,

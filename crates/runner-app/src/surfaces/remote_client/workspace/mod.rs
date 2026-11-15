@@ -39,6 +39,7 @@ pub(crate) struct RemoteWindow {
     pub(crate) sidebar_collapsed: bool,
     pub(crate) sidebar_width: f32,
     _follow: Option<model::Follow>,
+    _usage: super::usage::UsageWatch,
     pub(crate) active: Option<Item>,
     pub(crate) layouts: HashMap<String, PaneLayout>,
     pub(crate) overview_revision: u64,
@@ -47,7 +48,10 @@ pub(crate) struct RemoteWindow {
     pub(crate) drawer_resizing: bool,
     pub(crate) pane_bounds: HashMap<PaneKey, gpui::Size<Pixels>>,
     pub(crate) layout_hints: HashMap<String, PaneLayout>,
+    // Archive can push an empty pane before the collapsed tree arrives.
+    pub(crate) closing_layouts: HashMap<String, PaneLayout>,
     pub(crate) actions_pending: HashSet<String>,
+    pub(crate) sync_viewed_epochs: HashMap<String, u64>,
     pub(crate) action_error: Option<String>,
     pub(crate) shell_placement: super::actions::ShellPlacement,
     pub(crate) catalog: Option<runner_core::companion::Catalog>,
@@ -294,7 +298,7 @@ impl RemoteClient {
                 .send(Command::Retry(computer.id));
             return false;
         }
-        self.remember_remote_selection(cx);
+        self.remember_remote_selection();
         if let Some(remote) = &self.workspace {
             remote
                 .mission_workspace
@@ -304,6 +308,7 @@ impl RemoteClient {
         let epoch = self.ui.epoch;
         let clients = state(&self.app_store, cx);
         let follow = clients.read(cx).follow(computer.id.clone());
+        let usage = clients.read(cx).watch_usage(computer.id.clone(), false);
         let (wake, mut wakes) = futures::channel::mpsc::unbounded();
         cx.spawn(async move |weak, cx| {
             while let Some(id) = wakes.next().await {
@@ -349,16 +354,9 @@ impl RemoteClient {
         let sidebar =
             cx.new(|sidebar_cx| Sidebar::new(shell, self.app_store.clone(), None, sidebar_cx));
         sidebar.update(cx, |sidebar, cx| {
-            sidebar.remote_settings = selection.sidebar_settings.map(|saved| AppSettings {
-                sidebar_active_only: saved.sidebar_active_only,
-                sidebar_collapsed_projects: saved.sidebar_collapsed_projects,
-                sidebar_collapsed_active_groups: saved.sidebar_collapsed_active_groups,
-                sidebar_projects_open: saved.sidebar_projects_open,
-                sidebar_chats_open: saved.sidebar_chats_open,
-                ..self.settings(cx).clone()
-            });
             sidebar.set_front_page_target(front_page.clone(), cx)
         });
+        self.restore_pending_archive_marks(&computer.id, &sidebar, cx);
         let shell = cx.weak_entity();
         let mission_workspace = cx.new(|workspace_cx| {
             MissionWorkspace::new_remote(
@@ -378,6 +376,7 @@ impl RemoteClient {
             front_page,
             computer,
             _follow: Some(follow),
+            _usage: usage,
             active: selection.active,
             layouts: selection.layouts,
             overview_revision: 0,
@@ -387,6 +386,8 @@ impl RemoteClient {
             pane_bounds: HashMap::new(),
             layout_hints: HashMap::new(),
             actions_pending: HashSet::new(),
+            sync_viewed_epochs: HashMap::new(),
+            closing_layouts: HashMap::new(),
             action_error: None,
             shell_placement: Arc::new(Mutex::new(None)),
             catalog: None,
@@ -445,7 +446,7 @@ impl RemoteClient {
         window: &mut Window,
         cx: &mut Context<NativeRoot>,
     ) {
-        self.remember_remote_selection(cx);
+        self.remember_remote_selection();
         if let Some(remote) = &self.workspace {
             remote
                 .mission_workspace
@@ -457,14 +458,13 @@ impl RemoteClient {
         cx.notify();
     }
 
-    pub(crate) fn remember_remote_selection(&mut self, cx: &App) {
+    pub(crate) fn remember_remote_selection(&mut self) {
         if let Some(remote) = &self.workspace {
             self.ui.selections.insert(
                 remote.computer.id.clone(),
                 RemoteSelection {
                     active: remote.active.clone(),
                     layouts: remote.layouts.clone(),
-                    sidebar_settings: remote.sidebar.read(cx).remote_settings.clone(),
                 },
             );
         }

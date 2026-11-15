@@ -1,4 +1,4 @@
-.PHONY: build check fmt fmt-check clippy test test-nightly verify run clean cache-size guide-cli guide-cli-check
+.PHONY: build check fmt fmt-check clippy test test-nightly verify run clean prune cache-size guide-cli guide-cli-check
 
 # Crew builds hit load 208 on 2026-08-22 and starved the UI.
 CARGO_BUILD_JOBS ?= 12
@@ -43,6 +43,11 @@ run:
 clean:
 	cargo clean
 
+# Drops incremental-compilation caches only (dep-graph.bin and friends).
+# Safe mid-day hygiene: compiled deps stay, so the next build is still fast.
+prune:
+	rm -rf target/debug/incremental target/ci/incremental target/release/incremental
+
 cache-size:
 	@du -sh target 2>/dev/null || echo "target/: (none)"
-	@du -sh ~/.cargo/registry ~/.cargo/git 2>/dev/null
+	@du -sh ~/.cargo/registry ~/.cargo/git 2>/dev/null || true

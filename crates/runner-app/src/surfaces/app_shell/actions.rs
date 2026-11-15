@@ -182,6 +182,15 @@ impl NativeRoot {
             AppRoute::Crews => self.open_crews(window, cx),
             AppRoute::NewCrew => self.open_create_crew(window, cx),
             AppRoute::CrewEditor(crew_id) => self.open_crew_editor(crew_id, window, cx),
+            AppRoute::Usage => self.open_usage(window, cx),
+            AppRoute::MissionControl => {
+                self.set_route(AppRoute::MissionControl, cx);
+                if let Some(project_id) = self.active_project_id(cx) {
+                    self.refresh_mission_control(project_id, cx);
+                }
+                window.focus(&self.root_focus, cx);
+                cx.notify();
+            }
             AppRoute::Mission(mission_id) => self.open_mission(mission_id, window, cx),
             AppRoute::ArchivedChat => {
                 self.set_route(AppRoute::ArchivedChat, cx);
@@ -226,16 +235,21 @@ impl NativeRoot {
         self.sidebar_preview_peeking = false;
         if !collapsed {
             self.sidebar_preview_open = false;
-            if let Some(workspace) = self.remote_client.remote_mission_workspace() {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.focus_active_mission_terminal(window, cx)
-                });
-            } else if self.remote_client.is_local() && matches!(self.route, AppRoute::Mission(_)) {
-                self.mission_workspace.update(cx, |workspace, cx| {
-                    workspace.focus_active_mission_terminal(window, cx);
-                });
-            } else if self.route == AppRoute::Chat {
-                self.focus_active_terminal(window, cx);
+            match self.remote_client.remote_mission_workspace() {
+                Some(workspace) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.focus_active_mission_terminal(window, cx)
+                    });
+                }
+                _ => {
+                    if self.remote_client.is_local() && matches!(self.route, AppRoute::Mission(_)) {
+                        self.mission_workspace.update(cx, |workspace, cx| {
+                            workspace.focus_active_mission_terminal(window, cx);
+                        });
+                    } else if self.route == AppRoute::Chat {
+                        self.focus_active_terminal(window, cx);
+                    }
+                }
             }
         }
         cx.notify();
@@ -255,6 +269,22 @@ impl NativeRoot {
         if !collapsed {
             self.sidebar_preview_open = false;
         }
+        self.sidebar_preview_peeking = false;
+        cx.notify();
+    }
+
+    pub(crate) fn switch_sidebar_view(
+        &mut self,
+        _: &SwitchSidebarView,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.route == AppRoute::Settings && self.remote_client.is_local() {
+            return;
+        }
+        self.toggle_sidebar_view(cx);
+        self.set_sidebar_collapsed(false, true, cx);
+        self.sidebar_preview_open = false;
         self.sidebar_preview_peeking = false;
         cx.notify();
     }

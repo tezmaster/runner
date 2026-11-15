@@ -7,7 +7,7 @@
 //! to showing the version alone.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,16 @@ pub(crate) struct VersionDiscovery {
     /// A check asked for while discovery was still resolving executables;
     /// `true` when it was forced. It runs once discovery completes.
     deferred_latest: Option<bool>,
+    /// Flag names parsed from `<command> --help`, keyed by `(command, version)`.
+    help_flags: HashMap<HelpCacheKey, Option<HashSet<String>>>,
+    #[cfg(test)]
+    help_flags_overrides: HashMap<Runtime, Option<HashSet<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HelpCacheKey {
+    command: String,
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +65,22 @@ struct Latest {
 }
 
 impl VersionDiscovery {
+    #[cfg(test)]
+    pub(crate) fn set_installed(&mut self, runtime: Runtime, command: &str, version: Option<&str>) {
+        self.installed.insert(
+            runtime,
+            Probe {
+                command: command.into(),
+                version: version.map(str::to_owned),
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_help_flags(&mut self, runtime: Runtime, flags: Option<HashSet<String>>) {
+        self.help_flags_overrides.insert(runtime, flags);
+    }
+
     /// The probed version of `command`, if the last probe ran that command.
     pub(crate) fn installed(&self, runtime: Runtime, command: &str) -> Option<&str> {
         self.installed
@@ -89,6 +115,9 @@ impl VersionDiscovery {
             self.probing.remove(&runtime);
             return None;
         }
+        if force {
+            self.help_flags.retain(|key, _| key.command != command);
+        }
         self.next_probe += 1;
         self.probing
             .insert(runtime, (command.to_owned(), self.next_probe));
@@ -114,7 +143,20 @@ impl VersionDiscovery {
         }
         self.probing.remove(&runtime);
         let probe = Probe { command, version };
-        self.installed.insert(runtime, probe.clone()) != Some(probe)
+        let changed = self.installed.insert(runtime, probe.clone()) != Some(probe.clone());
+        if changed {
+            self.help_flags
+                .retain(|key, _| key.command != probe.command || key.version == probe.version);
+        }
+        changed
+    }
+
+    pub(super) fn clear_help_flags(&mut self, command: Option<&str>) {
+        if let Some(command) = command {
+            self.help_flags.retain(|key, _| key.command != command);
+        } else {
+            self.help_flags.clear();
+        }
     }
 
     /// Starts an npm check of `tag` unless one for it is already running or,
@@ -211,6 +253,13 @@ fn parse_semver(token: &str) -> Option<Version> {
     })
 }
 
+pub(crate) fn below_minimum(installed: Option<&str>, minimum: Option<&str>) -> bool {
+    match (installed, minimum) {
+        (Some(installed), Some(minimum)) => is_newer(minimum, installed),
+        _ => false,
+    }
+}
+
 /// The first semver-looking token in `--version` output: `2.1.266 (Claude
 /// Code)`, `codex-cli 0.153.4` and `GitHub Copilot CLI 1.0.83.` all yield
 /// one. Output without one yields nothing rather than an error.
@@ -235,7 +284,7 @@ pub(crate) fn is_newer(latest: &str, installed: &str) -> bool {
     }
 }
 
-fn installed_command(
+pub(crate) fn installed_command(
     runtime: Runtime,
     pool: &DbPool,
     shell_env: &SharedShellEnv,
@@ -294,6 +343,75 @@ pub(crate) fn probe_now(
         .ok()
         .and_then(|mut state| state.versions.begin_probe(runtime, &command, true))?;
     run_probe(runtime, generation, command, shell_env, discovery, events)
+}
+
+pub(crate) fn starts_now(
+    runtime: Runtime,
+    pool: &DbPool,
+    shell_env: &SharedShellEnv,
+    discovery: &SharedDiscoveryState,
+) -> bool {
+    let Some(command) = installed_command(runtime, pool, shell_env, discovery) else {
+        return false;
+    };
+    let env = shell_env.read().map(|env| env.clone()).unwrap_or_default();
+    super::models::command_output(&command, &["--version"], &env, PROBE_TIMEOUT).is_some()
+}
+
+pub(crate) fn clear_help_flags(discovery: &SharedDiscoveryState, command: Option<&str>) {
+    let Ok(mut state) = discovery.write() else {
+        return;
+    };
+    state.versions.clear_help_flags(command);
+}
+
+pub(crate) fn probe_help_flags(
+    runtime: Runtime,
+    pool: &DbPool,
+    shell_env: &SharedShellEnv,
+    discovery: &SharedDiscoveryState,
+) -> Option<HashSet<String>> {
+    probe_help_flags_with(runtime, pool, shell_env, discovery, |command, env| {
+        super::models::command_output_with_stderr(command, &["--help"], env, PROBE_TIMEOUT)
+    })
+}
+
+pub(crate) fn probe_help_flags_with(
+    runtime: Runtime,
+    pool: &DbPool,
+    shell_env: &SharedShellEnv,
+    discovery: &SharedDiscoveryState,
+    fetch: impl FnOnce(&str, &LoginShellEnv) -> Option<Vec<u8>>,
+) -> Option<HashSet<String>> {
+    #[cfg(test)]
+    if let Ok(state) = discovery.read() {
+        if let Some(flags) = state.versions.help_flags_overrides.get(&runtime) {
+            return flags.clone();
+        }
+    }
+    let command = installed_command(runtime, pool, shell_env, discovery)?;
+    let version = discovery.read().ok().and_then(|state| {
+        state
+            .versions
+            .installed(runtime, &command)
+            .map(str::to_owned)
+    });
+    let key = HelpCacheKey {
+        command: command.clone(),
+        version,
+    };
+    if let Ok(state) = discovery.read() {
+        if let Some(cached) = state.versions.help_flags.get(&key) {
+            return cached.clone();
+        }
+    }
+    let env = shell_env.read().map(|env| env.clone()).unwrap_or_default();
+    let flags = fetch(&command, &env)
+        .and_then(|bytes| crate::runtimes::custom_flags::parse_help_flags(&bytes));
+    if let Ok(mut state) = discovery.write() {
+        state.versions.help_flags.insert(key, flags.clone());
+    }
+    flags
 }
 
 fn run_probe(
@@ -1241,4 +1359,25 @@ fn versions_catalog_golden() {
         }
     });
     crate::golden::assert_golden("catalog-versions", serde_json::json!(rows));
+}
+
+#[cfg(test)]
+mod minimum_tests {
+    use super::*;
+    #[test]
+    fn minimum_requires_a_known_installed_version_and_orders_prereleases() {
+        for installed in [
+            None,
+            Some("unknown"),
+            Some("0.149.0"),
+            Some("0.150.0"),
+            Some("v0.149.0+build.1"),
+        ] {
+            assert!(!below_minimum(installed, Some("0.149.0")), "{installed:?}");
+        }
+        for installed in ["0.147.0", "0.148.0", "0.149.0-alpha.1"] {
+            assert!(below_minimum(Some(installed), Some("0.149.0")));
+        }
+        assert!(!below_minimum(Some("0.147.0"), None));
+    }
 }

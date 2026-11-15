@@ -55,7 +55,7 @@ mod output;
 mod resume;
 mod shell;
 mod spawn;
-mod spawn_spec;
+pub(crate) mod spawn_spec;
 mod startup;
 mod status;
 pub mod terminal;
@@ -212,10 +212,10 @@ struct SessionState {
     output_seq: u64,
     controller: terminal::Controller,
     terminal: Option<Arc<runner_terminal::terminal::TerminalModel>>,
+    terminal_started_at: Option<terminal::TerminalStartedAt>,
     terminal_input: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     terminal_input_worker: Option<thread::JoinHandle<()>>,
     subscribers: Vec<(u64, Arc<terminal::FrameQueue>)>,
-    next_subscriber_id: u64,
     companion_terminals: Vec<Weak<terminal::CompanionTerminal>>,
     /// Latest grid measurement, including pushes that arrive before a PTY
     /// handle exists. Spawn and resume reconcile this under the state lock.
@@ -305,6 +305,7 @@ impl SessionState {
             && self.model.is_empty()
             && self.terminal.is_none()
             && self.terminal_input.is_none()
+            && self.terminal_input_worker.is_none()
             && self.subscribers.is_empty()
             && self.mission_status_sink.is_none()
             && self.output_seq == 0
@@ -317,6 +318,7 @@ impl SessionState {
 }
 
 pub struct SessionManager {
+    pub(crate) runtime_updates: Mutex<crate::ops::runtime_tasks::UpdateTasks>,
     /// Per-session state. The outer map lock protects membership only;
     /// each session's hot mutable state lives behind its own mutex so
     /// PTY output for one busy session does not block lifecycle work on
@@ -360,6 +362,8 @@ pub struct SessionManager {
     terminal_control: Mutex<terminal::ControlState>,
     #[cfg(test)]
     wake_baseline_read: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
+    terminal_retention_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// RAII guard that releases a session state's `resuming` flag on drop. The
@@ -468,6 +472,7 @@ impl SessionManager {
         runtime: Arc<dyn SessionRuntime>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            runtime_updates: Mutex::default(),
             sessions: Mutex::new(HashMap::new()),
             delivery_listeners: Mutex::new(HashMap::new()),
             shell_env,
@@ -485,6 +490,8 @@ impl SessionManager {
             terminal_control: Mutex::default(),
             #[cfg(test)]
             wake_baseline_read: Mutex::default(),
+            #[cfg(test)]
+            terminal_retention_read: Mutex::default(),
         })
     }
 

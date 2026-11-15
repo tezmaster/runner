@@ -27,9 +27,10 @@ use gpui::{
 use runner_app::terminal_ime::OptionAsMeta;
 
 use runner_app::ui::{
-    working_dir_text_field, Button, ButtonSize, ButtonVariant, IconButton, IconButtonSize,
-    PaneHeader, Scrollbar, SelectHandler, SelectLeading, SelectOption, SettingsCard, SettingsRow,
-    StepHandler, Stepper, StyledSelect, TextField, Toggle, WorkingDirField,
+    focus_ring, working_dir_text_field, Button, ButtonSize, ButtonVariant, IconButton,
+    IconButtonSize, PaneHeader, Scrollbar, SelectHandler, SelectLeading, SelectOption,
+    SettingsCard, SettingsRow, StepHandler, Stepper, StyledSelect, TextField, Toggle,
+    WorkingDirField,
 };
 
 use runner_core::protocol::command::{
@@ -40,16 +41,13 @@ use crate::surfaces::*;
 
 use crate::app_settings::{
     normalize_terminal_line_height, normalize_terminal_scrollback, normalize_zoom, nudge_zoom,
-    DarkTerminalTheme, LightTerminalTheme, TerminalCursorStyle, TerminalFontFamily,
-    TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_LINE_HEIGHT_MAX,
-    TERMINAL_LINE_HEIGHT_MIN, TERMINAL_SCROLLBACK_PRESETS, ZOOM_STEPS,
+    TerminalCursorStyle, TerminalFontFamily, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
+    TERMINAL_LINE_HEIGHT_MAX, TERMINAL_LINE_HEIGHT_MIN, TERMINAL_SCROLLBACK_PRESETS, ZOOM_STEPS,
 };
 
 use crate::platform_ui::{SETTINGS_CONTENT_TOP, SETTINGS_DRAG_INSET};
 
 use crate::surfaces::app_shell::TITLEBAR_DRAG_HEIGHT;
-
-use crate::surfaces::settings::theme_preview::{self, PreviewMode, PreviewPane};
 
 use crate::theme::{DarkTheme, LightTheme, ThemeIntent};
 
@@ -57,8 +55,6 @@ use crate::*;
 
 const SETTINGS_SAVE_DELAY_MS: u64 = 300;
 
-/// The palette selects share one trigger width, so the rows of each palette
-/// card line up.
 const SETTINGS_SELECT_WIDTH: Pixels = px(176.);
 
 const FILE_ICONS_SELECT_WIDTH: Pixels = px(200.);
@@ -85,6 +81,7 @@ pub(crate) enum SettingsPane {
     SidePanel,
     Files,
     Agents,
+    Usage,
     Skills,
     Mcp,
     Updates,
@@ -105,6 +102,7 @@ impl SettingsPane {
             Some("side-panel") => Self::SidePanel,
             Some("files") => Self::Files,
             Some("agents") => Self::Agents,
+            Some("usage") => Self::Usage,
             Some("mcp") => Self::Mcp,
             Some("skills") => Self::Skills,
             Some("updates") => Self::Updates,
@@ -127,6 +125,7 @@ impl SettingsPane {
             Self::SidePanel => "side-panel",
             Self::Files => "files",
             Self::Agents => "agents",
+            Self::Usage => "usage",
             Self::Skills => "skills",
             Self::Mcp => "mcp",
             Self::Updates => "updates",
@@ -148,6 +147,7 @@ impl SettingsPane {
             Self::SidePanel => crate::i18n::text("side_panel.panel"),
             Self::Files => crate::i18n::text("ui.files"),
             Self::Agents => crate::i18n::text("ui.agents"),
+            Self::Usage => crate::i18n::text("ui.usage"),
             Self::Skills => crate::i18n::text("ui.skills"),
             Self::Mcp => "MCP",
             Self::Updates => crate::i18n::text("ui.updates"),
@@ -162,17 +162,13 @@ impl SettingsPane {
             Self::Appearance => &[
                 "ui.theme",
                 "ui.window_material",
-                "ui.app_palette",
-                "ui.light_mode",
-                "ui.dark_mode",
+                "ui.light_theme",
+                "ui.dark_theme",
             ],
             Self::Terminal => &[
                 "ui.font_family",
                 "ui.font_size",
                 "terminal.line_height",
-                "terminal.section_colors",
-                "ui.light_mode_palette",
-                "ui.dark_mode_palette",
                 "ui.cursor_style",
                 "terminal.blink_cursor",
                 #[cfg(target_os = "macos")]
@@ -199,6 +195,7 @@ impl SettingsPane {
             Self::SidePanel => "panel-right-open.svg",
             Self::Files => "folder.svg",
             Self::Agents => "bot.svg",
+            Self::Usage => "gauge.svg",
             Self::Skills => "file-text.svg",
             Self::Mcp => "plug.svg",
             Self::Updates => "refresh-cw.svg",
@@ -220,11 +217,7 @@ const APP_PANES: &[SettingsPane] = &[
 
 const SIDE_PANEL_PANES: &[SettingsPane] = &[SettingsPane::SidePanel, SettingsPane::Files];
 
-const INTEGRATION_PANES: &[SettingsPane] = &[
-    SettingsPane::Agents,
-    SettingsPane::Skills,
-    SettingsPane::Mcp,
-];
+const INTEGRATION_PANES: &[SettingsPane] = &[SettingsPane::Agents, SettingsPane::Usage];
 
 const CLOUD_PANES: &[SettingsPane] = &[SettingsPane::Account, SettingsPane::Remote];
 
@@ -246,6 +239,12 @@ fn filtered_nav_groups(query: &str) -> Vec<(&'static str, Vec<SettingsPane>)> {
             let panes = panes
                 .iter()
                 .copied()
+                .chain(
+                    (!query.is_empty() && *panes == INTEGRATION_PANES)
+                        .then_some([SettingsPane::Skills, SettingsPane::Mcp])
+                        .into_iter()
+                        .flatten(),
+                )
                 .filter(|pane| {
                     query.is_empty()
                         || std::iter::once(pane.label())
@@ -271,10 +270,6 @@ fn launch_dims_for(
 enum SettingsSelection {
     Language,
     DefaultCrew,
-    LightTheme,
-    DarkTheme,
-    LightTerminalTheme,
-    DarkTerminalTheme,
     TerminalFont,
     TerminalCursor,
     TerminalScrollback,
@@ -284,6 +279,7 @@ enum SettingsSelection {
     FileIcons,
     FilesFont,
     MarkdownOpenAs,
+    UsageThreshold,
 }
 
 pub(crate) struct SettingsState {
@@ -300,10 +296,6 @@ pub(crate) struct SettingsState {
     default_crew: Entity<StyledSelect>,
     default_working_dir: Entity<TextField>,
     working_dir_browse_focus: FocusHandle,
-    light_theme: Entity<StyledSelect>,
-    dark_theme: Entity<StyledSelect>,
-    light_terminal_theme: Entity<StyledSelect>,
-    dark_terminal_theme: Entity<StyledSelect>,
     terminal_font: Entity<StyledSelect>,
     terminal_cursor: Entity<StyledSelect>,
     terminal_scrollback: Entity<StyledSelect>,
@@ -312,11 +304,11 @@ pub(crate) struct SettingsState {
     file_icons: Entity<StyledSelect>,
     files_font: Entity<StyledSelect>,
     markdown_open_as: Entity<StyledSelect>,
+    pub(crate) usage_threshold: Entity<StyledSelect>,
+    pub(crate) usage_interval: Entity<StyledSelect>,
     pub(crate) language: Entity<StyledSelect>,
     pub(crate) quit_behavior: Entity<StyledSelect>,
     agents: Option<Entity<settings::agents::AgentsPane>>,
-    skills: Option<Entity<settings::skills::SkillsPane>>,
-    mcp: Option<Entity<settings::mcp::McpPane>>,
     updates: Option<Entity<settings::updates::UpdatesPane>>,
     about: Option<Entity<settings::about::AboutPane>>,
     archived: Option<Entity<settings::archived::ArchivedPane>>,
@@ -366,6 +358,63 @@ impl SettingsState {
             )
             .truncate_unfocused()
         });
+        let usage_threshold = settings_select(
+            &root,
+            "usage-threshold",
+            settings.notifications.usage.threshold.to_string(),
+            [50, 60, 70, 80, 90]
+                .into_iter()
+                .map(|n| SelectOption::new(n.to_string(), format!("{n}%")))
+                .collect(),
+            SettingsSelection::UsageThreshold,
+            cx,
+        );
+        let interval_root = root.clone();
+        let usage_interval = cx.new(|cx| {
+            StyledSelect::new(
+                "usage-interval",
+                cx.focus_handle(),
+                "900",
+                [300, 900, 1800, 3600]
+                    .into_iter()
+                    .map(|n| {
+                        SelectOption::new(
+                            n.to_string(),
+                            crate::i18n::message(match n {
+                                300 => "usage.every_5",
+                                900 => "usage.every_15",
+                                1800 => "usage.every_30",
+                                _ => "usage.every_hour",
+                            }),
+                        )
+                    })
+                    .collect(),
+                Rc::new(move |value, _, cx| {
+                    interval_root.update(cx, |root, cx| {
+                        if let Ok(seconds) = value.parse() {
+                            if let Err(error) = root.core(cx).usage_set_interval(seconds) {
+                                if let Ok(seconds) = root.core(cx).usage_interval() {
+                                    let select = root.settings_page.usage_interval.clone();
+                                    cx.defer(move |cx| {
+                                        select.update(cx, |select, cx| {
+                                            select.set_value(seconds.to_string(), cx)
+                                        })
+                                    });
+                                }
+                                root.show_toast(
+                                    error.to_string(),
+                                    crate::toast::ToastTone::Error,
+                                    cx,
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                }),
+                cx,
+            )
+            .width(px(140.))
+        });
         let default_crew = settings_select(
             &root,
             "settings-default-crew",
@@ -374,42 +423,7 @@ impl SettingsState {
             SettingsSelection::DefaultCrew,
             cx,
         );
-        let light_theme = settings_select(
-            &root,
-            "settings-light-theme",
-            light_theme_value(settings.light_app_theme),
-            light_theme_options(),
-            SettingsSelection::LightTheme,
-            cx,
-        );
-        let dark_theme = settings_select(
-            &root,
-            "settings-dark-theme",
-            dark_theme_value(settings.dark_app_theme),
-            vec![
-                SelectOption::new("carbon", "Runner").swatch(0x00ff9c),
-                SelectOption::new("catppuccin-mocha", "Catppuccin Mocha").swatch(0xcba6f7),
-            ],
-            SettingsSelection::DarkTheme,
-            cx,
-        );
-        let light_terminal_theme = settings_select(
-            &root,
-            "settings-light-terminal-theme",
-            settings.light_terminal_theme.key(),
-            light_terminal_theme_options(),
-            SettingsSelection::LightTerminalTheme,
-            cx,
-        );
-        let dark_terminal_theme = settings_select(
-            &root,
-            "settings-dark-terminal-theme",
-            settings.dark_terminal_theme.key(),
-            dark_terminal_theme_options(),
-            SettingsSelection::DarkTerminalTheme,
-            cx,
-        );
-        let font_cache = crate::terminal_fonts::FontFamilyCache::global(cx);
+        let font_cache = crate::terminal::fonts::FontFamilyCache::global(cx);
         let terminal_font = settings_select(
             &root,
             "settings-terminal-font",
@@ -556,10 +570,6 @@ impl SettingsState {
             default_crew,
             default_working_dir,
             working_dir_browse_focus: cx.focus_handle(),
-            light_theme,
-            dark_theme,
-            light_terminal_theme,
-            dark_terminal_theme,
             terminal_font,
             terminal_cursor,
             terminal_scrollback,
@@ -568,11 +578,11 @@ impl SettingsState {
             file_icons,
             files_font,
             markdown_open_as,
+            usage_threshold,
+            usage_interval,
             language,
             quit_behavior,
             agents: None,
-            skills: None,
-            mcp: None,
             updates: None,
             about: None,
             archived: None,
@@ -605,12 +615,17 @@ struct ShortcutConflict {
 /// keeps it out of the window's bottom corner on every platform (#553). The
 /// overlay has no id or handlers, so wheel and click pass through it to the
 /// scroll container.
+const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.;
+const APPEARANCE_CONTENT_MAX_WIDTH: f32 = 908.;
+
 fn settings_content_column(
     titlebar_drag_area: Option<impl IntoElement>,
     content: Option<AnyElement>,
     scroll: &ScrollHandle,
     scrollbar: Entity<Scrollbar>,
     zoom: f32,
+    horizontal_padding: Pixels,
+    max_width_px: f32,
 ) -> impl IntoElement {
     div()
         .relative()
@@ -626,14 +641,14 @@ fn settings_content_column(
                 .overflow_y_scroll()
                 .scrollbar_width(px(0.))
                 .track_scroll(scroll)
-                .px(rems(40. / 16.))
+                .px(horizontal_padding)
                 .pb(rems(64. / 16.))
                 .pt(rems(SETTINGS_CONTENT_TOP / 16.))
                 .children(content.map(|content| {
                     div()
                         .mx_auto()
                         .w_full()
-                        .max_w(rems(760. / 16.))
+                        .max_w(rems(max_width_px / 16.))
                         .child(content)
                 })),
         )
@@ -655,7 +670,7 @@ fn settings_content_column(
 }
 
 fn terminal_font_options(family: &TerminalFontFamily, cx: &App) -> Vec<SelectOption> {
-    use crate::terminal_fonts::{FontFamilyCache, BUNDLED_FONT};
+    use crate::terminal::fonts::{FontFamilyCache, BUNDLED_FONT};
     let mut options = vec![SelectOption::new(BUNDLED_FONT, "JetBrains Mono")
         .section(crate::i18n::message("ui.bundled"))];
     if let Some(families) = FontFamilyCache::loaded(cx) {
@@ -703,18 +718,15 @@ fn settings_select(
     let width = match selection {
         // Room for the sample icons beside the longest name, Catppuccin.
         SettingsSelection::FileIcons => Some(FILE_ICONS_SELECT_WIDTH),
-        SettingsSelection::Language
-        | SettingsSelection::LightTheme
-        | SettingsSelection::DarkTheme
-        | SettingsSelection::LightTerminalTheme
-        | SettingsSelection::DarkTerminalTheme => Some(SETTINGS_SELECT_WIDTH),
+        SettingsSelection::Language => Some(SETTINGS_SELECT_WIDTH),
         SettingsSelection::DefaultCrew
         | SettingsSelection::TerminalFont
         | SettingsSelection::TerminalCursor
         | SettingsSelection::TerminalScrollback
         | SettingsSelection::QuitBehavior
         | SettingsSelection::FilesFont
-        | SettingsSelection::MarkdownOpenAs => None,
+        | SettingsSelection::MarkdownOpenAs
+        | SettingsSelection::UsageThreshold => None,
         #[cfg(target_os = "macos")]
         SettingsSelection::OptionAsMeta => None,
     };
@@ -834,6 +846,18 @@ impl NativeRoot {
         if self.remote_client.is_active() {
             return;
         }
+        if matches!(pane, SettingsPane::Skills | SettingsPane::Mcp) {
+            self.enter_settings_pane(SettingsPane::Agents, window, cx);
+            let tab = if pane == SettingsPane::Skills {
+                settings::agents::AgentTab::Skills
+            } else {
+                settings::agents::AgentTab::Mcp
+            };
+            if let Some(agents) = self.settings_page.agents.clone() {
+                agents.update(cx, |pane, cx| pane.open_tab(tab, cx));
+            }
+            return;
+        }
 
         if self.settings_page.pane != pane {
             self.dismiss_remote_dialog();
@@ -867,6 +891,16 @@ impl NativeRoot {
         match pane {
             SettingsPane::Account | SettingsPane::Remote => self.enter_remote_settings(cx),
             SettingsPane::Missions => self.refresh_settings_crews(cx),
+            SettingsPane::Usage => {
+                let _ = self
+                    .core(cx)
+                    .usage_refresh(runner_core::protocol::RefreshReason::Open);
+                if let Ok(seconds) = self.core(cx).usage_interval() {
+                    self.settings_page
+                        .usage_interval
+                        .update(cx, |select, cx| select.set_value(seconds.to_string(), cx));
+                }
+            }
             SettingsPane::Agents => {
                 if self.settings_page.agents.is_none() {
                     let shell = cx.entity().downgrade();
@@ -883,40 +917,7 @@ impl NativeRoot {
                 }
                 let _ = self.core(cx).runtime_check_updates(false);
             }
-            SettingsPane::Skills => {
-                if self.settings_page.skills.is_none() {
-                    let app_store = self.app_store.clone();
-                    let pane = cx.new(|cx| settings::skills::SkillsPane::new(app_store, cx));
-                    let detail = pane.read(cx).detail.clone();
-                    self.settings_page._subscriptions.push(cx.subscribe(
-                        &detail,
-                        |this, _, notice: &settings::SaveNotice, cx| {
-                            this.show_toast(notice.message.clone(), notice.tone, cx)
-                        },
-                    ));
-                    self.settings_page.skills = Some(pane);
-                }
-                if let Some(skills) = self.settings_page.skills.clone() {
-                    skills.update(cx, |pane, cx| pane.refresh(cx));
-                }
-            }
-            SettingsPane::Mcp => {
-                if self.settings_page.mcp.is_none() {
-                    let app_store = self.app_store.clone();
-                    let pane = cx.new(|cx| settings::mcp::McpPane::new(app_store, cx));
-                    let detail = pane.read(cx).detail.clone();
-                    self.settings_page._subscriptions.push(cx.subscribe(
-                        &detail,
-                        |this, _, notice: &settings::SaveNotice, cx| {
-                            this.show_toast(notice.message.clone(), notice.tone, cx)
-                        },
-                    ));
-                    self.settings_page.mcp = Some(pane);
-                }
-                if let Some(mcp) = self.settings_page.mcp.clone() {
-                    mcp.update(cx, |pane, cx| pane.refresh(cx));
-                }
-            }
+            SettingsPane::Skills | SettingsPane::Mcp => {}
             SettingsPane::Updates => {
                 if self.settings_page.updates.is_none() {
                     let app_store = self.app_store.clone();
@@ -992,14 +993,6 @@ impl NativeRoot {
             SettingsSelection::DefaultCrew => {
                 update_if_changed(&mut settings.default_crew_id, value.to_owned())
             }
-            SettingsSelection::LightTheme => parse_light_theme(value)
-                .is_some_and(|value| update_if_changed(&mut settings.light_app_theme, value)),
-            SettingsSelection::DarkTheme => parse_dark_theme(value)
-                .is_some_and(|value| update_if_changed(&mut settings.dark_app_theme, value)),
-            SettingsSelection::LightTerminalTheme => LightTerminalTheme::parse(value)
-                .is_some_and(|value| update_if_changed(&mut settings.light_terminal_theme, value)),
-            SettingsSelection::DarkTerminalTheme => DarkTerminalTheme::parse(value)
-                .is_some_and(|value| update_if_changed(&mut settings.dark_terminal_theme, value)),
             SettingsSelection::TerminalFont => update_if_changed(
                 &mut settings.terminal_font_family,
                 TerminalFontFamily::new(value),
@@ -1028,6 +1021,11 @@ impl NativeRoot {
                 &mut settings.files_font_family,
                 (!value.is_empty()).then(|| TerminalFontFamily::new(value)),
             ),
+            SettingsSelection::UsageThreshold => value
+                .parse::<u8>()
+                .ok()
+                .filter(|n| [50, 60, 70, 80, 90].contains(n))
+                .is_some_and(|n| update_if_changed(&mut settings.notifications.usage.threshold, n)),
             SettingsSelection::MarkdownOpenAs => crate::app_settings::MarkdownOpenAs::parse(value)
                 .is_some_and(|value| update_if_changed(&mut settings.markdown_open_as, value)),
         });
@@ -1091,6 +1089,22 @@ impl NativeRoot {
     fn set_theme_intent(&mut self, intent: ThemeIntent, cx: &mut Context<Self>) {
         if self.update_app_settings(cx, true, |settings| {
             update_if_changed(&mut settings.app_theme, intent)
+        }) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_light_theme(&mut self, theme: LightTheme, cx: &mut Context<Self>) {
+        if self.update_app_settings(cx, true, |settings| {
+            update_if_changed(&mut settings.light_app_theme, theme)
+        }) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_dark_theme(&mut self, theme: DarkTheme, cx: &mut Context<Self>) {
+        if self.update_app_settings(cx, true, |settings| {
+            update_if_changed(&mut settings.dark_app_theme, theme)
         }) {
             cx.notify();
         }
@@ -1261,6 +1275,19 @@ impl NativeRoot {
         }
     }
 
+    pub(crate) fn refresh_agents_tasks(
+        &self,
+        tasks: &[runner_core::protocol::RuntimeUpdateTask],
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(agents) = &self.settings_page.agents {
+            agents.update(cx, |agents, cx| {
+                agents.tasks = tasks.to_vec();
+                cx.notify();
+            });
+        }
+    }
+
     pub(crate) fn refresh_agents_pane(&self, cx: &mut Context<Self>) {
         if let Some(agents) = self.settings_page.agents.clone() {
             agents.update(cx, |pane, pane_cx| pane.refresh(pane_cx));
@@ -1308,1819 +1335,7 @@ fn update_if_changed<T: PartialEq>(target: &mut T, value: T) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn shortcut_rows_keep_registry_order_with_one_tab_row_and_display_only_system_keys() {
-        let overrides = keymap::KeymapOverrides::new();
-        let rows = shortcut_rows("", &overrides);
-        let titles = rows.iter().map(|row| row.title()).collect::<Vec<_>>();
-        assert_eq!(titles.len(), 30);
-        assert_eq!(titles[0], "New window");
-        assert_eq!(
-            titles[27..],
-            ["Copy selection", "Paste", "Toggle fullscreen"]
-        );
-        let after = |title: &str| titles[titles.iter().position(|t| *t == title).unwrap() + 1];
-        assert_eq!(after("Reset zoom"), "Go to tab 1–9");
-        assert_eq!(after("Toggle mission terminal drawer"), "Find in terminal");
-        assert_eq!(after("Split pane down"), "Maximize pane");
-        assert_eq!(after("Maximize pane"), "Close tab");
-        assert_eq!(
-            rows.iter()
-                .filter(|row| row.fixed())
-                .map(|row| row.title())
-                .collect::<Vec<_>>(),
-            [
-                "New window",
-                "Go to tab 1–9",
-                "Close tab",
-                "Close window",
-                "Copy selection",
-                "Paste",
-                "Toggle fullscreen"
-            ]
-        );
-        assert_eq!(ShortcutRow::TabSelection.binding_label(&overrides), "⌘1–⌘9");
-        assert_eq!(
-            rows[27..]
-                .iter()
-                .map(|row| row.binding_label(&overrides))
-                .collect::<Vec<_>>(),
-            ["⌘C", "⌘V", "⌃⌘F"]
-        );
-    }
-
-    #[test]
-    fn shortcut_sections_follow_the_guide_and_hide_sections_without_a_match() {
-        crate::i18n::testing::with_locale(crate::i18n::Locale::English, || {
-            let overrides = keymap::KeymapOverrides::new();
-            let sections = shortcut_sections("", &overrides, false);
-            assert_eq!(
-                sections
-                    .iter()
-                    .map(|(section, _)| section.title())
-                    .collect::<Vec<_>>(),
-                [
-                    "Navigation and creation",
-                    "Panes and sessions",
-                    "Missions",
-                    "Terminal",
-                    "Zoom and window",
-                ]
-            );
-            let ids = sections
-                .iter()
-                .map(|(_, rows)| rows.iter().map(|row| row.id()).collect::<Vec<_>>())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                ids,
-                [
-                    &[
-                        "new-window",
-                        "new-chat",
-                        "new-terminal",
-                        "new-mission",
-                        "command-palette",
-                        "search-files",
-                        "toggle-sidebar",
-                        "open-settings",
-                        "page-previous",
-                        "page-next",
-                        TAB_SHORTCUT_ID,
-                    ][..],
-                    &[
-                        "pane-previous",
-                        "pane-next",
-                        "split-pane-right",
-                        "split-pane-down",
-                        "toggle-maximize-pane",
-                        "close-pane",
-                        "stop-session",
-                        "resume-session",
-                    ],
-                    &[
-                        "toggle-terminal-drawer",
-                        "mission-tab-previous",
-                        "mission-tab-next",
-                    ],
-                    &["find-in-terminal", "copy", "system-paste"],
-                    &[
-                        "zoom-in",
-                        "zoom-out",
-                        "zoom-reset",
-                        "system-close-window",
-                        "system-toggle-fullscreen",
-                    ],
-                ]
-            );
-            assert_eq!(
-                ids.iter().map(Vec::len).sum::<usize>(),
-                shortcut_rows("", &overrides).len()
-            );
-
-            let zoom = shortcut_sections("zoom", &overrides, false);
-            assert_eq!(zoom.len(), 1);
-            assert_eq!(zoom[0].0, ShortcutSection::ZoomAndWindow);
-            assert_eq!(zoom[0].1.len(), 3);
-            let paste = shortcut_sections("paste", &overrides, false);
-            assert_eq!(paste.len(), 1);
-            assert_eq!(paste[0].0, ShortcutSection::Terminal);
-            assert_eq!(paste[0].1.len(), 1);
-            assert_eq!(paste[0].1[0].id(), "system-paste");
-            for row in sections.iter().flat_map(|(_, rows)| rows) {
-                if let ShortcutRow::DisplayOnly(entry) = row {
-                    assert!(row.fixed());
-                    assert!(row.entry_ids().is_empty());
-                    assert!(!row.overridden(&overrides));
-                    assert!(!row.freed_for_terminal(&overrides));
-                    assert_eq!(
-                        row.binding_label(&overrides),
-                        keymap::format_combo(&entry.default)
-                    );
-                    assert!(keymap::entry(entry.id).is_none());
-                }
-            }
-
-            assert!(ctrl_keys_setting_matches(""));
-            assert!(ctrl_keys_setting_matches("ctrl keys"));
-            assert!(!ctrl_keys_setting_matches("zoom"));
-            let setting = shortcut_sections("ctrl keys", &overrides, true);
-            assert_eq!(setting.len(), 1);
-            assert_eq!(setting[0].0, ShortcutSection::Terminal);
-            assert!(setting[0].1.is_empty());
-            assert!(shortcut_sections("ctrl keys", &overrides, false).is_empty());
-        });
-    }
-
-    #[test]
-    fn outside_terminals_tags_follow_the_effective_binding() {
-        let bare = keymap::KeyCombo {
-            meta: false,
-            ctrl: true,
-            alt: false,
-            shift: false,
-            code: "KeyJ".into(),
-            label: None,
-            shift_optional: false,
-        };
-        let entry_row = |id| ShortcutRow::Entry(keymap::entry(id).unwrap());
-        let overrides = keymap::KeymapOverrides::from([
-            ("new-terminal".to_owned(), Some(bare.clone())),
-            ("zoom-reset".to_owned(), Some(bare.clone())),
-        ]);
-        assert!(entry_row("new-terminal").freed_for_terminal(&overrides));
-        assert!(!entry_row("zoom-reset").freed_for_terminal(&overrides));
-        assert!(!entry_row("new-mission").freed_for_terminal(&overrides));
-        let freed = cfg!(any(windows, target_os = "linux"));
-        for id in ["new-chat", "toggle-sidebar", "open-settings", "pane-next"] {
-            assert_eq!(entry_row(id).freed_for_terminal(&overrides), freed, "{id}");
-        }
-        assert_eq!(
-            ShortcutRow::TabSelection.freed_for_terminal(&overrides),
-            freed
-        );
-        let mut unbound = overrides.clone();
-        for id in ShortcutRow::TabSelection.entry_ids() {
-            unbound.insert(id.into(), None);
-        }
-        assert!(!ShortcutRow::TabSelection.freed_for_terminal(&unbound));
-        for id in [
-            "command-palette",
-            "split-pane-right",
-            "split-pane-down",
-            "zoom-out",
-        ] {
-            assert!(!entry_row(id).freed_for_terminal(&overrides), "{id}");
-        }
-    }
-
-    #[test]
-    fn shortcuts_page_renders_sections_setting_row_and_tags() {
-        use gpui::{size, TestAppContext, VisualTestContext};
-
-        let _theme = crate::theme_snapshot::ThemeGuard::new();
-        crate::i18n::testing::with_locale(crate::i18n::Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            let host = cx.add_window(|window, cx| {
-                let mut root = NativeRoot::new(
-                    "shortcut-sections".into(),
-                    temp.path().join("logs"),
-                    None,
-                    None,
-                    store.clone(),
-                    window,
-                    cx,
-                );
-                root.route = AppRoute::Settings;
-                root.settings_page.pane = SettingsPane::Shortcuts;
-                root
-            });
-            let mut visual = VisualTestContext::from_window(host.into(), &cx);
-            visual.simulate_resize(size(px(1200.), px(4000.)));
-            visual.run_until_parked();
-            for selector in [
-                "SHORTCUT_SECTION_navigation",
-                "SHORTCUT_SECTION_panes",
-                "SHORTCUT_SECTION_missions",
-                "SHORTCUT_SECTION_terminal",
-                "SHORTCUT_SECTION_zoom-and-window",
-            ] {
-                assert!(visual.debug_bounds(selector).is_some(), "{selector}");
-            }
-            let terminal = visual.debug_bounds("SHORTCUT_SECTION_terminal").unwrap();
-            assert!(
-                visual
-                    .debug_bounds("SHORTCUT_SECTION_missions")
-                    .unwrap()
-                    .bottom()
-                    < terminal.top()
-            );
-            assert!(
-                terminal.bottom()
-                    < visual
-                        .debug_bounds("SHORTCUT_SECTION_zoom-and-window")
-                        .unwrap()
-                        .top()
-            );
-            assert_eq!(
-                visual.debug_bounds("SETTINGS_TERMINAL_CTRL_KEYS").is_some(),
-                cfg!(any(windows, target_os = "linux"))
-            );
-            assert!(visual
-                .debug_bounds("SHORTCUT_OUTSIDE_TERMINALS_new-chat")
-                .is_none());
-            for selector in [
-                "SHORTCUT_LOCKED_copy",
-                "SHORTCUT_LOCKED_system-paste",
-                "SHORTCUT_LOCKED_system-toggle-fullscreen",
-            ] {
-                assert!(visual.debug_bounds(selector).is_some(), "{selector}");
-            }
-            let fullscreen = visual
-                .debug_bounds("SHORTCUT_LOCKED_system-toggle-fullscreen")
-                .unwrap();
-            assert!(visual
-                .debug_bounds("SHORTCUT_SECTION_zoom-and-window")
-                .unwrap()
-                .contains(&fullscreen.center()));
-            assert!(terminal.contains(
-                &visual
-                    .debug_bounds("SHORTCUT_LOCKED_system-paste")
-                    .unwrap()
-                    .center()
-            ));
-            assert!(visual.debug_bounds("SHORTCUT_LOCKED_close-pane").is_none());
-
-            #[cfg(any(windows, target_os = "linux"))]
-            {
-                let setting = visual.debug_bounds("SETTINGS_TERMINAL_CTRL_KEYS").unwrap();
-                assert!(terminal.contains(&setting.center()));
-                host.update(&mut visual, |root, _, cx| {
-                    root.set_terminal_ctrl_keys(keymap::TerminalCtrlKeys::TerminalFirst, cx)
-                })
-                .unwrap();
-                visual.run_until_parked();
-                for selector in [
-                    "SHORTCUT_OUTSIDE_TERMINALS_new-chat",
-                    "SHORTCUT_OUTSIDE_TERMINALS_toggle-sidebar",
-                    "SHORTCUT_OUTSIDE_TERMINALS_open-settings",
-                    "SHORTCUT_OUTSIDE_TERMINALS_select-tab",
-                    "SHORTCUT_OUTSIDE_TERMINALS_pane-previous",
-                    "SHORTCUT_OUTSIDE_TERMINALS_mission-tab-next",
-                ] {
-                    assert!(visual.debug_bounds(selector).is_some(), "{selector}");
-                }
-                for selector in [
-                    "SHORTCUT_OUTSIDE_TERMINALS_command-palette",
-                    "SHORTCUT_OUTSIDE_TERMINALS_split-pane-right",
-                    "SHORTCUT_OUTSIDE_TERMINALS_zoom-reset",
-                    "SHORTCUT_OUTSIDE_TERMINALS_new-terminal",
-                ] {
-                    assert!(visual.debug_bounds(selector).is_none(), "{selector}");
-                }
-                assert_eq!(
-                    AppSettings::load(&temp.path().join("settings.json"))
-                        .unwrap()
-                        .terminal_ctrl_keys(),
-                    keymap::TerminalCtrlKeys::TerminalFirst
-                );
-                visual.update(|_, cx| {
-                    let keymap = cx.key_bindings();
-                    let keymap = keymap.borrow();
-                    let in_terminal = ["Root", "ChatSplit", "Terminal"]
-                        .map(|context| gpui::KeyContext::parse(context).unwrap());
-                    assert!(keymap
-                        .bindings_for_input(
-                            &[gpui::Keystroke::parse("ctrl-n").unwrap()],
-                            &in_terminal
-                        )
-                        .0
-                        .is_empty());
-                });
-            }
-        });
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn fixed_rows_turn_off_and_restore_without_taking_a_custom_key() {
-        let tabs = ShortcutRow::TabSelection;
-        let close = ShortcutRow::Entry(keymap::entry("close-pane").unwrap());
-        let mut overrides = keymap::KeymapOverrides::new();
-        overrides.insert("close-pane".into(), None);
-        for id in tabs.entry_ids() {
-            overrides.insert(id.into(), None);
-        }
-        assert_eq!(close.binding_label(&overrides), "Unassigned");
-        assert_eq!(tabs.binding_label(&overrides), "Unassigned");
-        assert!(close.overridden(&overrides) && tabs.overridden(&overrides));
-
-        let mut stale = keymap::KeymapOverrides::new();
-        stale.insert(
-            "close-pane".into(),
-            Some(keymap::entry("new-chat").unwrap().default.clone()),
-        );
-        stale.insert("select-tab-3".into(), None);
-        assert_eq!(close.binding_label(&stale), "⌘W");
-        assert_eq!(tabs.binding_label(&stale), "⌘1–⌘9");
-        assert!(!close.overridden(&stale) && !tabs.overridden(&stale));
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn shortcut_search_matches_grouped_tab_terms() {
-        let overrides = keymap::KeymapOverrides::new();
-        for query in ["tab 3", "⌘3", "go to tab"] {
-            assert_eq!(
-                shortcut_rows(query, &overrides),
-                [ShortcutRow::TabSelection],
-                "{query}"
-            );
-        }
-        assert_eq!(
-            shortcut_rows("resume focused", &overrides)
-                .iter()
-                .map(|row| row.title())
-                .collect::<Vec<_>>(),
-            ["Resume focused session"]
-        );
-        assert!(shortcut_rows("definitely missing", &overrides).is_empty());
-    }
-
-    #[test]
-    fn runner_skill_row_only_reports_exception_states() {
-        let healthy = crate::app_store::RunnerSkillStatus {
-            detected: true,
-            foreign: None,
-        };
-        assert_eq!(runner_skill_status_line(true, &healthy), None);
-        assert_eq!(runner_skill_status_line(false, &healthy), None);
-
-        let missing_agent = crate::app_store::RunnerSkillStatus::default();
-        assert_eq!(
-            runner_skill_status_line(true, &missing_agent),
-            Some((
-                "No supported agent detected yet. The skill is added when one is installed.".into(),
-                false,
-            ))
-        );
-        assert_eq!(runner_skill_status_line(false, &missing_agent), None);
-
-        let foreign = crate::app_store::RunnerSkillStatus {
-            detected: false,
-            foreign: Some(PathBuf::from("/tmp/home/.agents/skills/runner-dev")),
-        };
-        assert_eq!(
-            runner_skill_status_line(false, &foreign),
-            Some((
-                "/tmp/home/.agents/skills/runner-dev was not installed by Runner and is left alone."
-                    .into(),
-                true,
-            ))
-        );
-    }
-
-    #[test]
-    fn theme_selects_have_the_signed_off_options_in_order() {
-        let light = light_theme_options();
-        assert_eq!(
-            light,
-            vec![
-                SelectOption::new("runner-light", "Runner Light").swatch(0x00a66a),
-                SelectOption::new("catppuccin-latte", "Catppuccin Latte").swatch(0x8839ef),
-            ]
-        );
-        let light_terminal = light_terminal_theme_options();
-        assert_eq!(
-            light_terminal,
-            vec![
-                SelectOption::new("rose-pine-dawn", "Rosé Pine Dawn").swatch(0xd7827e),
-                SelectOption::new("runner", "Runner").swatch(0x00ff9c),
-                SelectOption::new("catppuccin-mocha", "Catppuccin Mocha").swatch(0xcba6f7),
-            ]
-        );
-        let dark_terminal = dark_terminal_theme_options();
-        assert_eq!(
-            dark_terminal,
-            vec![
-                SelectOption::new("runner", "Runner").swatch(0x00ff9c),
-                SelectOption::new("catppuccin-mocha", "Catppuccin Mocha").swatch(0xcba6f7),
-                SelectOption::new("rose-pine-dawn", "Rosé Pine Dawn").swatch(0xd7827e),
-            ]
-        );
-        for option in light {
-            let theme = parse_light_theme(&option.value).unwrap();
-            assert_eq!(light_theme_value(theme), option.value);
-            assert_eq!(option.label.as_ref(), light_theme_label(theme));
-        }
-        for (option, theme) in light_terminal.iter().zip(LightTerminalTheme::ALL) {
-            assert_eq!(option.value, theme.key());
-            assert_eq!(option.label.as_ref(), theme.label());
-        }
-        for (option, theme) in dark_terminal.iter().zip(DarkTerminalTheme::ALL) {
-            assert_eq!(option.value, theme.key());
-            assert_eq!(option.label.as_ref(), theme.label());
-        }
-        assert_eq!(dark_theme_label(DarkTheme::Runner), "Runner");
-        assert_eq!(parse_light_theme("codex"), None);
-        assert_eq!(LightTerminalTheme::parse("match-app"), None);
-        assert_eq!(DarkTerminalTheme::parse("runner-dark"), None);
-    }
-
-    #[test]
-    fn usage_stays_solid_and_settings_gear_opens_agents_in_both_materials() {
-        use crate::theme_snapshot::{assert_fill, ThemeGuard};
-        use gpui::{size, Modifiers, TestAppContext, VisualTestContext};
-        use runner_app::appearance::{Appearance, WindowMaterial};
-        use runner_core::protocol::model::Runtime;
-
-        let _theme = ThemeGuard::new();
-        for material in [WindowMaterial::Solid, WindowMaterial::Glass] {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            cx.update(|cx| {
-                cx.set_global(Appearance {
-                    material,
-                    reduce_transparency: false,
-                })
-            });
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            store.update(&mut cx, |store, cx| {
-                store.settings.window_material = material;
-                cx.notify();
-            });
-            let host = cx.add_window(|window, cx| {
-                let mut root = NativeRoot::new(
-                    "usage-settings-gear".into(),
-                    temp.path().join("logs"),
-                    None,
-                    None,
-                    store.clone(),
-                    window,
-                    cx,
-                );
-                root.usage_installed = vec![Runtime::Codex];
-                root
-            });
-            let mut visual = VisualTestContext::from_window(host.into(), &cx);
-            visual.simulate_resize(size(px(1200.), px(900.)));
-            visual.run_until_parked();
-            let usage = visual.debug_bounds("SIDEBAR_USAGE").unwrap();
-            visual.simulate_click(usage.center(), Modifiers::default());
-            visual.run_until_parked();
-            assert_fill(&mut visual, "USAGE_POPOVER_PANEL", theme::colors().panel);
-            visual.update(|_, cx| assert_eq!(cx.windows().len(), 1));
-            let gear = visual.debug_bounds("USAGE_AGENT_SETTINGS").unwrap();
-            visual.simulate_click(gear.center(), Modifiers::default());
-            visual.run_until_parked();
-            host.read_with(&visual, |root, _| {
-                assert!(!root.usage_open);
-                assert_eq!(root.route, AppRoute::Settings);
-                assert_eq!(root.settings_page.pane, SettingsPane::Agents);
-            })
-            .unwrap();
-            assert!(visual.debug_bounds("USAGE_POPOVER_PANEL").is_none());
-        }
-    }
-
-    #[test]
-    fn agent_page_keyboard_tabs_from_executable_to_browse_and_back() {
-        use gpui::{
-            point, size, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
-        };
-
-        let temp = tempfile::tempdir().unwrap();
-        let mut cx = TestAppContext::single();
-        let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-        let host = cx.add_window(|window, cx| {
-            NativeRoot::new(
-                "agent-settings-keyboard".into(),
-                temp.path().join("logs"),
-                None,
-                None,
-                store.clone(),
-                window,
-                cx,
-            )
-        });
-        let mut visual = VisualTestContext::from_window(host.into(), &cx);
-        visual.simulate_resize(size(px(1200.), px(900.)));
-        host.update(&mut visual, |root, window, cx| {
-            root.enter_settings_pane(SettingsPane::Agents, window, cx);
-        })
-        .unwrap();
-        visual.run_until_parked();
-        let row = visual.debug_bounds("AGENT_CARD_codex").unwrap();
-        visual.simulate_click(
-            point(row.left() + px(24.), row.center().y),
-            Modifiers::default(),
-        );
-        visual.run_until_parked();
-        let executable = visual.debug_bounds("AGENT_EXECUTABLE_codex").unwrap();
-        visual.simulate_click(
-            point(executable.left() + px(24.), executable.center().y),
-            Modifiers::default(),
-        );
-        visual.run_until_parked();
-        let editor = host
-            .update(&mut visual, |_, window, cx| window.focused(cx).unwrap())
-            .unwrap();
-        visual.simulate_keystrokes("tab");
-        visual.run_until_parked();
-        host.update(&mut visual, |_, window, _| {
-            assert!(!editor.is_focused(window))
-        })
-        .unwrap();
-        visual.simulate_keystrokes("space");
-        visual.run_until_parked();
-        assert!(cx.did_prompt_for_paths());
-        cx.simulate_path_prompt_response(|_| None);
-        visual.run_until_parked();
-        visual.simulate_keystrokes("shift-tab");
-        visual.run_until_parked();
-        host.update(&mut visual, |_, window, _| {
-            assert!(editor.is_focused(window))
-        })
-        .unwrap();
-        let back = visual.debug_bounds("AGENTS_BREADCRUMB").unwrap();
-        visual.simulate_click(back.center(), Modifiers::default());
-        visual.run_until_parked();
-        host.update(&mut visual, |root, window, cx| {
-            root.settings_page
-                .search
-                .read(cx)
-                .focus_handle()
-                .focus(window, cx);
-        })
-        .unwrap();
-        visual.simulate_keystrokes("shift-tab");
-        visual.run_until_parked();
-        if visual.debug_bounds("AGENT_TOGGLE_opencode").is_some() {
-            visual.simulate_keystrokes("space");
-            visual.simulate_event(KeyUpEvent {
-                keystroke: Keystroke::parse("space").unwrap(),
-            });
-            visual.run_until_parked();
-            store.read_with(&visual, |store, _| {
-                assert!(store.settings.disabled_agents.contains("opencode"))
-            });
-            assert!(visual.debug_bounds("AGENT_CARD_opencode").is_some());
-            visual.simulate_keystrokes("shift-tab");
-        }
-        visual.simulate_keystrokes("enter");
-        visual.run_until_parked();
-        assert!(visual.debug_bounds("AGENT_PAGE_opencode").is_some());
-    }
-
-    #[test]
-    fn general_quit_menu_renders_a_right_hand_tick_for_each_choice() {
-        use crate::theme_snapshot::ThemeGuard;
-        use gpui::{Modifiers, TestAppContext, VisualTestContext};
-        use runner_app::lifecycle::QuitBehavior;
-        struct QuitSelectHost(Entity<NativeRoot>);
-        impl Render for QuitSelectHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .p_6()
-                    .child(self.0.read(cx).settings_page.quit_behavior.clone())
-            }
-        }
-        let _theme = ThemeGuard::new();
-        let temp = tempfile::tempdir().unwrap();
-        let mut cx = TestAppContext::single();
-        let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-        let host = cx.add_window(|window, cx| {
-            QuitSelectHost(cx.new(|cx| {
-                NativeRoot::new(
-                    "quit-select".into(),
-                    temp.path().join("logs"),
-                    None,
-                    None,
-                    store.clone(),
-                    window,
-                    cx,
-                )
-            }))
-        });
-        cx.run_until_parked();
-        let select = host
-            .read_with(&cx, |host, cx| {
-                host.0.read(cx).settings_page.quit_behavior.clone()
-            })
-            .unwrap();
-        let mut visual = VisualTestContext::from_window(host.into(), &cx);
-        for (index, choice) in QuitBehavior::ALL.into_iter().enumerate() {
-            select.update(&mut cx, |select, cx| select.set_value(choice.key(), cx));
-            cx.run_until_parked();
-            let trigger = visual.debug_bounds("STYLED_SELECT_TRIGGER").unwrap();
-            visual.simulate_click(trigger.center(), Modifiers::default());
-            cx.run_until_parked();
-            let row = visual
-                .debug_bounds(Box::leak(
-                    format!("STYLED_SELECT_OPTION_{index}").into_boxed_str(),
-                ))
-                .unwrap();
-            let check = visual.debug_bounds("STYLED_SELECT_CHECK").unwrap();
-            assert!(check.center().x > row.center().x);
-            assert!(check.left() >= row.left() && check.right() <= row.right());
-            assert!((check.center().y - row.center().y).abs() <= px(1.));
-            visual.simulate_click(row.center(), Modifiers::default());
-            cx.run_until_parked();
-            assert_eq!(
-                store.read_with(&cx, |store, _| store.settings.quit_behavior),
-                choice
-            );
-        }
-    }
-
-    #[test]
-    fn appearance_preview_draws_each_mode_from_its_picks_and_outlines_the_resolved_one() {
-        use crate::theme_snapshot::{assert_fill, ThemeGuard};
-        use gpui::{size, Render, TestAppContext, VisualTestContext};
-        use runner_daemon::{db, session, shell_path};
-        use std::sync::{Arc, RwLock};
-
-        struct PaneHost(Entity<NativeRoot>);
-        impl Render for PaneHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .p_6()
-                    .children(self.0.update(cx, |root, cx| root.render_settings_pane(cx)))
-            }
-        }
-        fn packed(rgb: alacritty_terminal::vte::ansi::Rgb) -> u32 {
-            u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)
-        }
-        fn captioned_by(
-            pane: gpui::Bounds<gpui::Pixels>,
-            caption: gpui::Bounds<gpui::Pixels>,
-        ) -> bool {
-            caption.left() >= pane.left()
-                && caption.right() <= pane.right()
-                && caption.top() >= pane.bottom()
-        }
-
-        let _theme = ThemeGuard::new();
-        theme::set_active_variant(theme::ThemeVariant::Carbon);
-        let temp = tempfile::tempdir().unwrap();
-        let runtime_shell_env = Arc::new(RwLock::new(shell_path::LoginShellEnv::default()));
-        let runtime_discovery =
-            Arc::new(RwLock::new(shell_path::DiscoveryState::startup(None, None)));
-        let core = crate::test_support::core(
-            Arc::new(db::open_fixture_pool(&temp.path().join("runner.db")).unwrap()),
-            temp.path().to_owned(),
-            session::SessionManager::new(
-                runtime_shell_env.clone(),
-                runtime_discovery.clone(),
-                Arc::new(session::pty_runtime::PtyRuntime::new()),
-            ),
-            runtime_shell_env,
-            runtime_discovery,
-        );
-        let mut cx = TestAppContext::single();
-        let store = cx.new(|cx| {
-            AppStore::new(
-                core,
-                None,
-                None,
-                temp.path().join("settings.json"),
-                AppSettings {
-                    app_theme: ThemeIntent::Dark,
-                    dark_terminal_theme: DarkTerminalTheme::CatppuccinMocha,
-                    ..AppSettings::default()
-                },
-                None,
-                cx,
-            )
-        });
-        cx.update(|cx| {
-            cx.set_global(GlobalAppStore(store.clone()));
-            cx.set_global(WindowLayoutCheckpoint::default());
-            #[cfg(target_os = "macos")]
-            let updater = cx.new(|cx| Updater::new(false, cx));
-            #[cfg(any(windows, target_os = "linux"))]
-            let updater = cx.new(|cx| Updater::new(false, temp.path().join("updates"), cx));
-            cx.set_global(GlobalUpdater(updater));
-        });
-        let host = cx.add_window(|window, cx| {
-            window.resize(size(px(1200.), px(900.)));
-            let root = cx.new(|cx| {
-                NativeRoot::new(
-                    "theme-preview".into(),
-                    temp.path().join("logs"),
-                    None,
-                    None,
-                    store.clone(),
-                    window,
-                    cx,
-                )
-            });
-            root.update(cx, |root, _| {
-                root.settings_page.pane = SettingsPane::Appearance
-            });
-            PaneHost(root)
-        });
-        cx.run_until_parked();
-        let mut window = VisualTestContext::from_window(host.into(), &cx);
-        let light_pane = PreviewMode::Light.pane_selector();
-        let dark_pane = PreviewMode::Dark.pane_selector();
-
-        // The app is Carbon, yet the left pane is Runner Light + Dawn: the
-        // preview reads the picks, not the globals.
-        assert_eq!(theme::active_variant(), theme::ThemeVariant::Carbon);
-        let light = window.debug_bounds(light_pane).unwrap();
-        let dark = window.debug_bounds(dark_pane).unwrap();
-        assert!(light.right() <= dark.left(), "{light:?} {dark:?}");
-        assert_fill(&mut window, light_pane, theme::RUNNER_LIGHT.bg);
-        assert_fill(
-            &mut window,
-            PreviewMode::Light.terminal_selector(),
-            packed(runner_terminal::palette::ROSE_PINE_DAWN.background),
-        );
-        assert_fill(&mut window, dark_pane, theme::CARBON.bg);
-        assert_fill(
-            &mut window,
-            PreviewMode::Dark.terminal_selector(),
-            packed(runner_terminal::palette::CATPPUCCIN_MOCHA.background),
-        );
-        let active = window.debug_bounds(theme_preview::ACTIVE_CAPTION).unwrap();
-        assert!(captioned_by(dark, active), "{dark:?} {active:?}");
-
-        theme::set_active_variant(theme::ThemeVariant::RunnerLight);
-        window.refresh().unwrap();
-        window.run_until_parked();
-        let light = window.debug_bounds(light_pane).unwrap();
-        let active = window.debug_bounds(theme_preview::ACTIVE_CAPTION).unwrap();
-        assert!(captioned_by(light, active), "{light:?} {active:?}");
-        assert_fill(&mut window, light_pane, theme::RUNNER_LIGHT.bg);
-        assert_fill(&mut window, dark_pane, theme::CARBON.bg);
-        // The outline is a selection, not only a report: clicking a pane pins
-        // the Theme intent to that mode.
-        let pick = |window: &mut VisualTestContext, selector: &'static str| {
-            let at = window.debug_bounds(selector).unwrap().center();
-            window.simulate_click(at, gpui::Modifiers::default());
-            window.run_until_parked();
-            host.update(window, |host, _, cx| host.0.read(cx).settings(cx).app_theme)
-                .unwrap()
-        };
-        assert_eq!(pick(&mut window, dark_pane), ThemeIntent::Dark);
-        assert_eq!(pick(&mut window, light_pane), ThemeIntent::Light);
-        assert!(window.debug_bounds("SETTINGS_APP_PALETTE").is_some());
-        assert!(window.debug_bounds("SETTINGS_TERMINAL_COLORS").is_none());
-        assert_eq!(
-            window.debug_bounds("SETTINGS_WINDOW_MATERIAL").is_some(),
-            cfg!(target_os = "macos")
-        );
-
-        host.update(&mut window, |host, _, cx| {
-            host.0.update(cx, |root, _| {
-                root.settings_page.pane = SettingsPane::Terminal
-            });
-            cx.notify();
-        })
-        .unwrap();
-        window.run_until_parked();
-        assert!(window.debug_bounds("SETTINGS_TERMINAL_THEME").is_none());
-        // GPUI clears `debug_bounds` each frame; Appearance selectors must be gone.
-        assert!(window.debug_bounds("SETTINGS_APP_PALETTE").is_none());
-        let sections = [
-            "SETTINGS_TERMINAL_TEXT",
-            "SETTINGS_TERMINAL_COLORS",
-            "SETTINGS_TERMINAL_CURSOR",
-            "SETTINGS_TERMINAL_KEYBOARD",
-            "SETTINGS_TERMINAL_SCROLLBACK",
-        ];
-        let tops = sections
-            .iter()
-            .filter_map(|selector| window.debug_bounds(selector).map(|bounds| bounds.top()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            window.debug_bounds("SETTINGS_TERMINAL_KEYBOARD").is_some(),
-            cfg!(target_os = "macos")
-        );
-        assert_eq!(tops.len(), if cfg!(target_os = "macos") { 5 } else { 4 });
-        assert!(tops.is_sorted(), "{tops:?}");
-        assert!(
-            window.debug_bounds("SETTINGS_OPTION_AS_META").is_some() == cfg!(target_os = "macos")
-        );
-        let pane = window.debug_bounds("SETTINGS_TERMINAL_PANE").unwrap();
-        let font = window.debug_bounds("SETTINGS_TERMINAL_FONT").unwrap();
-        assert!(
-            font.top() >= pane.top() && font.bottom() <= pane.bottom(),
-            "{pane:?} {font:?}"
-        );
-    }
-
-    #[test]
-    fn settings_routes_fall_back_to_general() {
-        assert_eq!(SettingsPane::from_route(None), SettingsPane::General);
-        assert_eq!(
-            SettingsPane::from_route(Some("account")),
-            SettingsPane::Account
-        );
-        assert_eq!(SettingsPane::Account.key(), "account");
-        assert_eq!(SettingsPane::Account.icon(), "user-round.svg");
-        assert_eq!(
-            SettingsPane::from_route(Some("appearance")),
-            SettingsPane::Appearance
-        );
-        assert_eq!(
-            SettingsPane::from_route(Some("not-a-pane")),
-            SettingsPane::General
-        );
-        assert_eq!(
-            SettingsPane::from_route(Some("missions")),
-            SettingsPane::Missions
-        );
-        assert_eq!(
-            SettingsPane::from_route(Some("notifications")),
-            SettingsPane::Notifications
-        );
-        assert_eq!(SettingsPane::Notifications.key(), "notifications");
-        assert_eq!(SettingsPane::Notifications.icon(), "bell.svg");
-        assert_eq!(SettingsPane::Missions.key(), "missions");
-        assert_eq!(SettingsPane::Missions.label(), "Missions");
-        assert_eq!(SettingsPane::Missions.icon(), "rocket.svg");
-    }
-
-    #[test]
-    fn nav_search_filters_labels_and_removes_empty_groups() {
-        crate::i18n::testing::with_locale(crate::i18n::Locale::English, || {
-            let all = filtered_nav_groups("");
-            assert_eq!(
-                all.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
-                ["App", "Side panel", "Integrations", "Cloud", "System"]
-            );
-            assert_eq!(all.iter().map(|(_, panes)| panes.len()).sum::<usize>(), 16);
-            assert_eq!(
-                all[0],
-                (
-                    "App",
-                    vec![
-                        SettingsPane::General,
-                        SettingsPane::Appearance,
-                        SettingsPane::Notifications,
-                        SettingsPane::Missions,
-                        SettingsPane::Terminal,
-                        SettingsPane::Shortcuts,
-                        SettingsPane::Archived,
-                    ],
-                )
-            );
-
-            assert_eq!(
-                all[1],
-                (
-                    "Side panel",
-                    vec![SettingsPane::SidePanel, SettingsPane::Files]
-                )
-            );
-            assert_eq!(
-                filtered_nav_groups("files"),
-                vec![("Side panel", vec![SettingsPane::Files])]
-            );
-            assert_eq!(
-                SettingsPane::from_route(Some("side-panel")),
-                SettingsPane::SidePanel
-            );
-            assert_eq!(SettingsPane::from_route(Some("files")), SettingsPane::Files);
-            assert_eq!(
-                all[2],
-                (
-                    "Integrations",
-                    vec![
-                        SettingsPane::Agents,
-                        SettingsPane::Skills,
-                        SettingsPane::Mcp
-                    ]
-                )
-            );
-            assert_eq!(
-                all[3],
-                ("Cloud", vec![SettingsPane::Account, SettingsPane::Remote])
-            );
-            assert_eq!(
-                filtered_nav_groups("remote"),
-                vec![("Cloud", vec![SettingsPane::Remote])]
-            );
-            assert_eq!(
-                SettingsPane::from_route(Some("skills")),
-                SettingsPane::Skills
-            );
-            assert_eq!(SettingsPane::from_route(Some("mcp")), SettingsPane::Mcp);
-            assert_eq!(
-                filtered_nav_groups("mcp"),
-                vec![("Integrations", vec![SettingsPane::Mcp])]
-            );
-            assert_eq!(
-                filtered_nav_groups("skills"),
-                vec![("Integrations", vec![SettingsPane::Skills])]
-            );
-
-            let terminal = filtered_nav_groups("  TERM  ");
-            assert_eq!(terminal, vec![("App", vec![SettingsPane::Terminal])]);
-            for row in [
-                "line height",
-                "scrollback",
-                "copy on select",
-                "blink",
-                "dark mode palette",
-            ] {
-                assert_eq!(
-                    filtered_nav_groups(row),
-                    vec![("App", vec![SettingsPane::Terminal])],
-                    "{row}"
-                );
-            }
-            assert_eq!(
-                filtered_nav_groups("palette"),
-                vec![(
-                    "App",
-                    vec![SettingsPane::Appearance, SettingsPane::Terminal]
-                )]
-            );
-            assert_eq!(
-                filtered_nav_groups("option as meta").is_empty(),
-                !cfg!(target_os = "macos")
-            );
-
-            let archived = filtered_nav_groups("archived");
-            assert_eq!(archived, vec![("App", vec![SettingsPane::Archived])]);
-            assert!(filtered_nav_groups("no such setting").is_empty());
-            assert_eq!(
-                filtered_nav_groups("updates"),
-                vec![("System", vec![SettingsPane::Updates])]
-            );
-            assert_eq!(
-                SettingsPane::from_route(Some("updates")),
-                SettingsPane::Updates
-            );
-        });
-    }
-
-    #[test]
-    fn missions_pane_renders_default_crew_at_two_rem_sizes() {
-        use gpui::{size, Render, TestAppContext, VisualTestContext};
-
-        struct PaneHost {
-            default_crew: Entity<StyledSelect>,
-        }
-        impl Render for PaneHost {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .p_6()
-                    .child(missions_settings_pane(self.default_crew.clone()))
-            }
-        }
-
-        let mut cx = TestAppContext::single();
-        let host = cx.add_window(|window, cx| {
-            window.resize(size(px(1200.), px(900.)));
-            let noop: SelectHandler = Rc::new(|_, _, _| {});
-            let default_crew = cx.new(|cx| {
-                StyledSelect::new(
-                    "settings-default-crew",
-                    cx.focus_handle(),
-                    "",
-                    vec![SelectOption::new("", "No default")],
-                    noop.clone(),
-                    cx,
-                )
-            });
-            PaneHost { default_crew }
-        });
-        cx.run_until_parked();
-        let mut window = VisualTestContext::from_window(host.into(), &cx);
-        for rem in [16., 20.8] {
-            host.update(&mut window, |_, window, _| window.set_rem_size(px(rem)))
-                .unwrap();
-            window.run_until_parked();
-            let pane = window.debug_bounds("SETTINGS_MISSIONS_PANE").unwrap();
-            let heading = window
-                .debug_bounds("SETTINGS_MISSIONS_DEFAULTS_HEADING")
-                .unwrap();
-            let card = window.debug_bounds("SETTINGS_MISSIONS_CARD").unwrap();
-            let crew = window.debug_bounds("SETTINGS_DEFAULT_CREW").unwrap();
-            assert!(window
-                .debug_bounds("SETTINGS_MISSION_PERMISSIONS")
-                .is_none());
-            assert!(
-                heading.size.height >= px(rem) && heading.bottom() <= card.top(),
-                "{rem}: {heading:?} {card:?}"
-            );
-            assert!(
-                card.size.width > px(0.) && card.size.width <= pane.size.width,
-                "{rem}: {card:?} {pane:?}"
-            );
-            assert!(
-                crew.bottom() <= card.bottom() && crew.right() <= card.right(),
-                "{rem}: {crew:?} {card:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn content_scrollbar_starts_below_the_drag_strip_at_the_window_edge() {
-        use gpui::{
-            point, size, Modifiers, Pixels, Point, Render, TestAppContext, VisualTestContext,
-        };
-
-        use crate::app_settings::SIDEBAR_DEFAULT;
-
-        const HEIGHT: f32 = 320.;
-        // ScrollbarKind::App's track width, private to ui/scrollbar.rs.
-        const GUTTER: f32 = 10.;
-
-        struct ColumnHost {
-            default_crew: Entity<StyledSelect>,
-            content_scroll: ScrollHandle,
-            content_scrollbar: Entity<Scrollbar>,
-        }
-        impl Render for ColumnHost {
-            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let zoom = f32::from(window.rem_size()) / 16.;
-                div()
-                    .size_full()
-                    .flex()
-                    .child(div().flex_none().h_full().w(px(SIDEBAR_DEFAULT * zoom)))
-                    .child(settings_content_column(
-                        (SETTINGS_DRAG_INSET > 0.).then(|| {
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .h(px(TITLEBAR_DRAG_HEIGHT * zoom))
-                        }),
-                        Some(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(missions_settings_pane(self.default_crew.clone()))
-                                .child(div().h(px(400. * zoom)))
-                                .into_any_element(),
-                        ),
-                        &self.content_scroll,
-                        self.content_scrollbar.clone(),
-                        zoom,
-                    ))
-            }
-        }
-
-        let mut cx = TestAppContext::single();
-        let host = cx.add_window(|_, cx| {
-            let noop: SelectHandler = Rc::new(|_, _, _| {});
-            let default_crew = cx.new(|cx| {
-                StyledSelect::new(
-                    "settings-default-crew",
-                    cx.focus_handle(),
-                    "",
-                    vec![SelectOption::new("", "No default")],
-                    noop.clone(),
-                    cx,
-                )
-            });
-            let content_scroll = ScrollHandle::new();
-            let owner = cx.entity_id();
-            let content_scrollbar = cx.new(|_| Scrollbar::app(content_scroll.clone(), owner));
-            ColumnHost {
-                default_crew,
-                content_scroll,
-                content_scrollbar,
-            }
-        });
-        cx.run_until_parked();
-        let mut window = VisualTestContext::from_window(host.into(), &cx);
-        let scroll = host
-            .update(&mut window, |host, _, _| host.content_scroll.clone())
-            .unwrap();
-        let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() <= 0.5;
-
-        for width in [1000., 2000.] {
-            for rem in [16., 20.8] {
-                let zoom = rem / 16.;
-                let track_top = px(SETTINGS_DRAG_INSET * zoom);
-                let content_top = px(SETTINGS_CONTENT_TOP * zoom);
-                window.simulate_resize(size(px(width), px(HEIGHT)));
-                scroll.set_offset(point(px(0.), px(0.)));
-                host.update(&mut window, |_, window, _| {
-                    window.set_rem_size(px(rem));
-                    window.refresh();
-                })
-                .unwrap();
-                window.run_until_parked();
-
-                let track = window
-                    .debug_bounds("SETTINGS_CONTENT_SCROLLBAR_TRACK")
-                    .unwrap();
-                let label = format!("{width}x{rem}: track {track:?}");
-
-                assert!(near(track.right(), px(width)), "{label}");
-                assert!(near(track.left(), px(SIDEBAR_DEFAULT * zoom)), "{label}");
-                assert!(near(track.top(), track_top), "{label}");
-                assert!(
-                    near(track.bottom(), px(HEIGHT - TITLEBAR_DRAG_HEIGHT * zoom)),
-                    "{label}"
-                );
-                let pane = window.debug_bounds("SETTINGS_MISSIONS_PANE").unwrap();
-                assert!(
-                    near(pane.top(), content_top),
-                    "{label}: pane {pane:?} content {content_top:?}"
-                );
-
-                let hit_strip = window.debug_bounds("SCROLLBAR_TRACK").unwrap();
-                assert!(near(hit_strip.left(), px(width - GUTTER * zoom)), "{label}");
-                assert!(near(hit_strip.right(), px(width)), "{label}");
-                assert!(near(hit_strip.top(), track.top()), "{label}");
-                assert!(near(hit_strip.bottom(), track.bottom()), "{label}");
-
-                // Hover reveals the track before probing its clicks.
-                let max = scroll.max_offset().y;
-                assert!(max > px(0.), "{label}: the pane should overflow");
-                let inside_left = px(width - GUTTER * zoom + 1.);
-                let outside_left = px(width - GUTTER * zoom - 1.);
-                let inside_right = px(width - 1.);
-                let below_top = track.top() + px(1.);
-                let bottom = track.bottom() - px(1.);
-                let below_bottom = track.bottom() + px(1.);
-                let mut click_from = |from: Pixels, at: Point<Pixels>| {
-                    scroll.set_offset(point(px(0.), from));
-                    host.update(&mut window, |_, window, _| window.refresh())
-                        .unwrap();
-                    window.run_until_parked();
-                    window.simulate_mouse_move(at, None, Modifiers::default());
-                    window.simulate_click(at, Modifiers::default());
-                    scroll.offset().y
-                };
-                assert!(
-                    near(click_from(-max, point(inside_left, below_top)), px(0.)),
-                    "{label}: a click on the gutter's left edge should jump to the top"
-                );
-                assert!(
-                    near(click_from(-max, point(inside_right, below_top)), px(0.)),
-                    "{label}: a click on the gutter's right edge should jump to the top"
-                );
-                assert!(
-                    near(click_from(px(0.), point(inside_right, bottom)), -max),
-                    "{label}: a click at the track's bottom should jump to the bottom"
-                );
-                assert!(
-                    near(click_from(-max, point(outside_left, below_top)), -max),
-                    "{label}: a click left of the gutter should not scroll"
-                );
-                if SETTINGS_DRAG_INSET > 0. {
-                    assert!(
-                        near(
-                            click_from(-max, point(inside_right, track.top() - px(1.))),
-                            -max
-                        ),
-                        "{label}: a click in the drag strip should not scroll"
-                    );
-                }
-                assert!(
-                    near(
-                        click_from(px(0.), point(inside_right, below_bottom)),
-                        px(0.)
-                    ),
-                    "{label}: a click below the track should not scroll"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn settings_back_button_clears_window_navigation() {
-        use crate::theme_snapshot::ThemeGuard;
-        use gpui::{size, TestAppContext, VisualTestContext};
-
-        let _theme = ThemeGuard::new();
-        let temp = tempfile::tempdir().unwrap();
-        let mut cx = TestAppContext::single();
-        let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-        let window = cx.add_window(|window, cx| {
-            let mut root = NativeRoot::new(
-                "settings-back".into(),
-                temp.path().join("logs"),
-                None,
-                None,
-                store.clone(),
-                window,
-                cx,
-            );
-            root.route = AppRoute::Settings;
-            root
-        });
-        cx.run_until_parked();
-        let mut visual = VisualTestContext::from_window(window.into(), &cx);
-        for zoom in [1.0, 1.3] {
-            for width in [1440., 2400.] {
-                visual.simulate_resize(size(px(width), px(900.)));
-                window
-                    .update(&mut cx, |root, window, cx| {
-                        root.set_zoom(zoom, window, cx);
-                    })
-                    .unwrap();
-                cx.run_until_parked();
-                let back = visual.debug_bounds("SETTINGS_BACK").unwrap();
-                let sidebar_top = if cfg!(any(windows, target_os = "linux")) {
-                    12. + 32.
-                } else {
-                    52.
-                };
-                assert!(
-                    back.top()
-                        >= visual
-                            .debug_bounds("WINDOW_TITLEBAR_CONTROLS")
-                            .unwrap()
-                            .bottom()
-                        && back.top() >= px(sidebar_top * zoom)
-                        && back.top() < px((sidebar_top + 16.) * zoom),
-                    "zoom {zoom} width {width}: {back:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn launch_dims_prefer_direct_layouts_and_fall_back_to_mission_geometry() {
-        let direct = HashMap::from([("direct".to_owned(), (132, 38))]);
-
-        assert_eq!(
-            launch_dims_for("direct", &direct, (104, 42)),
-            Some((132, 38))
-        );
-        assert_eq!(
-            launch_dims_for("mission", &direct, (104, 42)),
-            Some((104, 42))
-        );
-    }
-}
+mod tests;
 
 #[cfg(all(test, debug_assertions))]
-mod localization_tests {
-    use super::*;
-    use gpui::{size, TestAppContext};
-    use i18n::{testing::with_locale, Language, Locale};
-
-    #[test]
-    fn scrollback_select_follows_shared_settings_and_keeps_a_saved_value_choosable() {
-        let _theme = crate::theme_snapshot::ThemeGuard::new();
-        with_locale(Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            store.update(&mut cx, |store, _| {
-                store.settings.terminal_scrollback_lines = 7_000
-            });
-            let windows = ["scrollback-one", "scrollback-two"].map(|label| {
-                cx.add_window(|window, cx| {
-                    NativeRoot::new(
-                        label.into(),
-                        temp.path().join("logs"),
-                        None,
-                        None,
-                        store.clone(),
-                        window,
-                        cx,
-                    )
-                })
-            });
-            cx.run_until_parked();
-            let choose = |cx: &mut TestAppContext, value: &str| {
-                windows[0]
-                    .update(cx, |root, window, cx| {
-                        root.apply_settings_selection(
-                            SettingsSelection::TerminalScrollback,
-                            value,
-                            window,
-                            cx,
-                        )
-                    })
-                    .unwrap();
-                cx.run_until_parked();
-            };
-            let shown = |cx: &mut TestAppContext| {
-                windows.map(|window| {
-                    window
-                        .read_with(cx, |root, cx| {
-                            let select = root.settings_page.terminal_scrollback.read(cx);
-                            (
-                                root.settings(cx).terminal_scrollback_lines,
-                                select.value().to_owned(),
-                                select.selected().unwrap().label.to_string(),
-                            )
-                        })
-                        .unwrap()
-                })
-            };
-            let both = |lines: usize, label: &str| {
-                let row = (lines, lines.to_string(), label.to_owned());
-                [row.clone(), row]
-            };
-
-            assert_eq!(shown(&mut cx), both(7_000, "7,000 lines"));
-            choose(&mut cx, "5000");
-            assert_eq!(shown(&mut cx), both(5_000, "5,000 lines"));
-            choose(&mut cx, "7000");
-            assert_eq!(shown(&mut cx), both(7_000, "7,000 lines"));
-            choose(&mut cx, "50000");
-            assert_eq!(shown(&mut cx), both(50_000, "50,000 lines"));
-            choose(&mut cx, "60000");
-            assert_eq!(shown(&mut cx), both(50_000, "50,000 lines"));
-        });
-    }
-
-    #[test]
-    fn language_switch_refreshes_two_windows_menus_and_cached_choices_without_resetting_drafts() {
-        let _theme = crate::theme_snapshot::ThemeGuard::new();
-        with_locale(Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            store.update(&mut cx, |store, _| {
-                store.settings.language = Language::English
-            });
-            let windows = ["locale-one", "locale-two"].map(|label| {
-                cx.add_window(|window, cx| {
-                    window.resize(size(px(1200.), px(900.)));
-                    let mut root = NativeRoot::new(
-                        label.into(),
-                        temp.path().join("logs"),
-                        None,
-                        None,
-                        store.clone(),
-                        window,
-                        cx,
-                    );
-                    root.route = AppRoute::Settings;
-                    root
-                })
-            });
-            cx.run_until_parked();
-            let draft = windows[1]
-                .read_with(&cx, |root, _| {
-                    root.settings_page.default_working_dir.clone()
-                })
-                .unwrap();
-            draft.update(&mut cx, |field, cx| {
-                field.set_text("/tmp/中文 {count} draft", cx);
-                field.select_all(cx);
-            });
-            cx.run_until_parked();
-            let caret = draft.read_with(&cx, |field, _| field.caret_offset());
-            let before = store.read_with(&cx, |store, _| store.revisions);
-            for (language, expected, menu) in [
-                (Language::SimplifiedChinese, "每次询问", "文件"),
-                (Language::English, "Ask", "File"),
-            ] {
-                windows[0]
-                    .update(&mut cx, |root, window, cx| {
-                        root.apply_settings_selection(
-                            SettingsSelection::Language,
-                            language.key(),
-                            window,
-                            cx,
-                        )
-                    })
-                    .unwrap();
-                cx.run_until_parked();
-                for window in windows {
-                    window
-                        .read_with(&cx, |root, cx| {
-                            assert_eq!(root.settings(cx).language, language);
-                            assert_eq!(
-                                root.settings_page.language.read(cx).value(),
-                                language.key()
-                            );
-                            assert_eq!(
-                                root.store_revisions.locale,
-                                store.read(cx).revisions.locale
-                            );
-                            assert_eq!(
-                                root.settings_page
-                                    .quit_behavior
-                                    .read(cx)
-                                    .selected()
-                                    .unwrap()
-                                    .label,
-                                expected
-                            );
-                        })
-                        .unwrap();
-                }
-                let menus = cx.update(|cx| cx.get_menus().unwrap());
-                assert_eq!(menus[1].name, menu);
-                assert!(
-                    matches!(&menus[1].items[0], gpui::OwnedMenuItem::Action { name, .. } if name == if language == Language::English { "New Window" } else { "新建窗口" })
-                );
-                #[cfg(target_os = "macos")]
-                assert!(
-                    matches!(&menus[0].items[0], gpui::OwnedMenuItem::Action { name, .. } if name == if language == Language::English { "About Runner" } else { "关于 Runner" })
-                );
-                draft.read_with(&cx, |field, _| {
-                    assert_eq!(field.text(), "/tmp/中文 {count} draft");
-                    assert_eq!(field.caret_offset(), caret);
-                });
-                let same_draft = windows[1]
-                    .read_with(&cx, |root, _| {
-                        root.settings_page.default_working_dir.clone()
-                    })
-                    .unwrap();
-                assert_eq!(draft.entity_id(), same_draft.entity_id());
-            }
-            let after = store.read_with(&cx, |store, _| store.revisions);
-            assert_eq!(after.locale, before.locale + 2);
-            assert_eq!(after.terminal_settings, before.terminal_settings);
-            assert_eq!(after.role_surfaces, before.role_surfaces);
-            assert_eq!(after.crews, before.crews);
-        });
-    }
-
-    #[test]
-    fn general_language_dropdown_persists_keyboard_choices_across_windows() {
-        let _theme = crate::theme_snapshot::ThemeGuard::new();
-        with_locale(Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            let windows = ["language-select-one", "language-select-two"].map(|label| {
-                cx.add_window(|window, cx| {
-                    window.resize(size(px(1200.), px(900.)));
-                    let mut root = NativeRoot::new(
-                        label.into(),
-                        temp.path().join("logs"),
-                        None,
-                        None,
-                        store.clone(),
-                        window,
-                        cx,
-                    );
-                    root.route = AppRoute::Settings;
-                    root
-                })
-            });
-            cx.run_until_parked();
-            let select = windows[0]
-                .read_with(&cx, |root, _| root.settings_page.language.clone())
-                .unwrap();
-            let mut visual = gpui::VisualTestContext::from_window(windows[0].into(), &cx);
-            for (keys, language, expected) in [
-                ("space end enter", Language::SimplifiedChinese, "简体中文"),
-                ("space home down enter", Language::English, "English"),
-                ("space home enter", Language::System, "System"),
-            ] {
-                windows[0]
-                    .update(&mut visual, |_, window, cx| {
-                        select.read(cx).focus_handle().focus(window, cx)
-                    })
-                    .unwrap();
-                visual.simulate_keystrokes(keys);
-                visual.run_until_parked();
-                for window in windows {
-                    window
-                        .read_with(&visual, |root, cx| {
-                            let selected = root.settings_page.language.read(cx);
-                            assert_eq!(selected.value(), language.key());
-                            assert_eq!(selected.selected().unwrap().label, expected);
-                            assert_eq!(root.settings(cx).language, language);
-                        })
-                        .unwrap();
-                }
-                assert_eq!(
-                    AppSettings::load(&temp.path().join("settings.json"))
-                        .unwrap()
-                        .language,
-                    language
-                );
-                assert!(visual.debug_bounds("SETTINGS_LANGUAGE_HEADING").is_none());
-                let control = visual.debug_bounds("SETTINGS_LANGUAGE_SELECT").unwrap();
-                assert_eq!(control.size.width, SETTINGS_SELECT_WIDTH);
-                windows[0]
-                    .read_with(&visual, |root, _| {
-                        assert_eq!(root.settings_page.language.entity_id(), select.entity_id())
-                    })
-                    .unwrap();
-            }
-            store.update(&mut visual, |store, cx| {
-                store.sync_locale_from(Some("zh-Hans"), cx)
-            });
-            visual.run_until_parked();
-            select.read_with(&visual, |select, _| {
-                assert_eq!(select.value(), "system");
-                assert_eq!(select.selected().unwrap().label, "跟随系统");
-            });
-            windows[0]
-                .update(&mut visual, |_, window, cx| {
-                    select.read(cx).focus_handle().focus(window, cx)
-                })
-                .unwrap();
-            visual.simulate_keystrokes("space home enter");
-            visual.run_until_parked();
-            assert_eq!(
-                store.read_with(&visual, |store, _| store.resolved_locale),
-                Locale::English
-            );
-            select.read_with(&visual, |select, _| {
-                assert_eq!(select.value(), "system");
-                assert_eq!(select.selected().unwrap().label, "System");
-            });
-        });
-    }
-
-    #[test]
-    fn language_row_keeps_readable_text_at_narrow_widths_and_enlarged_zoom() {
-        let _theme = crate::theme_snapshot::ThemeGuard::new();
-        with_locale(Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            let host = cx.add_window(|window, cx| {
-                window.resize(size(px(800.), px(600.)));
-                let mut root = NativeRoot::new(
-                    "language-layout".into(),
-                    temp.path().join("logs"),
-                    None,
-                    None,
-                    store.clone(),
-                    window,
-                    cx,
-                );
-                root.route = AppRoute::Settings;
-                root
-            });
-            cx.run_until_parked();
-            let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
-            for intent in [ThemeIntent::Dark, ThemeIntent::Light] {
-                for language in [Language::English, Language::SimplifiedChinese] {
-                    for width in [800., 1200.] {
-                        for zoom in [1., 1.3] {
-                            visual.simulate_resize(size(px(width), px(600.)));
-                            host.update(&mut visual, |root, window, cx| {
-                                root.set_theme_intent(intent, cx);
-                                root.set_zoom(zoom, window, cx);
-                                root.apply_settings_selection(
-                                    SettingsSelection::Language,
-                                    language.key(),
-                                    window,
-                                    cx,
-                                );
-                            })
-                            .unwrap();
-                            visual.run_until_parked();
-                            let row = visual.debug_bounds("SETTINGS_WRAPPED_ROW").unwrap();
-                            let text = visual.debug_bounds("SETTINGS_WRAPPED_ROW_TEXT").unwrap();
-                            let description = visual
-                                .debug_bounds("SETTINGS_WRAPPED_ROW_DESCRIPTION")
-                                .unwrap();
-                            let control = visual.debug_bounds("SETTINGS_LANGUAGE_SELECT").unwrap();
-                            let case = format!("{intent:?}/{language:?}/{width}/{zoom}");
-                            assert!(
-                                description.size.width >= px(200. * zoom),
-                                "{case}: {description:?}"
-                            );
-                            assert!(
-                                description.size.height <= px(3. * 22. * zoom),
-                                "{case}: {description:?}"
-                            );
-                            assert!(
-                                text.left() >= row.left()
-                                    && text.right() <= row.right()
-                                    && control.left() >= row.left()
-                                    && control.right() <= row.right()
-                                    && control.bottom() <= row.bottom(),
-                                "{case}: {row:?} {text:?} {control:?}"
-                            );
-                            assert!(
-                                f32::from(control.size.width - px(176. * zoom)).abs() <= 1.,
-                                "{case}"
-                            );
-                            if width == 800. && zoom == 1.3 {
-                                assert!(control.top() >= text.bottom(), "{case}");
-                                assert!(
-                                    f32::from(control.left() - text.left()).abs() <= 1.,
-                                    "{case}"
-                                );
-                            } else if width == 1200. {
-                                assert!(control.left() >= text.right(), "{case}");
-                                assert!(control.top() < text.bottom(), "{case}");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn open_archive_confirmation_follows_the_other_window_language() {
-        let _theme = crate::theme_snapshot::ThemeGuard::new();
-        with_locale(Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            store.update(&mut cx, |store, _| {
-                store.settings.language = Language::English
-            });
-            let windows = ["message-one", "message-two"].map(|label| {
-                cx.add_window(|window, cx| {
-                    NativeRoot::new(
-                        label.into(),
-                        temp.path().join("logs"),
-                        None,
-                        None,
-                        store.clone(),
-                        window,
-                        cx,
-                    )
-                })
-            });
-            store.update(&mut cx, |store, _| {
-                store
-                    .sessions
-                    .push(runner_core::protocol::session::DirectSessionEntry {
-                        claude_account: None,
-                        session_id: "owned-shell".into(),
-                        project_id: None,
-                        role_id: None,
-                        handle: None,
-                        agent_runtime: "shell".into(),
-                        agent_command: "zsh".into(),
-                        agent_model: None,
-                        agent_effort: None,
-                        display_name: "literal {count} 终端".into(),
-                        status: SessionStatus::Running,
-                        title: None,
-                        live_title: None,
-                        cwd: None,
-                        started_at: None,
-                        stopped_at: None,
-                        resumable: false,
-                        native_fork: false,
-                        forkable: false,
-                        agent_session_key: None,
-                        pinned: false,
-                        archived_at: None,
-                    })
-            });
-            windows[1]
-                .update(&mut cx, |root, window, cx| {
-                    root.request_archive_all(
-                        None,
-                        vec!["owned-shell".into()],
-                        ArchiveAllSource::Chat,
-                        window,
-                        cx,
-                    );
-                })
-                .unwrap();
-            cx.run_until_parked();
-            let confirm_focus = windows[1]
-                .read_with(&cx, |root, _| {
-                    root.terminal_close_confirm.as_ref().unwrap().focus.clone()
-                })
-                .unwrap();
-            for (language, body) in [
-                (
-                    Language::SimplifiedChinese,
-                    "此操作将永久关闭 1 个终端。已关闭的终端无法恢复。",
-                ),
-                (
-                    Language::English,
-                    "This permanently closes 1 terminal. Closed terminals cannot be restored.",
-                ),
-            ] {
-                windows[0]
-                    .update(&mut cx, |root, window, cx| {
-                        root.apply_settings_selection(
-                            SettingsSelection::Language,
-                            language.key(),
-                            window,
-                            cx,
-                        )
-                    })
-                    .unwrap();
-                cx.run_until_parked();
-                windows[1]
-                    .read_with(&cx, |root, _| {
-                        let confirm = root.terminal_close_confirm.as_ref().unwrap();
-                        let TerminalCloseTarget::ArchiveAll {
-                            confirmation_body,
-                            session_ids,
-                            ..
-                        } = &confirm.target
-                        else {
-                            panic!("archive target retained")
-                        };
-                        assert_eq!(confirmation_body.resolve(), body);
-                        assert_eq!(session_ids, &["owned-shell"]);
-                        assert_eq!(confirm.focus, confirm_focus);
-                    })
-                    .unwrap();
-            }
-        });
-    }
-
-    #[test]
-    fn system_resolution_changes_invalidate_even_when_the_saved_intent_does_not_change() {
-        with_locale(Locale::English, || {
-            let temp = tempfile::tempdir().unwrap();
-            let mut cx = TestAppContext::single();
-            let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
-            let before = store.read_with(&cx, |store, _| store.revisions);
-            store.update(&mut cx, |store, cx| {
-                store.sync_locale_from(Some("zh-Hant-HK"), cx)
-            });
-            store.read_with(&cx, |store, _| {
-                assert_eq!(store.settings.language, Language::System);
-                assert_eq!(store.resolved_locale, Locale::SimplifiedChinese);
-                assert_eq!(store.revisions.locale, before.locale + 1);
-                assert_eq!(store.revisions.settings, before.settings);
-                let reactions = store.revisions.reactions_since(before);
-                assert!(reactions.notify_shell());
-                assert!(!reactions.apply_terminal_settings);
-                assert!(!reactions.reload_role_surfaces);
-                assert!(!reactions.reload_crew_surfaces);
-            });
-            assert_eq!(
-                cx.update(|cx| cx.get_menus().unwrap()[1].name.clone()),
-                "文件"
-            );
-            store.update(&mut cx, |store, cx| {
-                store.sync_locale_from(Some("en-US"), cx)
-            });
-            assert_eq!(
-                cx.update(|cx| cx.get_menus().unwrap()[1].name.clone()),
-                "File"
-            );
-        });
-    }
-
-    #[test]
-    fn diagnostics_left_the_nav_and_a_saved_pane_opens_about() {
-        assert_eq!(
-            SettingsPane::from_route(Some("diagnostics")),
-            SettingsPane::About
-        );
-        assert_eq!(
-            SYSTEM_PANES,
-            [SettingsPane::Updates, SettingsPane::About].as_slice()
-        );
-        assert!(filtered_nav_groups("diagnostics").is_empty());
-        assert_eq!(
-            filtered_nav_groups("application logs"),
-            vec![("System", vec![SettingsPane::About])]
-        );
-    }
-
-    #[test]
-    fn shortcut_search_translates_while_override_ids_and_combinations_stay_stable() {
-        let overrides: keymap::KeymapOverrides = serde_json::from_str(
-            r#"{"new-chat":{"ctrl":true,"meta":false,"alt":false,"shift":true,"code":"KeyJ"}}"#,
-        )
-        .unwrap();
-        let before = serde_json::to_value(&overrides).unwrap();
-        let binding = keymap::effective_binding("new-chat", &overrides).unwrap();
-        with_locale(Locale::SimplifiedChinese, || {
-            let rows = shortcut_rows("新建标签页", &overrides);
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].id(), "new-chat");
-            assert_eq!(rows[0].title(), "新建标签页");
-            assert_eq!(
-                keymap::effective_binding("new-chat", &overrides),
-                Some(binding)
-            );
-            assert_eq!(serde_json::to_value(&overrides).unwrap(), before);
-            assert!(shortcut_rows("打开另一个", &overrides)
-                .iter()
-                .any(|row| row.id() == "new-window"));
-        });
-    }
-}
+mod localization_tests;

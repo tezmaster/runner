@@ -22,6 +22,7 @@
 
 pub mod crew;
 pub mod mission;
+pub mod mission_review;
 pub mod node;
 pub mod project;
 pub mod role;

@@ -3,23 +3,38 @@ use crate::{ops, repo, AppCore};
 use runner_core::{companion::*, protocol as p};
 use serde_json::{json, Value};
 
+fn launch_failed(error: crate::error::Error) -> Failure {
+    match error {
+        crate::error::Error::RuntimeVersionGate(gate) => Failure(
+            ErrorCode::Failed,
+            "The agent is too old for Runner.",
+            Some(gate),
+        ),
+        error => failed(error),
+    }
+}
+
 fn bad_request() -> Failure {
-    Failure(ErrorCode::BadRequest, "The action has invalid fields.")
+    Failure(
+        ErrorCode::BadRequest,
+        "The action has invalid fields.",
+        None,
+    )
 }
 fn role(core: &AppCore, id: &str) -> Result<p::Role> {
     repo::role::get(&*core.db.get().map_err(failed)?, id)
         .map_err(failed)?
-        .ok_or(Failure(ErrorCode::NotFound, "No role has that id."))
+        .ok_or(Failure(ErrorCode::NotFound, "No role has that id.", None))
 }
 fn crew(core: &AppCore, id: &str) -> Result<p::Crew> {
     repo::crew::get(&*core.db.get().map_err(failed)?, id)
         .map_err(failed)?
-        .ok_or(Failure(ErrorCode::NotFound, "No crew has that id."))
+        .ok_or(Failure(ErrorCode::NotFound, "No crew has that id.", None))
 }
 fn slot(core: &AppCore, id: &str) -> Result<p::Slot> {
     repo::slot::get(&*core.db.get().map_err(failed)?, id)
         .map_err(failed)?
-        .ok_or(Failure(ErrorCode::NotFound, "No slot has that id."))
+        .ok_or(Failure(ErrorCode::NotFound, "No slot has that id.", None))
 }
 fn name(value: &str) -> Result<()> {
     if value.trim().is_empty() {
@@ -101,6 +116,7 @@ fn available_slot_handle(core: &AppCore, crew: &str, id: Option<&str>, value: &s
         return Err(Failure(
             ErrorCode::Failed,
             "That slot handle is already in use. Choose another handle in the crew.",
+            None,
         ));
     }
     Ok(())
@@ -111,7 +127,7 @@ fn role_delete_allowed(core: &AppCore, id: &str) -> Result<()> {
         .map_err(failed)?
         .is_empty()
     {
-        return Err(Failure(ErrorCode::Failed, "This role is used by crews. Remove its slots from the crews in the catalog before deleting it."));
+        return Err(Failure(ErrorCode::Failed, "This role is used by crews. Remove its slots from the crews in the catalog before deleting it.", None));
     }
     if !repo::role::unarchived_direct_session_ids(&conn, id)
         .map_err(failed)?
@@ -120,13 +136,14 @@ fn role_delete_allowed(core: &AppCore, id: &str) -> Result<()> {
         return Err(Failure(
             ErrorCode::Failed,
             "This role has unarchived chats. Archive them on the host before deleting it.",
+            None,
         ));
     }
     if !repo::role::unarchived_mission_names(&conn, id)
         .map_err(failed)?
         .is_empty()
     {
-        return Err(Failure(ErrorCode::Failed, "This role is used by unarchived missions. Archive them on the host before deleting it."));
+        return Err(Failure(ErrorCode::Failed, "This role is used by unarchived missions. Archive them on the host before deleting it.", None));
     }
     Ok(())
 }
@@ -147,8 +164,11 @@ fn node_id(core: &AppCore, target: &ActionTarget) -> Result<String> {
         }
         ActionKind::Session => return Err(bad_request()),
     };
-    node.map(|node| node.id)
-        .ok_or(Failure(ErrorCode::NotFound, "No sidebar item has that id."))
+    node.map(|node| node.id).ok_or(Failure(
+        ErrorCode::NotFound,
+        "No sidebar item has that id.",
+        None,
+    ))
 }
 fn project_node(core: &AppCore, project: Option<String>) -> Result<Option<String>> {
     project
@@ -250,6 +270,7 @@ fn usable_folder(path: &str) -> Result<()> {
         Failure(
             ErrorCode::BadRequest,
             "Choose an accessible folder on the host.",
+            None,
         )
     })
 }
@@ -349,6 +370,7 @@ impl DaemonCore {
                     return Err(Failure(
                         ErrorCode::Failed,
                         "That role handle is already in use. Choose another handle in the catalog.",
+                        None,
                     ));
                 }
                 let role = ops::role::role_create(
@@ -550,7 +572,28 @@ impl DaemonCore {
                 core.events.emit("slot/changed", &());
                 Ok(Value::Null)
             }
+            RuntimeTaskStart { runtime, .. } => {
+                let runtime = agent(&runtime)?;
+                serde_json::to_value(
+                    ops::runtime_tasks::start(core, runtime).map_err(launch_failed)?,
+                )
+                .map_err(failed)
+            }
+            RuntimeTask { runtime, .. } => {
+                let runtime = agent(&runtime)?;
+                serde_json::to_value(
+                    ops::runtime_tasks::list(core)
+                        .into_iter()
+                        .find(|task| task.runtime == runtime),
+                )
+                .map_err(failed)
+            }
             Catalog { .. } => serde_json::to_value(catalog(core)?).map_err(failed),
+            Usage { popover, .. } => {
+                core.usage
+                    .request_refresh(core.clone(), usage_refresh_reason(popover));
+                serde_json::to_value(usage(core)?).map_err(failed)
+            }
             Folders { path, .. } => serde_json::to_value(folders(path)?).map_err(failed),
             StartChat {
                 role,
@@ -599,7 +642,7 @@ impl DaemonCore {
                     .map(|out| out.session),
                     (None, None) => return Err(bad_request()),
                 }
-                .map_err(failed)?;
+                .map_err(launch_failed)?;
                 Ok(session_result(session))
             }
             StartShell {
@@ -618,18 +661,18 @@ impl DaemonCore {
                     Some(rows),
                 )
                 .map(session_result)
-                .map_err(failed)
+                .map_err(launch_failed)
             }
             Stop { session, .. } => ops::session::session_stop(core, &session)
                 .map(|_| Value::Null)
-                .map_err(failed),
+                .map_err(launch_failed),
             MarkViewed { session, .. } => {
-                ops::node::mark_direct_sessions_viewed(core, &[session]).map_err(failed)?;
+                ops::node::mark_direct_sessions_viewed(core, &[session]).map_err(launch_failed)?;
                 Ok(Value::Null)
             }
             Close { session, .. } => ops::session::session_close(core, &session)
                 .map(|_| Value::Null)
-                .map_err(failed),
+                .map_err(launch_failed),
             Resume {
                 session,
                 cols,
@@ -637,7 +680,7 @@ impl DaemonCore {
                 ..
             } => ops::session::session_resume(core, &session, Some(cols), Some(rows))
                 .map(session_result)
-                .map_err(failed),
+                .map_err(launch_failed),
             Restart {
                 session,
                 cols,
@@ -645,7 +688,7 @@ impl DaemonCore {
                 ..
             } => ops::session::session_restart(core, &session, Some(cols), Some(rows))
                 .map(session_result)
-                .map_err(failed),
+                .map_err(launch_failed),
             Fork {
                 session,
                 title,
@@ -654,7 +697,7 @@ impl DaemonCore {
                 ..
             } => ops::session::session_fork(core, &session, title, Some(cols), Some(rows))
                 .map(session_result)
-                .map_err(failed),
+                .map_err(launch_failed),
             Rename { target, name, .. } => {
                 match target.kind {
                     ActionKind::Session => {
@@ -678,10 +721,22 @@ impl DaemonCore {
                 }
                 Ok(Value::Null)
             }
-            Archive { target, .. } => {
+            Archive {
+                target,
+                with_missions,
+                ..
+            } => {
                 match target.kind {
                     ActionKind::Session => {
-                        ops::session::session_archive_direct(core, &target.id).map_err(failed)?
+                        let archived = ops::session::session_archive_direct_with_missions(
+                            core,
+                            &target.id,
+                            with_missions,
+                        )
+                        .map_err(failed)?;
+                        if with_missions {
+                            return Ok(json!({"archivedMissions": archived}));
+                        }
                     }
                     ActionKind::Tab => ops::node::node_tab_delete(core, &node_id(core, &target)?)
                         .map_err(failed)?,
@@ -710,6 +765,7 @@ impl DaemonCore {
                             return Err(Failure(
                                 ErrorCode::BadRequest,
                                 "Chat tabs have no terminal drawer; add a shell pane instead.",
+                                None,
                             ));
                         }
                         let mut slots = vec![];
@@ -789,6 +845,7 @@ impl DaemonCore {
                         Failure(
                             ErrorCode::Failed,
                             "The project has running chats or missions.",
+                            None,
                         )
                     } else {
                         failed(error)
@@ -822,13 +879,13 @@ impl DaemonCore {
                     },
                     Some((cols, rows)),
                 ))
-                .map_err(failed)?;
+                .map_err(launch_failed)?;
                 mission_changed(core, None);
                 Ok(json!({"mission":output.mission.id}))
             }
             StopMission { mission, .. } => {
                 crate::daemon::block_on(ops::mission::mission_stop_impl(core, mission))
-                    .map_err(failed)?;
+                    .map_err(launch_failed)?;
                 mission_changed(core, None);
                 Ok(Value::Null)
             }
@@ -840,12 +897,92 @@ impl DaemonCore {
             } => {
                 let output =
                     ops::mission::mission_resume_with_size(core, &mission, Some((cols, rows)))
-                        .map_err(failed)?;
+                        .map_err(launch_failed)?;
                 mission_changed(core, None);
                 Ok(json!({"mission":output.mission_id,"sessions":output.resumed_session_ids}))
             }
+            LinkMission {
+                mission, session, ..
+            } => {
+                let mission = ops::mission::link::mission_link(
+                    core,
+                    p::MissionLinkInput {
+                        mission_id: mission,
+                        session_id: session,
+                        no_report: false,
+                        caller_session_id: None,
+                    },
+                )
+                .map_err(failed)?;
+                mission_changed(core, Some(&mission.id));
+                Ok(Value::Null)
+            }
+            UnlinkMission { mission, .. } => {
+                let mission = ops::mission::link::mission_unlink(core, &mission).map_err(failed)?;
+                mission_changed(core, Some(&mission.id));
+                Ok(Value::Null)
+            }
         }
     }
+}
+
+fn usage_refresh_reason(popover: bool) -> p::usage::RefreshReason {
+    if popover {
+        p::usage::RefreshReason::Open
+    } else {
+        p::usage::RefreshReason::Schedule
+    }
+}
+
+fn usage(core: &AppCore) -> Result<runner_core::companion::Usage> {
+    let snapshot = core.usage.snapshot();
+    let enabled = core.usage.enabled();
+    let statuses = crate::runtime_status::status_list(
+        &core.db,
+        &core.runtime_shell_env,
+        &core.runtime_discovery,
+    )
+    .map_err(failed)?;
+    let agents: Vec<_> = statuses
+        .runtimes
+        .into_iter()
+        .filter(|status| {
+            enabled.contains(&status.name)
+                && crate::runtimes::adapter(status.name).usage().is_some()
+                && matches!(
+                    status.effective_source,
+                    Some(
+                        crate::runtime_status::RuntimeCommandSource::Detected
+                            | crate::runtime_status::RuntimeCommandSource::Override
+                    )
+                )
+        })
+        .map(|status| UsageAgent {
+            name: status.name.key().into(),
+            value: snapshot.get(status.name).cloned().map(Into::into),
+            error: snapshot.error(status.name).map(Into::into),
+        })
+        .collect();
+    let active_claude_account = agents
+        .iter()
+        .any(|agent| agent.name == "claude-code")
+        .then(|| {
+            let accounts = crate::claude_accounts::load(&core.db).ok()?;
+            if accounts.accounts.len() <= 1 {
+                return None;
+            }
+            accounts
+                .accounts
+                .into_iter()
+                .find(|account| account.id == accounts.active_id)
+                .map(|account| account.name)
+        })
+        .flatten();
+    Ok(runner_core::companion::Usage {
+        agents,
+        refreshing: snapshot.refreshing,
+        active_claude_account,
+    })
 }
 
 fn folders(path: Option<String>) -> Result<FolderPage> {
@@ -857,12 +994,14 @@ fn folders(path: Option<String>) -> Result<FolderPage> {
         Failure(
             ErrorCode::BadRequest,
             "Choose an accessible folder on the host.",
+            None,
         )
     })?;
     let entries = std::fs::read_dir(&path).map_err(|_| {
         Failure(
             ErrorCode::BadRequest,
             "Choose an accessible folder on the host.",
+            None,
         )
     })?;
     let mut folders = vec![];
@@ -912,6 +1051,10 @@ fn catalog(core: &AppCore) -> Result<Catalog> {
         .map_err(failed)?
         .into_iter()
         .map(|runtime| CatalogRuntime {
+            installed_version: runtime.installed_version,
+            available_version: runtime.available_version,
+            min_version: runtime.min_version,
+            below_minimum: runtime.below_minimum,
             name: runtime.name.key().into(),
             label: runtime.display_name,
             available: runtime.available,
@@ -989,6 +1132,160 @@ fn catalog(core: &AppCore) -> Result<Catalog> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn usage_projects_only_enabled_installed_agents_and_the_active_account_name() {
+        use crate::model::Runtime;
+        use crate::usage::{AgentUsage, UsageWindow};
+        let mut core = crate::test_support::test_core();
+        core.usage = std::sync::Arc::new(crate::usage::UsageService::without_fetch());
+        let core = std::sync::Arc::new(core);
+        let executable = std::env::current_exe().unwrap();
+        crate::db::set_runtime_override(&core.db, "codex", executable.to_str()).unwrap();
+        crate::db::set_runtime_override(&core.db, "claude-code", executable.to_str()).unwrap();
+        core.runtime_shell_env.write().unwrap().path = Some(String::new());
+        core.usage.set_enabled(vec![Runtime::Codex, Runtime::Pi]);
+        let value = AgentUsage {
+            credits: Some(p::UsageCredits {
+                balance: Some("1250.75".into()),
+                has_credits: true,
+                unlimited: false,
+            }),
+            windows: vec![UsageWindow {
+                name: "Week".into(),
+                used_percent: 41.,
+                resets_at: None,
+            }],
+            updated_at: chrono::Utc::now(),
+        };
+        crate::db::set_usage_lkg(
+            &core.db,
+            &crate::db::UsageLkg {
+                runtimes: [
+                    (Runtime::Codex, value.clone()),
+                    (Runtime::ClaudeCode, value.clone()),
+                ]
+                .into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        core.usage.restore(&core.db);
+        core.usage.set_polling_enabled(false);
+        let daemon = DaemonCore(std::sync::Arc::downgrade(&core));
+        let request = || ActionRequest::Usage {
+            id: 1,
+            popover: false,
+        };
+        let result: runner_core::companion::Usage =
+            serde_json::from_value(daemon.action(request()).unwrap()).unwrap();
+        assert_eq!(result.agents.len(), 1);
+        assert_eq!(result.agents[0].name, "codex");
+        assert_eq!(result.agents[0].value, Some(value.into()));
+        assert_eq!(result.active_claude_account, None);
+        crate::db::app_state_set(&core.db.get().unwrap(), "claude_accounts", &json!({"accounts":[{"id":"native","name":"Personal","folder":"private-folder-canary","native":true},{"id":"work","name":"Work","folder":"private-folder-canary","native":false}],"main_id":"native","active_id":"work"}).to_string()).unwrap();
+        assert_eq!(
+            daemon.action(request()).unwrap()["activeClaudeAccount"],
+            Value::Null
+        );
+        core.usage
+            .set_enabled(vec![Runtime::Codex, Runtime::ClaudeCode]);
+        let result = daemon.action(request()).unwrap();
+        assert_eq!(result["activeClaudeAccount"], "Work");
+        let encoded = result.to_string();
+        for private in [
+            "folder",
+            "private-folder-canary",
+            "command",
+            "path",
+            "main_id",
+            "work",
+        ] {
+            assert!(!encoded.contains(private), "{private}");
+        }
+        crate::db::app_state_set(
+            &core.db.get().unwrap(),
+            "claude_accounts",
+            "unreadable-json",
+        )
+        .unwrap();
+        let result = daemon.action(request()).unwrap();
+        assert_eq!(result["activeClaudeAccount"], Value::Null);
+        assert_eq!(
+            result["agents"][0]["value"]["windows"][0]["usedPercent"],
+            41.
+        );
+        assert_eq!(
+            usage_refresh_reason(false),
+            p::usage::RefreshReason::Schedule
+        );
+        assert_eq!(usage_refresh_reason(true), p::usage::RefreshReason::Open);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_updates_join_one_daemon_task_and_only_its_unlisted_terminal_is_attachable() {
+        use crate::companion::core::Core;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("codex");
+        std::fs::write(&executable, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.166.0'; exit; fi\nread answer\necho done\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut core = crate::test_support::test_core_in(dir.path().into());
+        core.sessions = crate::session::SessionManager::new(
+            core.runtime_shell_env.clone(),
+            core.runtime_discovery.clone(),
+            Arc::new(crate::session::pty_runtime::PtyRuntime::new()),
+        );
+        crate::db::set_runtime_override(&core.db, "codex", executable.to_str()).unwrap();
+        let core = Arc::new(core);
+        let daemon = Arc::new(DaemonCore(Arc::downgrade(&core)));
+        let start = || ActionRequest::RuntimeTaskStart {
+            id: 1,
+            runtime: "codex".into(),
+        };
+        let first = daemon.action(start()).unwrap();
+        let joined = daemon.action(start()).unwrap();
+        assert_eq!(first["id"], joined["id"]);
+        let id = first["id"].as_str().unwrap();
+        let query = ActionRequest::RuntimeTask {
+            id: 2,
+            runtime: "codex".into(),
+        };
+        assert_eq!(daemon.action(query).unwrap()["id"], id);
+        assert!(repo::session::get_row(&core.db.get().unwrap(), id)
+            .unwrap()
+            .is_none());
+        assert!(daemon.clone().attach(id, 100, 1).is_ok());
+        let events: Arc<dyn crate::session::manager::SessionEvents> =
+            Arc::new(core.session_events());
+        core.sessions
+            .prepare_unlisted_terminal("other-unlisted", (80, 24), &core.db, &events)
+            .unwrap();
+        assert!(daemon.clone().attach("other-unlisted", 100, 1).is_err());
+        core.sessions.discard_unlisted_terminal("other-unlisted");
+        core.sessions.desktop_input(id, b"done\r").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let task = ops::runtime_tasks::list(&core).pop().unwrap();
+            if task.state == p::RuntimeUpdateState::Succeeded {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "update never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            daemon.clone().attach(id, 100, 2).is_ok(),
+            "retained output after exit"
+        );
+        ops::runtime_tasks::dismiss(&core, id).unwrap();
+        assert!(daemon.clone().attach(id, 100, 3).is_err());
+        core.sessions.drain_terminal_workers();
+    }
+
     #[test]
     fn chat_drawer_layout_requests_fail_without_mutation() {
         let core = std::sync::Arc::new(crate::test_support::test_core());

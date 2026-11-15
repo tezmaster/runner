@@ -42,7 +42,10 @@ pub const FEATURES: &[&str] = &[
     "updateSlot",
     "removeSlot",
     "reorderSlots",
+    "runtimeTaskStart",
+    "runtimeTask",
     "catalog",
+    "usage",
     "folders",
     "startChat",
     "startShell",
@@ -63,11 +66,14 @@ pub const FEATURES: &[&str] = &[
     "startMission",
     "stopMission",
     "resumeMission",
+    "linkMission",
+    "unlinkMission",
     "attach",
     "input",
     "takeControl",
     "viewport",
     "detach",
+    "ping",
 ];
 
 pub fn classify_input(bytes: &[u8]) -> InputEvent {
@@ -105,7 +111,11 @@ async fn blocking<T: Send + 'static>(
 ) -> core::Result<T> {
     tokio::task::spawn_blocking(move || f(core))
         .await
-        .unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.")))
+        .unwrap_or(Err(Failure(
+            ErrorCode::Failed,
+            "The host worker failed.",
+            None,
+        )))
 }
 
 // One redraw can arrive as several PTY reads. Output following a send waits this long, so that
@@ -385,6 +395,11 @@ struct OverviewSnapshot {
     statuses: BTreeMap<String, SessionStatus>,
     status_revision: u64,
 }
+struct PendingOverview {
+    overview: Overview,
+    waiters: Vec<u64>,
+    broadcast: bool,
+}
 enum FeedJob {
     Request(ClientMessage),
     Unfollow {
@@ -392,6 +407,11 @@ enum FeedJob {
         ids: Vec<u64>,
         reserved: usize,
     },
+}
+struct FeedRead {
+    mission: String,
+    discard: bool,
+    work: tokio::task::JoinHandle<core::Result<feed::Updates>>,
 }
 struct FeedWork {
     ids: Vec<u64>,
@@ -408,11 +428,14 @@ pub struct Adapter {
     events: broadcast::Receiver<AppEvent>,
     ready: Arc<Notify>,
     streams: VecDeque<Stream>,
+    pong: Option<u64>,
     priority: VecDeque<PendingMessage>,
     queued: usize,
     in_flight: usize,
     statuses: BTreeMap<String, SessionStatus>,
     feeds: BTreeMap<String, FeedSubscription>,
+    feed_read: Option<FeedRead>,
+    feed_ready: Option<(String, Vec<u8>)>,
     last_feed: Option<String>,
     feed_turn: bool,
     output_due: Option<Instant>,
@@ -423,9 +446,12 @@ pub struct Adapter {
     overview_next: Vec<u64>,
     overview_replies: VecDeque<(u64, Arc<serde_json::Value>)>,
     overview_broadcast: bool,
+    overview_hash: Option<u64>,
+    pending_overview: Option<PendingOverview>,
     status_work: Option<tokio::task::JoinHandle<core::Result<BTreeMap<String, SessionStatus>>>>,
     status_dirty: bool,
     status_revision: u64,
+    statuses_revision: u64,
     status_started_revision: u64,
     status_epoch: Arc<AtomicU64>,
     requests: VecDeque<FeedJob>,
@@ -453,11 +479,14 @@ impl Adapter {
             events,
             ready: Arc::new(Notify::new()),
             streams: VecDeque::new(),
+            pong: None,
             priority: VecDeque::new(),
             queued: 0,
             in_flight: 0,
             statuses: BTreeMap::new(),
             feeds: BTreeMap::new(),
+            feed_read: None,
+            feed_ready: None,
             last_feed: None,
             feed_turn: true,
             output_due: None,
@@ -468,9 +497,12 @@ impl Adapter {
             overview_next: Vec::new(),
             overview_replies: VecDeque::new(),
             overview_broadcast: false,
+            overview_hash: None,
+            pending_overview: None,
             status_work: None,
             status_dirty: false,
             status_revision: 0,
+            statuses_revision: 0,
             status_started_revision: 0,
             status_epoch: Default::default(),
             requests: VecDeque::new(),
@@ -556,8 +588,8 @@ impl Adapter {
             let core = self.core.clone();
             let status_epoch = self.status_epoch.clone();
             self.overview_work = Some(tokio::task::spawn_blocking(move || {
-                let overview = core.overview()?;
                 let status_revision = status_epoch.load(Ordering::Acquire);
+                let overview = core.overview()?;
                 let statuses = core.statuses()?;
                 Ok(OverviewSnapshot {
                     overview,
@@ -624,7 +656,7 @@ impl Adapter {
         let pending = self.request_work.as_ref().is_some_and(|work| work.follow.as_ref() == Some(&request.mission))
             || self.requests.iter().any(|job| matches!(job, FeedJob::Request(ClientMessage::Follow(follow)) if follow.mission == request.mission));
         if !pending {
-            self.feeds.remove(&request.mission);
+            self.drop_feed(&request.mission);
             return self.reply(request.id, Ok(serde_json::Value::Null));
         }
         let reserved = serde_json::to_vec(&HostMessage::Result(ResultMessage {
@@ -685,9 +717,86 @@ impl Adapter {
             }
         }
         self.statuses = statuses;
+        self.bump_status_revision();
+        self.statuses_revision = self.status_revision;
+        Ok(())
+    }
+    fn bump_status_revision(&mut self) {
         self.status_revision += 1;
         self.status_epoch
             .store(self.status_revision, Ordering::Release);
+    }
+    fn mark_status_dirty(&mut self) {
+        self.status_dirty = true;
+        self.bump_status_revision();
+    }
+    fn handle_event(&mut self, event: crate::events::AppEvent) {
+        if event.name == "session/clipboard" {
+            self.clipboard(&event.payload);
+        } else if relevant(event.name) {
+            if matches!(event.name, "session/exit" | "session/archived") {
+                if let Some(session) = event.payload.get("session_id").and_then(|id| id.as_str()) {
+                    if let Some(stream) =
+                        self.streams.iter().find(|stream| stream.session == session)
+                    {
+                        (stream.cancel)();
+                    }
+                }
+            }
+            if self.overview_due.is_none() {
+                self.overview_due = Some(
+                    self.last_overview
+                        .map(|last| last + Duration::from_millis(250))
+                        .unwrap_or_else(Instant::now),
+                );
+            }
+            if event.name == "event/appended" {
+                self.feed_changes();
+            }
+            self.mark_status_dirty();
+            self.start_statuses();
+        }
+    }
+    fn handle_lagged(&mut self) {
+        self.feed_changes();
+        self.overview_due = Some(Instant::now());
+        self.mark_status_dirty();
+        self.start_statuses();
+    }
+    fn drain_events(&mut self) -> Result<(), &'static str> {
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => self.handle_event(event),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => self.handle_lagged(),
+                Err(broadcast::error::TryRecvError::Closed) => return Err("core stopped"),
+                Err(broadcast::error::TryRecvError::Empty) => return Ok(()),
+            }
+        }
+    }
+    fn finish_overview(
+        &mut self,
+        mut overview: Overview,
+        waiters: Vec<u64>,
+        broadcast: bool,
+    ) -> Result<(), &'static str> {
+        for (id, session) in &mut overview.sessions {
+            if let Some(status) = self.statuses.get(id) {
+                session.status = status.clone();
+            }
+        }
+        if !waiters.is_empty() {
+            let value =
+                Arc::new(serde_json::to_value(&overview).map_err(|_| "companion encoding failed")?);
+            self.overview_replies
+                .extend(waiters.into_iter().map(|id| (id, value.clone())));
+        }
+        if broadcast {
+            let hash = overview_hash(&overview)?;
+            if self.overview_hash != Some(hash) {
+                self.push(HostMessage::Overview(overview))?;
+                self.overview_hash = Some(hash);
+            }
+        }
         Ok(())
     }
     pub async fn request(&mut self, message: ClientMessage) -> Result<(), &'static str> {
@@ -699,7 +808,11 @@ impl Adapter {
                 {
                     return self.reply(
                         request.id(),
-                        Err(Failure(ErrorCode::Failed, "Too many actions are pending.")),
+                        Err(Failure(
+                            ErrorCode::Failed,
+                            "Too many actions are pending.",
+                            None,
+                        )),
                     );
                 }
                 if matches!(request, ActionRequest::Fork { .. }) {
@@ -708,7 +821,11 @@ impl Adapter {
                         let id = request.id();
                         let result = tokio::task::spawn_blocking(move || core.action(request))
                             .await
-                            .unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.")));
+                            .unwrap_or(Err(Failure(
+                                ErrorCode::Failed,
+                                "The host worker failed.",
+                                None,
+                            )));
                         (id, result)
                     });
                 } else {
@@ -718,6 +835,12 @@ impl Adapter {
                 return Ok(());
             }
             ClientMessage::Unfollow(request) => return self.unfollow(request),
+            // Only the newest ping is kept and it counts against no queue, so a ping can neither
+            // wait behind host work nor fail the channel.
+            ClientMessage::Ping(request) => {
+                self.pong = Some(request.id);
+                return Ok(());
+            }
             ClientMessage::Overview(request) => {
                 if self.overview_waiters.len()
                     + self.overview_next.len()
@@ -729,6 +852,7 @@ impl Adapter {
                         Err(Failure(
                             ErrorCode::Failed,
                             "Too many overview requests are pending.",
+                            None,
                         )),
                     );
                 }
@@ -745,7 +869,11 @@ impl Adapter {
                 if self.feed_outstanding >= 8 {
                     return self.reply(
                         message.id().unwrap(),
-                        Err(Failure(ErrorCode::Failed, "Too many requests are pending.")),
+                        Err(Failure(
+                            ErrorCode::Failed,
+                            "Too many requests are pending.",
+                            None,
+                        )),
                     );
                 }
                 self.feed_outstanding += 1;
@@ -761,6 +889,7 @@ impl Adapter {
         let result: core::Result<serde_json::Value> = match message {
             ClientMessage::TakeControl(_)
             | ClientMessage::Viewport(_)
+            | ClientMessage::Ping(_)
             | ClientMessage::Action(_)
             | ClientMessage::Feed(_)
             | ClientMessage::Follow(_)
@@ -800,6 +929,7 @@ impl Adapter {
                     Ok((stream, _lease)) => {
                         self.remove(&request.session, false);
                         self.streams.push_back(stream);
+                        self.drain_events()?;
                         Ok(serde_json::Value::Null)
                     }
                     Err(error) => Err(error),
@@ -811,14 +941,19 @@ impl Adapter {
                     Err(Failure(
                         ErrorCode::BadRequest,
                         "Attach the terminal before sending input.",
+                        None,
                     ))
                 } else {
                     let channel = self.channel;
-                    blocking(self.core.clone(), move |core| {
+                    let result = blocking(self.core.clone(), move |core| {
                         core.input(&request.session, channel, &request.data.0)
                     })
                     .await
-                    .map(|_| serde_json::Value::Null)
+                    .map(|_| serde_json::Value::Null);
+                    if result.is_ok() {
+                        self.drain_events()?;
+                    }
+                    result
                 }
             }
             ClientMessage::Detach(request) => {
@@ -843,6 +978,7 @@ impl Adapter {
                 Err(Failure(
                     ErrorCode::UnknownRequest,
                     "The host does not serve that request.",
+                    None,
                 ))
             }
         };
@@ -855,10 +991,13 @@ impl Adapter {
     ) -> Result<(), &'static str> {
         self.push(match result {
             Ok(result) => HostMessage::Result(ResultMessage { id, result }),
-            Err(Failure(code, message)) => HostMessage::Error(ErrorMessage {
+            Err(Failure(code, message, version_gate)) => HostMessage::Error(ErrorMessage {
+                version_gate: version_gate.clone(),
                 id: Some(id),
                 code,
-                message: message.into(),
+                message: version_gate
+                    .as_ref()
+                    .map_or_else(|| message.into(), ToString::to_string),
                 versions: None,
             }),
         })
@@ -893,22 +1032,42 @@ impl Adapter {
             Err(Failure(
                 ErrorCode::BadRequest,
                 "Attach the terminal before changing its viewport.",
+                None,
             ))
         };
+        if result.is_ok() {
+            self.drain_events()?;
+        }
         self.push(match result {
             Ok(()) => HostMessage::Result(ResultMessage {
                 id,
                 result: serde_json::Value::Null,
             }),
-            Err(Failure(code, message)) => HostMessage::Error(ErrorMessage {
+            Err(Failure(code, message, version_gate)) => HostMessage::Error(ErrorMessage {
+                version_gate: version_gate.clone(),
                 id: Some(id),
                 code,
-                message: message.into(),
+                message: version_gate
+                    .as_ref()
+                    .map_or_else(|| message.into(), ToString::to_string),
                 versions: None,
             }),
         })
     }
+    #[cfg(test)]
     pub async fn next(&mut self, terminal_credit: bool) -> Result<Option<Vec<u8>>, &'static str> {
+        self.next_paced(terminal_credit, false).await
+    }
+    pub async fn next_paced(
+        &mut self,
+        terminal_credit: bool,
+        paced: bool,
+    ) -> Result<Option<Vec<u8>>, &'static str> {
+        if let Some(id) = self.pong.take() {
+            return serde_json::to_vec(&HostMessage::Pong(Pong { id }))
+                .map(Some)
+                .map_err(|_| "companion encoding failed");
+        }
         if let Some(message) = self.priority.pop_front() {
             self.queued -= message.bytes.len();
             return Ok(Some(message.bytes));
@@ -924,11 +1083,14 @@ impl Adapter {
         if !terminal_credit {
             return Ok(None);
         }
-        if self.feed_turn {
-            if let Some(bytes) = self.next_feed().await? {
+        if self.feed_turn || paced {
+            if let Some(bytes) = self.next_feed() {
                 self.feed_turn = false;
                 return Ok(Some(bytes));
             }
+        }
+        if paced {
+            return Ok(None);
         }
         for _ in 0..self.streams.len() {
             let mut stream = self.streams.pop_front().unwrap();
@@ -936,7 +1098,7 @@ impl Adapter {
                 let q = stream.queue.lock().unwrap();
                 (q.resync, q.ended && q.frames.is_empty())
             };
-            if resync {
+            if resync && stream.snapshot.is_none() && stream.initial_size.is_none() {
                 let resync = stream.resync.clone();
                 let attachment = blocking(self.core.clone(), move |_| resync()).await;
                 match attachment {
@@ -998,7 +1160,7 @@ impl Adapter {
         }
         self.output_due = self.streams.iter().filter_map(Stream::output_due).min();
         self.feed_turn = true;
-        self.next_feed().await
+        Ok(self.next_feed())
     }
     fn feed_changes(&mut self) {
         if self.feeds.is_empty() {
@@ -1009,53 +1171,108 @@ impl Adapter {
         }
         self.ready.notify_one();
     }
-    async fn next_feed(&mut self) -> Result<Option<Vec<u8>>, &'static str> {
-        if self.queued + self.in_flight + self.cleanup_bytes + feed::MAX_BATCH_BYTES
-            > MAX_MESSAGE_SIZE
+    fn drop_feed(&mut self, mission: &str) {
+        self.feeds.remove(mission);
+        // The read still counts as the one running, but a later follow of this mission is a new
+        // subscription that its result must not touch.
+        if let Some(read) = self
+            .feed_read
+            .as_mut()
+            .filter(|read| read.mission == mission)
         {
-            return Ok(None);
+            read.discard = true;
         }
-        let next = self
+        if self
+            .feed_ready
+            .as_ref()
+            .is_some_and(|(ready, _)| ready == mission)
+        {
+            self.feed_ready = None;
+        }
+    }
+    /// Reads run beside the channel loop, so a slow mission log holds up none of its other
+    /// messages. One read runs at a time and a finished batch waits here until sent, so at most
+    /// one extra batch is held.
+    fn next_feed(&mut self) -> Option<Vec<u8>> {
+        if let Some((_, bytes)) = self.feed_ready.take() {
+            return Some(bytes);
+        }
+        if self.feed_read.is_some()
+            || self.queued + self.in_flight + self.cleanup_bytes + feed::MAX_BATCH_BYTES
+                > MAX_MESSAGE_SIZE
+        {
+            return None;
+        }
+        let (mission, cursor) = self
             .feeds
             .iter()
             .find(|(id, feed)| feed.dirty && self.last_feed.as_ref().is_none_or(|last| *id > last))
             .or_else(|| self.feeds.iter().find(|(_, feed)| feed.dirty))
-            .map(|(id, feed)| (id.clone(), feed.cursor));
-        let Some((mission, cursor)) = next else {
-            return Ok(None);
-        };
+            .map(|(id, feed)| (id.clone(), feed.cursor))?;
+        // An append while this read runs marks the feed dirty again and earns another read.
+        self.feeds.get_mut(&mission).unwrap().dirty = false;
         self.last_feed = Some(mission.clone());
+        let core = self.core.clone();
         let id = mission.clone();
-        let message =
-            match blocking(self.core.clone(), move |core| core.feed_since(&id, cursor)).await {
-                Ok(updates) => {
-                    self.feeds.insert(
-                        mission.clone(),
-                        FeedSubscription {
-                            cursor: updates.cursor,
-                            dirty: updates.more,
-                        },
-                    );
-                    if updates.entries.is_empty() {
-                        Ok(None)
-                    } else {
-                        serde_json::to_vec(&HostMessage::FeedAppended(FeedAppended {
-                            mission,
-                            entries: updates.entries,
-                        }))
-                        .map(Some)
-                        .map_err(|_| "companion encoding failed")
-                    }
-                }
-                Err(_) => {
-                    self.feeds.remove(&mission);
-                    Ok(None)
-                }
-            };
-        if self.feeds.values().any(|feed| feed.dirty) {
-            self.ready.notify_one();
+        self.feed_read = Some(FeedRead {
+            mission,
+            discard: false,
+            work: tokio::task::spawn_blocking(move || core.feed_since(&id, cursor)),
+        });
+        None
+    }
+    fn finish_feed_read(
+        &mut self,
+        read: FeedRead,
+        result: core::Result<feed::Updates>,
+    ) -> Result<(), &'static str> {
+        if read.discard {
+            return Ok(());
         }
-        message
+        let Some(subscription) = self.feeds.get_mut(&read.mission) else {
+            return Ok(());
+        };
+        let Ok(updates) = result else {
+            self.feeds.remove(&read.mission);
+            return Ok(());
+        };
+        subscription.cursor = updates.cursor;
+        subscription.dirty |= updates.more;
+        if !updates.entries.is_empty() {
+            let bytes = serde_json::to_vec(&HostMessage::FeedAppended(FeedAppended {
+                mission: read.mission.clone(),
+                entries: updates.entries,
+            }))
+            .map_err(|_| "companion encoding failed")?;
+            self.feed_ready = Some((read.mission, bytes));
+        }
+        Ok(())
+    }
+    fn finish_status_work(
+        &mut self,
+        result: Result<core::Result<BTreeMap<String, SessionStatus>>, tokio::task::JoinError>,
+    ) -> Result<(), &'static str> {
+        // Capture the worker's revision and drain pending events before clearing `status_work` so an
+        // attention-change event cannot start a replacement worker and overwrite `status_started_revision`.
+        let started_revision = self.status_started_revision;
+        self.drain_events()?;
+        self.status_work = None;
+        if started_revision == self.status_revision {
+            self.status_changes(
+                result
+                    .map_err(|_| "core unavailable")?
+                    .map_err(|_| "core unavailable")?,
+            )?;
+            if !self.status_dirty {
+                if let Some(pending) = self.pending_overview.take() {
+                    self.finish_overview(pending.overview, pending.waiters, pending.broadcast)?;
+                }
+            }
+        } else {
+            self.status_dirty = true;
+        }
+        self.start_statuses();
+        Ok(())
     }
     pub async fn changed(&mut self) -> Result<(), &'static str> {
         let due = self.overview_due;
@@ -1065,44 +1282,47 @@ impl Adapter {
             _ = self.ready.notified() => {},
             event = self.events.recv() => {
                 match event {
-                    Ok(event) if event.name == "session/clipboard" => self.clipboard(&event.payload),
-                    Ok(event) if relevant(event.name) => {
-                        if matches!(event.name, "session/exit" | "session/archived") {
-                            if let Some(session) = event.payload.get("session_id").and_then(|id| id.as_str()) {
-                                if let Some(stream) = self.streams.iter().find(|stream| stream.session == session) {
-                                    (stream.cancel)();
-                                }
-                            }
-                        }
-                        if self.overview_due.is_none() { self.overview_due = Some(self.last_overview.map(|last| last + Duration::from_millis(250)).unwrap_or_else(Instant::now)); }
-                        if event.name == "event/appended" { self.feed_changes(); }
-                        self.status_dirty = true; self.start_statuses();
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        self.feed_changes(); self.overview_due = Some(Instant::now());
-                        self.status_dirty = true; self.start_statuses();
-                    }
+                    Ok(event) => self.handle_event(event),
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.handle_lagged(),
                     Err(broadcast::error::RecvError::Closed) => return Err("core stopped"),
-                    _ => {}
                 }
             }
             result = async { match &mut self.overview_work { Some(work) => work.await, None => std::future::pending().await } } => {
                 self.overview_work = None;
                 let waiters = std::mem::take(&mut self.overview_waiters);
                 let broadcast = std::mem::take(&mut self.overview_broadcast);
-                match result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed."))) {
-                    Ok(OverviewSnapshot { mut overview, statuses, status_revision }) => {
-                        if self.status_revision == status_revision { self.status_changes(statuses)?; }
-                        for (id, session) in &mut overview.sessions { if let Some(status) = self.statuses.get(id) { session.status = status.clone(); } }
-                        if !waiters.is_empty() {
-                            let value = Arc::new(serde_json::to_value(&overview).map_err(|_| "companion encoding failed")?);
-                            self.overview_replies.extend(waiters.into_iter().map(|id| (id, value.clone())));
+                match result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.", None))) {
+                    Ok(OverviewSnapshot { overview, statuses, status_revision }) => {
+                        self.drain_events()?;
+                        if self.status_revision == status_revision {
+                            self.status_changes(statuses)?;
+                            self.finish_overview(overview, waiters, broadcast)?;
+                        } else if !self.status_dirty
+                            && self.status_work.is_none()
+                            && self.statuses_revision == self.status_revision
+                        {
+                            self.finish_overview(overview, waiters, broadcast)?;
+                        } else {
+                            match &mut self.pending_overview {
+                                Some(pending) => {
+                                    pending.overview = overview;
+                                    pending.waiters.extend(waiters);
+                                    pending.broadcast |= broadcast;
+                                }
+                                None => {
+                                    self.pending_overview = Some(PendingOverview {
+                                        overview,
+                                        waiters,
+                                        broadcast,
+                                    });
+                                }
+                            }
+                            self.start_statuses();
                         }
-                        if broadcast { self.push(HostMessage::Overview(overview))?; }
                     }
-                    Err(Failure(code, message)) => {
+                    Err(Failure(code, message, version_gate)) => {
                         if waiters.is_empty() && self.overview_next.is_empty() { return Err("core unavailable"); }
-                        for id in waiters { self.reply(id, Err(Failure(code.clone(), message)))?; }
+                        for id in waiters { self.reply(id, Err(Failure(code.clone(), message, version_gate.clone())))?; }
                     }
                 }
                 self.last_overview = Some(Instant::now());
@@ -1113,17 +1333,13 @@ impl Adapter {
                 }
             }
             result = async { match &mut self.status_work { Some(work) => work.await, None => std::future::pending().await } } => {
-                self.status_work = None;
-                if self.status_started_revision == self.status_revision {
-                    self.status_changes(result.map_err(|_| "core unavailable")?.map_err(|_| "core unavailable")?)?;
-                } else { self.status_dirty = true; }
-                self.start_statuses();
+                self.finish_status_work(result)?;
             }
             result = async { match &mut self.request_work { Some(work) => (&mut work.work).await, None => std::future::pending().await } } => {
                 let work = self.request_work.take().unwrap();
                 if work.reserved == 0 { self.feed_outstanding -= 1; }
                 self.cleanup_bytes -= work.reserved;
-                let result = result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.")))
+                let result = result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.", None)))
                     .map(|reply| match reply {
                         RequestReply::Value(value) => value,
                         RequestReply::Follow(mission, cursor) => {
@@ -1131,18 +1347,23 @@ impl Adapter {
                             self.ready.notify_one();
                             serde_json::Value::Null
                         }
-                        RequestReply::Unfollow(mission) => { self.feeds.remove(&mission); serde_json::Value::Null }
+                        RequestReply::Unfollow(mission) => { self.drop_feed(&mission); serde_json::Value::Null }
                     });
                 for id in work.ids {
-                    let result = match &result { Ok(value) => Ok(value.clone()), Err(Failure(code, message)) => Err(Failure(code.clone(), message)) };
+                    let result = match &result { Ok(value) => Ok(value.clone()), Err(Failure(code, message, version_gate)) => Err(Failure(code.clone(), message, version_gate.clone())) };
                     self.reply(id, result)?;
                 }
                 self.start_request();
             }
+            result = async { match &mut self.feed_read { Some(read) => (&mut read.work).await, None => std::future::pending().await } } => {
+                let read = self.feed_read.take().unwrap();
+                self.finish_feed_read(read, result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.", None))))?;
+            }
             result = async { match &mut self.action_work { Some((id, work)) => (*id, work.await), None => std::future::pending().await } } => {
                 self.action_work = None;
                 let (id, result) = result;
-                self.reply(id, result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed."))))?;
+                self.drain_events()?;
+                self.reply(id, result.unwrap_or(Err(Failure(ErrorCode::Failed, "The host worker failed.", None))))?;
                 self.start_action();
             }
             result = self.forks.join_next(), if !self.forks.is_empty() => {
@@ -1161,6 +1382,25 @@ impl Adapter {
         Ok(())
     }
 }
+fn overview_hash(overview: &Overview) -> Result<u64, &'static str> {
+    use std::hash::{Hash, Hasher};
+    let mut value = serde_json::to_value(overview).map_err(|_| "companion encoding failed")?;
+    for (id, session) in &overview.sessions {
+        let status =
+            serde_json::to_value(&session.status).map_err(|_| "companion encoding failed")?;
+        if let Some(fields) = value["sessions"][id].as_object_mut() {
+            for key in status.as_object().unwrap().keys() {
+                fields.remove(key);
+            }
+        }
+    }
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(&value)
+        .map_err(|_| "companion encoding failed")?
+        .hash(&mut hash);
+    Ok(hash.finish())
+}
+
 fn relevant(name: &str) -> bool {
     [
         "session/",

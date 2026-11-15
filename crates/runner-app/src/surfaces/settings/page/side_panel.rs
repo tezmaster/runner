@@ -119,7 +119,7 @@ fn section_heading(label: &'static str, selector: &'static str) -> Div {
 }
 
 /// Names `element` for tests, recording its fill for the theme snapshots.
-fn snapshot(id: &'static str, element: Div) -> Div {
+pub(super) fn snapshot(id: &'static str, element: Div) -> Div {
     #[cfg(test)]
     let element = crate::theme_snapshot::record_fill(id, element);
     element.debug_selector(move || id.into())
@@ -749,7 +749,7 @@ mod tests {
         cx.update(|cx| {
             let options = files_font_options(None, cx);
             assert_eq!(options[0].value, "");
-            assert_eq!(options[1].value, crate::terminal_fonts::BUNDLED_FONT);
+            assert_eq!(options[1].value, crate::terminal::fonts::BUNDLED_FONT);
             let missing = TerminalFontFamily::new("Gone Mono");
             let options = files_font_options(Some(&missing), cx);
             assert!(options.iter().any(|option| option.value == "Gone Mono"));

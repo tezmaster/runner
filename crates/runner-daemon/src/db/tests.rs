@@ -19,11 +19,13 @@ fn fixture_pool_preserves_file_backing_schema_and_connection_guards() {
     let path = root.path().join("fixture.db");
     let pool = super::open_fixture_pool(&path).unwrap();
     assert_eq!(pool.max_size(), 8);
+    assert_eq!(pool.state().connections, 1);
     assert_eq!(
         pool.connection_timeout(),
         std::time::Duration::from_secs(30)
     );
     let connections = (0..8).map(|_| pool.get().unwrap()).collect::<Vec<_>>();
+    assert_eq!(pool.state().connections, 8);
     for conn in &connections {
         assert_eq!(
             conn.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
@@ -461,6 +463,7 @@ fn usage_lkg_round_trips_through_app_state() {
     use runner_core::protocol::usage::{AgentUsage, UsageWindow};
     let pool = open_in_memory().unwrap();
     let usage = |percent| AgentUsage {
+        credits: None,
         windows: vec![UsageWindow {
             name: "Week".into(),
             used_percent: percent,

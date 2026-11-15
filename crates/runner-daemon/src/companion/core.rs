@@ -10,8 +10,12 @@ use tokio::sync::broadcast;
 use crate::{events::AppEvent, repo, AppCore};
 
 pub type Result<T> = std::result::Result<T, Failure>;
-#[derive(Debug)]
-pub struct Failure(pub ErrorCode, pub &'static str);
+#[derive(Debug, Clone)]
+pub struct Failure(
+    pub ErrorCode,
+    pub &'static str,
+    pub Option<runner_core::protocol::RuntimeVersionGate>,
+);
 
 pub struct Attachment {
     pub terminal: TerminalAttachment,
@@ -23,36 +27,42 @@ pub trait Core: Send + Sync {
         Err(Failure(
             ErrorCode::UnknownRequest,
             "The host does not serve that request.",
+            None,
         ))
     }
     fn feed(&self, _: FeedRequest) -> Result<FeedPage> {
         Err(Failure(
             ErrorCode::UnknownRequest,
             "The host does not serve that request.",
+            None,
         ))
     }
     fn feed_cursor(&self, _: &str) -> Result<u64> {
         Err(Failure(
             ErrorCode::UnknownRequest,
             "The host does not serve that request.",
+            None,
         ))
     }
     fn feed_since(&self, _: &str, _: u64) -> Result<super::feed::Updates> {
         Err(Failure(
             ErrorCode::UnknownRequest,
             "The host does not serve that request.",
+            None,
         ))
     }
     fn answer(&self, _: AnswerRequest) -> Result<()> {
         Err(Failure(
             ErrorCode::UnknownRequest,
             "The host does not serve that request.",
+            None,
         ))
     }
     fn post(&self, _: PostRequest) -> Result<()> {
         Err(Failure(
             ErrorCode::UnknownRequest,
             "The host does not serve that request.",
+            None,
         ))
     }
     fn overview(&self) -> Result<Overview>;
@@ -84,19 +94,32 @@ impl DaemonCore {
     pub(super) fn core(&self) -> Result<std::sync::Arc<AppCore>> {
         self.0
             .upgrade()
-            .ok_or(Failure(ErrorCode::Failed, "The host has stopped."))
+            .ok_or(Failure(ErrorCode::Failed, "The host has stopped.", None))
     }
     fn terminal(&self, session: &str) -> Result<std::sync::Arc<AppCore>> {
         let core = self.core()?;
         let conn = core.db.get().map_err(failed)?;
         let row = repo::session::get_row(&conn, session).map_err(failed)?;
-        if row.is_none() {
-            return Err(Failure(ErrorCode::NotFound, "No session has that id."));
+        let update_task = core
+            .sessions
+            .runtime_updates
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|task| task.id == session);
+        if row.is_none() && !update_task {
+            return Err(Failure(
+                ErrorCode::NotFound,
+                "No session has that id.",
+                None,
+            ));
         }
-        if !core.sessions.session_live(session) {
+        if !core.sessions.session_live(session) && !update_task {
             return Err(Failure(
                 ErrorCode::NotRunning,
                 "The session has no live terminal.",
+                None,
             ));
         }
         drop(conn);
@@ -107,6 +130,7 @@ pub(super) fn failed(_: impl std::fmt::Display) -> Failure {
     Failure(
         ErrorCode::Failed,
         "The host could not complete the request.",
+        None,
     )
 }
 impl Core for DaemonCore {
@@ -159,9 +183,11 @@ impl Core for DaemonCore {
             terminal,
             resync: Arc::new(move || {
                 let attachment = source.attach().map_err(failed)?;
-                let core = core
-                    .upgrade()
-                    .ok_or(Failure(ErrorCode::Failed, "The host has stopped."))?;
+                let core = core.upgrade().ok_or(Failure(
+                    ErrorCode::Failed,
+                    "The host has stopped.",
+                    None,
+                ))?;
                 core.sessions
                     .browser_attached(&session, attachment.subscriber_id, channel, &core.db)
                     .map_err(failed)?;
@@ -200,7 +226,23 @@ impl Core for DaemonCore {
         let core = self.terminal(session)?;
         core.sessions
             .browser_input(session, channel, bytes)
-            .map_err(failed)
+            .map_err(failed)?;
+        if !bytes.is_empty() {
+            let status = core.sessions.agent_status(session);
+            let needs_viewed = status.unread_since.is_some()
+                || status.error_since.is_some()
+                || ((bytes.contains(&b'\r') || bytes.contains(&b'\n'))
+                    && crate::repo::session_attention::any_unread(
+                        &*core.db.get().map_err(failed)?,
+                        std::slice::from_ref(&session.to_owned()),
+                    )
+                    .map_err(failed)?);
+            if needs_viewed {
+                crate::ops::node::mark_direct_sessions_viewed(&core, &[session.to_owned()])
+                    .map_err(failed)?;
+            }
+        }
+        Ok(())
     }
     fn detach(&self, session: &str, subscriber: u64, channel: u64, release: bool) {
         if let Ok(core) = self.core() {
@@ -557,6 +599,7 @@ fn overview(core: &AppCore) -> crate::error::Result<Overview> {
             .get(&id)
             .map(SessionStatus::from)
             .unwrap_or(SessionStatus {
+                startup_error: None,
                 status: Status::Idle,
                 reason: None,
                 unread: false,
@@ -799,11 +842,11 @@ mod tests {
         assert_eq!(Arc::strong_count(&core), 1);
         assert!(matches!(
             Arc::new(DaemonCore(backend.0.clone())).attach("missing", 0, 1),
-            Err(Failure(ErrorCode::NotFound, _))
+            Err(Failure(ErrorCode::NotFound, _, _))
         ));
         assert!(matches!(
             Arc::new(DaemonCore(backend.0.clone())).attach("a", 0, 1),
-            Err(Failure(ErrorCode::NotRunning, _))
+            Err(Failure(ErrorCode::NotRunning, _, _))
         ));
         crate::ops::node::mark_direct_sessions_viewed(&core, &["a".into()]).unwrap();
         assert!(!backend.overview().unwrap().sessions["a"].status.unread);
@@ -1028,5 +1071,105 @@ mod tests {
         assert_eq!(stored_node.position, 4);
         assert_eq!(stored_node.pinned_position, Some(0));
         assert!(overview.tabs.is_empty());
+    }
+
+    #[test]
+    fn input_and_mark_viewed_clear_running_codex_unread_and_subsequent_completion_sets_it_again() {
+        use runner_core::companion::ActionRequest;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let core = Arc::new(crate::test_support::test_core_in(temp.path().into()));
+        let session_ids = ["s1".to_owned()];
+        {
+            let conn = core.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO sessions(id, status, agent_runtime, agent_command) VALUES ('s1', 'running', 'codex', 'codex')",
+                [],
+            )
+            .unwrap();
+            let layout = serde_json::json!({"preset": "single", "slots": ["s1"], "sizes": {}});
+            repo::node::create_tab(&conn, None, "chat", 0, &layout.to_string()).unwrap();
+        }
+        let events_iface: Arc<dyn crate::session::manager::SessionEvents> =
+            Arc::new(core.session_events());
+        core.sessions
+            .prepare_unlisted_terminal("s1", (80, 24), &core.db, &events_iface)
+            .unwrap();
+        core.sessions
+            .browser_resize("s1", 1, "Runner", 80, 24, true, false, &core.db)
+            .unwrap();
+        core.sessions.test_attach_live("s1", "");
+        let input_rx = core.sessions.record_terminal_input("s1");
+
+        let events = core.session_events();
+        core.sessions.publish_direct_activity(
+            "s1",
+            crate::session::manager::SessionActivityState::Busy,
+            crate::session::state::StatusSource::Test,
+            &events,
+        );
+        core.sessions.arm_completion("s1");
+        core.sessions.publish_direct_activity(
+            "s1",
+            crate::session::manager::SessionActivityState::Idle,
+            crate::session::state::StatusSource::Test,
+            &events,
+        );
+        assert!(core.sessions.agent_status("s1").unread_since.is_some());
+        assert!(
+            repo::session_attention::any_unread(&core.db.get().unwrap(), &session_ids).unwrap()
+        );
+
+        let backend = DaemonCore(Arc::downgrade(&core));
+        assert!(backend.statuses().unwrap()["s1"].unread);
+        assert!(overview(&core).unwrap().sessions["s1"].status.unread);
+
+        backend.input("s1", 1, b"follow up prompt\r").unwrap();
+        assert_eq!(
+            input_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            b"follow up prompt\r"
+        );
+        assert!(core.sessions.agent_status("s1").unread_since.is_none());
+        assert!(
+            !repo::session_attention::any_unread(&core.db.get().unwrap(), &session_ids).unwrap()
+        );
+        assert!(!backend.statuses().unwrap()["s1"].unread);
+        assert!(!overview(&core).unwrap().sessions["s1"].status.unread);
+
+        core.sessions.publish_direct_activity(
+            "s1",
+            crate::session::manager::SessionActivityState::Busy,
+            crate::session::state::StatusSource::Test,
+            &events,
+        );
+        core.sessions.arm_completion("s1");
+        core.sessions.publish_direct_activity(
+            "s1",
+            crate::session::manager::SessionActivityState::Idle,
+            crate::session::state::StatusSource::Test,
+            &events,
+        );
+        assert!(core.sessions.agent_status("s1").unread_since.is_some());
+        assert!(
+            repo::session_attention::any_unread(&core.db.get().unwrap(), &session_ids).unwrap()
+        );
+        assert!(backend.statuses().unwrap()["s1"].unread);
+
+        backend
+            .action(ActionRequest::MarkViewed {
+                id: 1,
+                session: "s1".into(),
+            })
+            .unwrap();
+        assert!(core.sessions.agent_status("s1").unread_since.is_none());
+        assert!(
+            !repo::session_attention::any_unread(&core.db.get().unwrap(), &session_ids).unwrap()
+        );
+        assert!(!backend.statuses().unwrap()["s1"].unread);
+        assert!(!overview(&core).unwrap().sessions["s1"].status.unread);
+
+        core.sessions.drain_terminal_workers();
     }
 }

@@ -2033,16 +2033,12 @@ impl Harness {
         })
     }
 
-    fn set_terminal_themes(
-        &mut self,
-        dark: crate::app_settings::DarkTerminalTheme,
-        light: crate::app_settings::LightTerminalTheme,
-    ) {
+    fn set_themes(&mut self, dark: crate::theme::DarkTheme, light: crate::theme::LightTheme) {
         self.store.update(&mut self.visual, |store, cx| {
             store.update_settings(
                 |settings| {
-                    settings.dark_terminal_theme = dark;
-                    settings.light_terminal_theme = light;
+                    settings.dark_app_theme = dark;
+                    settings.light_app_theme = light;
                     true
                 },
                 false,
@@ -2059,7 +2055,7 @@ fn color(hex: u32) -> gpui::Hsla {
 
 #[test]
 fn code_is_highlighted_in_the_terminal_palette_of_each_theme() {
-    use crate::app_settings::{DarkTerminalTheme, LightTerminalTheme};
+    use crate::theme::{DarkTheme, LightTheme};
     let _theme = ThemeGuard::new();
     theme::set_active_variant(ThemeVariant::Carbon);
     let mut h = viewer(chat("in-project"));
@@ -2071,31 +2067,30 @@ fn code_is_highlighted_in_the_terminal_palette_of_each_theme() {
     h.open("src/client.rs");
     h.wait("the highlights", |h| h.has("FILE_CODE") && h.highlighted());
     for (variant, dark, light, keyword, ty) in [
-        // Appearance's defaults: Runner in dark, Rosé Pine Dawn in light.
         (
             ThemeVariant::Carbon,
-            DarkTerminalTheme::Runner,
-            LightTerminalTheme::RosePineDawn,
+            DarkTheme::Runner,
+            LightTheme::RunnerLight,
             0xc792ea,
             0xffcb6b,
         ),
         (
             ThemeVariant::RunnerLight,
-            DarkTerminalTheme::Runner,
-            LightTerminalTheme::RosePineDawn,
+            DarkTheme::Runner,
+            LightTheme::RunnerLight,
             0x286983,
             0x56949f,
         ),
         (
-            ThemeVariant::Carbon,
-            DarkTerminalTheme::CatppuccinMocha,
-            LightTerminalTheme::RosePineDawn,
+            ThemeVariant::CatppuccinMocha,
+            DarkTheme::CatppuccinMocha,
+            LightTheme::RunnerLight,
             0xcba6f7,
             0xf9e2af,
         ),
     ] {
         theme::set_active_variant(variant);
-        h.set_terminal_themes(dark, light);
+        h.set_themes(dark, light);
         let line = h.painted(0);
         assert!(
             line.contains(&("pub".into(), color(keyword))),
@@ -3242,7 +3237,7 @@ fn picking_from_open_in_saves_the_editor_links_fall_back_to() {
 
 #[test]
 fn a_file_path_in_the_root_uses_this_computers_separators() {
-    use super::view::absolute;
+    use super::panel_view::absolute;
     if cfg!(windows) {
         assert_eq!(
             absolute(Path::new("C:/Users/runneradmin/runner"), "src//lib.rs"),
@@ -3772,7 +3767,7 @@ fn files_stands_shown_open_or_closed_among_the_surfaces() {
 fn tick(h: &mut Harness) {
     h.visual
         .executor()
-        .advance_clock(super::viewer::IGNORED_REFRESH);
+        .advance_clock(super::open_file::IGNORED_REFRESH);
     h.settle();
 }
 

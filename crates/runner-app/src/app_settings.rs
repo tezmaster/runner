@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use gpui::{font, Font, FontFallbacks};
-use runner_terminal::palette::{self, TerminalPalette};
+use runner_terminal::palette::TerminalPalette;
 use serde::{Deserialize, Serialize};
 
 use crate::keymap::{self, KeymapOverrides};
@@ -38,105 +38,9 @@ pub const FILE_TREE_MIN: f32 = 160.;
 pub const FILE_TREE_MAX: f32 = 480.;
 pub const FILE_TREE_DEFAULT: f32 = 240.;
 
-/// The terminal palette used while the app resolves to a light variant.
-/// Unknown keys (including the retired `match-app` and `monokai`) load as
-/// the default, which serde requires to be the last variant.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LightTerminalTheme {
-    Runner,
-    CatppuccinMocha,
-    #[default]
-    #[serde(other)]
-    RosePineDawn,
-}
-
-impl LightTerminalTheme {
-    pub const ALL: [Self; 3] = [Self::RosePineDawn, Self::Runner, Self::CatppuccinMocha];
-
-    pub fn palette(self) -> TerminalPalette {
-        match self {
-            Self::RosePineDawn => palette::ROSE_PINE_DAWN,
-            Self::Runner => palette::RUNNER,
-            Self::CatppuccinMocha => palette::CATPPUCCIN_MOCHA,
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::RosePineDawn => "rose-pine-dawn",
-            Self::Runner => "runner",
-            Self::CatppuccinMocha => "catppuccin-mocha",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|theme| theme.key() == value)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::RosePineDawn => "Rosé Pine Dawn",
-            Self::Runner => "Runner",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
-        }
-    }
-}
-
-/// The terminal palette used while the app resolves to a dark variant. The
-/// pre-0.8.7 single `terminalTheme` key loads into this pick: `runner` is
-/// still the Runner palette, and the retired `match-app`, `monokai`,
-/// `runner-dark` and `runner-light` land on the default like any unknown key.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DarkTerminalTheme {
-    CatppuccinMocha,
-    RosePineDawn,
-    #[default]
-    #[serde(other)]
-    Runner,
-}
-
-impl DarkTerminalTheme {
-    pub const ALL: [Self; 3] = [Self::Runner, Self::CatppuccinMocha, Self::RosePineDawn];
-
-    pub fn palette(self) -> TerminalPalette {
-        match self {
-            Self::Runner => palette::RUNNER,
-            Self::CatppuccinMocha => palette::CATPPUCCIN_MOCHA,
-            Self::RosePineDawn => palette::ROSE_PINE_DAWN,
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Runner => "runner",
-            Self::CatppuccinMocha => "catppuccin-mocha",
-            Self::RosePineDawn => "rose-pine-dawn",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|theme| theme.key() == value)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Runner => "Runner",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
-            Self::RosePineDawn => "Rosé Pine Dawn",
-        }
-    }
-}
-
-/// The terminal palette for the resolved app variant: the light pick under a
-/// light variant, the dark pick otherwise.
-pub fn terminal_palette(settings: &AppSettings, variant: ThemeVariant) -> TerminalPalette {
-    if variant.is_light() {
-        settings.light_terminal_theme.palette()
-    } else {
-        settings.dark_terminal_theme.palette()
-    }
+/// The terminal palette for the resolved app variant.
+pub fn terminal_palette(_settings: &AppSettings, variant: ThemeVariant) -> TerminalPalette {
+    variant.terminal_palette()
 }
 
 pub fn configure_terminal(
@@ -175,7 +79,7 @@ pub struct TerminalFontFamily(String);
 
 impl Default for TerminalFontFamily {
     fn default() -> Self {
-        Self(crate::terminal_fonts::BUNDLED_FONT.to_owned())
+        Self(crate::terminal::fonts::BUNDLED_FONT.to_owned())
     }
 }
 
@@ -183,7 +87,7 @@ impl<'de> Deserialize<'de> for TerminalFontFamily {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let family = String::deserialize(deserializer)?;
         Ok(Self::new(match family.as_str() {
-            "JetBrains Mono" | "Meslo Nerd Font" => crate::terminal_fonts::BUNDLED_FONT,
+            "JetBrains Mono" | "Meslo Nerd Font" => crate::terminal::fonts::BUNDLED_FONT,
             "Menlo" => runner_app::theme::SYSTEM_MONOSPACE_FONT,
             _ => &family,
         }))
@@ -200,7 +104,7 @@ impl TerminalFontFamily {
     }
 
     pub fn font(&self, cx: &gpui::App) -> Font {
-        let available = crate::terminal_fonts::FontFamilyCache::loaded(cx)
+        let available = crate::terminal::fonts::FontFamilyCache::loaded(cx)
             .is_some_and(|families| families.all.contains(&self.0));
         self.resolved_font(available)
     }
@@ -209,10 +113,10 @@ impl TerminalFontFamily {
         let mut font = font(if available {
             self.0.clone()
         } else {
-            crate::terminal_fonts::BUNDLED_FONT.to_owned()
+            crate::terminal::fonts::BUNDLED_FONT.to_owned()
         });
         font.fallbacks = Some(FontFallbacks::from_fonts(
-            std::iter::once(crate::terminal_fonts::BUNDLED_FONT)
+            std::iter::once(crate::terminal::fonts::BUNDLED_FONT)
                 .chain(
                     runner_app::platform_fonts::TERMINAL_FONT_FALLBACKS
                         .iter()
@@ -299,6 +203,7 @@ impl FileLinkEditor {
 pub struct NotificationSettings {
     pub chats: ChatNotifications,
     pub missions: MissionNotifications,
+    pub usage: UsageNotifications,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -330,17 +235,125 @@ pub struct MissionNotifications {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+pub struct UsageNotifications {
+    pub near_limit: bool,
+    pub threshold: u8,
+    pub alerted: Vec<UsageAlertPeriod>,
+}
+impl Default for UsageNotifications {
+    fn default() -> Self {
+        Self {
+            near_limit: true,
+            threshold: 80,
+            alerted: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageAlertPeriod {
+    pub runtime: runner_core::Runtime,
+    pub account: String,
+    pub window: String,
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UsageSettings {
+    pub sidebar: bool,
+    pub codex: bool,
+    pub claude_code: bool,
+    pub antigravity: bool,
+    pub muse: bool,
+    pub five_hour: bool,
+}
+impl Default for UsageSettings {
+    fn default() -> Self {
+        Self {
+            sidebar: true,
+            codex: true,
+            claude_code: true,
+            antigravity: true,
+            muse: true,
+            five_hour: true,
+        }
+    }
+}
+impl UsageSettings {
+    pub fn badge(&self, runtime: runner_core::Runtime) -> bool {
+        self.sidebar
+            && match runtime {
+                runner_core::Runtime::Codex => self.codex,
+                runner_core::Runtime::ClaudeCode => self.claude_code,
+                runner_core::Runtime::Antigravity => self.antigravity,
+                runner_core::Runtime::Muse => self.muse,
+                _ => false,
+            }
+    }
+    pub fn checks(&self, runtime: runner_core::Runtime, alert: bool) -> bool {
+        self.badge(runtime) || alert
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RemoteSidebarSettings {
+    pub active_only: bool,
+    pub projects_open: bool,
+    pub chats_open: bool,
+    pub collapsed_projects: BTreeSet<String>,
+    pub collapsed_active_groups: BTreeSet<String>,
+    pub collapsed_link_groups: BTreeSet<String>,
+}
+
+impl Default for RemoteSidebarSettings {
+    fn default() -> Self {
+        Self {
+            active_only: false,
+            projects_open: true,
+            chats_open: true,
+            collapsed_projects: BTreeSet::new(),
+            collapsed_active_groups: BTreeSet::new(),
+            collapsed_link_groups: BTreeSet::new(),
+        }
+    }
+}
+
+impl RemoteSidebarSettings {
+    pub(crate) fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            active_only: settings.sidebar_active_only,
+            projects_open: settings.sidebar_projects_open,
+            chats_open: settings.sidebar_chats_open,
+            collapsed_projects: settings.sidebar_collapsed_projects.clone(),
+            collapsed_active_groups: settings.sidebar_collapsed_active_groups.clone(),
+            collapsed_link_groups: settings.sidebar_collapsed_link_groups.clone(),
+        }
+    }
+
+    pub(crate) fn apply_to(self, settings: &mut AppSettings) {
+        settings.sidebar_active_only = self.active_only;
+        settings.sidebar_projects_open = self.projects_open;
+        settings.sidebar_chats_open = self.chats_open;
+        settings.sidebar_collapsed_projects = self.collapsed_projects;
+        settings.sidebar_collapsed_active_groups = self.collapsed_active_groups;
+        settings.sidebar_collapsed_link_groups = self.collapsed_link_groups;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub language: runner_app::i18n::Language,
     pub notifications: NotificationSettings,
+    pub usage: UsageSettings,
     pub app_theme: ThemeIntent,
     pub window_material: runner_app::appearance::WindowMaterial,
     pub light_app_theme: LightTheme,
     pub dark_app_theme: DarkTheme,
     pub app_zoom: f32,
-    pub light_terminal_theme: LightTerminalTheme,
-    #[serde(alias = "terminalTheme")]
-    pub dark_terminal_theme: DarkTerminalTheme,
     pub terminal_font_family: TerminalFontFamily,
     pub terminal_font_size: u16,
     pub terminal_line_height: f32,
@@ -360,6 +373,7 @@ pub struct AppSettings {
     pub sidebar_collapsed_active_groups: BTreeSet<String>,
     /// Collapsed linked groups (#748), by the node id of the tab heading them.
     pub sidebar_collapsed_link_groups: BTreeSet<String>,
+    pub remote_sidebars: BTreeMap<String, RemoteSidebarSettings>,
     pub chat_panel_open: bool,
     pub chat_panel_width: f32,
     pub mission_rail_open: bool,
@@ -410,13 +424,12 @@ impl Default for AppSettings {
         Self {
             language: runner_app::i18n::Language::System,
             notifications: NotificationSettings::default(),
+            usage: UsageSettings::default(),
             app_theme: ThemeIntent::Auto,
             window_material: Default::default(),
             light_app_theme: LightTheme::RunnerLight,
             dark_app_theme: DarkTheme::Runner,
             app_zoom: 1.,
-            light_terminal_theme: LightTerminalTheme::RosePineDawn,
-            dark_terminal_theme: DarkTerminalTheme::Runner,
             terminal_font_family: TerminalFontFamily::default(),
             terminal_font_size: TERMINAL_FONT_SIZE_DEFAULT,
             terminal_line_height: TERMINAL_LINE_HEIGHT_DEFAULT,
@@ -435,6 +448,7 @@ impl Default for AppSettings {
             sidebar_collapsed_projects: BTreeSet::new(),
             sidebar_collapsed_active_groups: BTreeSet::new(),
             sidebar_collapsed_link_groups: BTreeSet::new(),
+            remote_sidebars: BTreeMap::new(),
             chat_panel_open: true,
             chat_panel_width: CHAT_PANEL_DEFAULT,
             mission_rail_open: true,
@@ -569,6 +583,23 @@ impl AppSettings {
                     *runtime,
                     runner_core::protocol::runtime_metadata::runtime_default_enabled(*runtime),
                 )
+            })
+            .collect()
+    }
+
+    /// The enabled runtimes that report a usage allowance. Not `model_runtimes`:
+    /// that list is the runtimes that discover models, and a runtime can report
+    /// usage without discovering models.
+    pub fn usage_runtimes(&self) -> Vec<Runtime> {
+        Runtime::ALL
+            .into_iter()
+            .filter(|runtime| {
+                runner_core::protocol::RuntimeCatalogEntry::for_runtime(*runtime)
+                    .is_some_and(|entry| entry.capabilities.usage)
+                    && self.is_agent_enabled(
+                        *runtime,
+                        runner_core::protocol::runtime_metadata::runtime_default_enabled(*runtime),
+                    )
             })
             .collect()
     }
@@ -731,6 +762,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn remote_sidebars_default_for_older_settings_and_partial_views() {
+        let old: AppSettings = serde_json::from_str(r#"{"sidebarProjectsOpen":false}"#).unwrap();
+        assert!(old.remote_sidebars.is_empty());
+        assert!(!old.sidebar_projects_open);
+        let partial: AppSettings =
+            serde_json::from_str(r#"{"remoteSidebars":{"host":{"activeOnly":true}}}"#).unwrap();
+        assert_eq!(
+            partial.remote_sidebars["host"],
+            RemoteSidebarSettings {
+                active_only: true,
+                ..Default::default()
+            }
+        );
+    }
 
     #[test]
     fn language_defaults_migrates_and_persists_intent() {
@@ -945,7 +992,7 @@ mod tests {
         let missing = TerminalFontFamily::new("Gone Mono");
         assert_eq!(
             missing.resolved_font(false).family.as_ref(),
-            crate::terminal_fonts::BUNDLED_FONT
+            crate::terminal::fonts::BUNDLED_FONT
         );
         assert_eq!(missing.resolved_font(true).family.as_ref(), "Gone Mono");
         let temp = tempfile::tempdir().unwrap();
@@ -1166,12 +1213,12 @@ mod tests {
         assert_eq!(value["appTheme"], "auto");
         assert_eq!(value["lightAppTheme"], "runner-light");
         assert_eq!(value["darkAppTheme"], "carbon");
-        assert_eq!(value["lightTerminalTheme"], "rose-pine-dawn");
-        assert_eq!(value["darkTerminalTheme"], "runner");
+        assert!(value.get("lightTerminalTheme").is_none());
+        assert!(value.get("darkTerminalTheme").is_none());
         assert!(value.get("terminalTheme").is_none());
         assert_eq!(
             value["terminalFontFamily"],
-            crate::terminal_fonts::BUNDLED_FONT
+            crate::terminal::fonts::BUNDLED_FONT
         );
         assert_eq!(value["defaultCrewId"], "");
         assert_eq!(value["defaultWorkingDir"], "");
@@ -1185,146 +1232,83 @@ mod tests {
     }
 
     #[test]
-    fn legacy_theme_settings_migrate_without_resetting_other_preferences() {
-        for json in [
-            r#"{"terminalTheme":"runner","lightAppTheme":"codex","sidebarWidth":376}"#,
-            r#"{"sidebarWidth":376}"#,
-        ] {
-            let settings: AppSettings = serde_json::from_str(json).unwrap();
-            assert_eq!(settings.dark_terminal_theme, DarkTerminalTheme::Runner);
-            assert_eq!(
-                settings.light_terminal_theme,
-                LightTerminalTheme::RosePineDawn
-            );
-            assert_eq!(settings.light_app_theme, LightTheme::RunnerLight);
-            assert_eq!(settings.sidebar_width, 376.);
-        }
-        let settings: AppSettings =
-            serde_json::from_str(r#"{"lightAppTheme":"catppuccin-latte"}"#).unwrap();
-        assert_eq!(settings.light_app_theme, LightTheme::CatppuccinLatte);
-    }
-
-    #[test]
-    fn legacy_terminal_theme_becomes_the_dark_pick_and_is_rewritten_on_save() {
+    fn legacy_theme_settings_migrate_and_drop_terminal_theme_keys_on_save() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("ui-settings.json");
-        fs::write(&path, r#"{"terminalTheme":"runner","sidebarWidth":376}"#).unwrap();
 
+        for json in [
+            r#"{"terminalTheme":"catppuccin-mocha","lightTerminalTheme":"runner","darkTerminalTheme":"catppuccin-mocha","lightAppTheme":"codex","darkAppTheme":"unknown-dark","sidebarWidth":376}"#,
+            r#"{"lightTerminalTheme":"rose-pine-dawn","darkTerminalTheme":"runner","sidebarWidth":376}"#,
+            r#"{"sidebarWidth":376}"#,
+        ] {
+            fs::write(&path, json).unwrap();
+            let loaded = AppSettings::load(&path).unwrap();
+            assert_eq!(loaded.light_app_theme, LightTheme::RunnerLight);
+            assert_eq!(loaded.dark_app_theme, DarkTheme::Runner);
+            assert_eq!(loaded.sidebar_width, 376.);
+
+            loaded.save(&path).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert!(saved.get("lightTerminalTheme").is_none());
+            assert!(saved.get("darkTerminalTheme").is_none());
+            assert!(saved.get("terminalTheme").is_none());
+        }
+
+        fs::write(
+            &path,
+            r#"{"lightAppTheme":"gruvbox-light","darkAppTheme":"tokyo-night","lightTerminalTheme":"runner","darkTerminalTheme":"catppuccin-mocha","terminalTheme":"runner","sidebarWidth":376}"#,
+        )
+        .unwrap();
         let loaded = AppSettings::load(&path).unwrap();
-        assert_eq!(loaded.dark_terminal_theme, DarkTerminalTheme::Runner);
-        assert_eq!(
-            loaded.light_terminal_theme,
-            LightTerminalTheme::RosePineDawn
-        );
+        assert_eq!(loaded.light_app_theme, LightTheme::GruvboxLight);
+        assert_eq!(loaded.dark_app_theme, DarkTheme::TokyoNight);
         assert_eq!(loaded.sidebar_width, 376.);
 
         loaded.save(&path).unwrap();
         let saved: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["darkTerminalTheme"], "runner");
-        assert_eq!(saved["lightTerminalTheme"], "rose-pine-dawn");
+        assert_eq!(saved["lightAppTheme"], "gruvbox-light");
+        assert_eq!(saved["darkAppTheme"], "tokyo-night");
+        assert!(saved.get("lightTerminalTheme").is_none());
+        assert!(saved.get("darkTerminalTheme").is_none());
         assert!(saved.get("terminalTheme").is_none());
-
-        let settings: AppSettings =
-            serde_json::from_str(r#"{"terminalTheme":"catppuccin-mocha"}"#).unwrap();
-        assert_eq!(
-            settings.dark_terminal_theme,
-            DarkTerminalTheme::CatppuccinMocha
-        );
-        assert_eq!(
-            settings.light_terminal_theme,
-            LightTerminalTheme::RosePineDawn
-        );
     }
 
     #[test]
-    fn retired_and_unknown_terminal_themes_load_as_defaults_without_resetting_settings() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("ui-settings.json");
-        // "match-app" and "monokai" shipped as choices through 0.8.6; both
-        // land on the defaults like any unknown key.
-        for (light, dark) in [
-            ("match-app", "match-app"),
-            ("monokai", "monokai"),
-            ("unknown-theme", "unknown-theme"),
-        ] {
-            fs::write(
-                &path,
-                format!(
-                    r#"{{"lightTerminalTheme":"{light}","darkTerminalTheme":"{dark}","sidebarWidth":376}}"#
-                ),
-            )
-            .unwrap();
-
-            let loaded = AppSettings::load(&path).unwrap();
-            assert_eq!(
-                loaded.light_terminal_theme,
-                LightTerminalTheme::RosePineDawn,
-                "{light}"
-            );
-            assert_eq!(
-                loaded.dark_terminal_theme,
-                DarkTerminalTheme::Runner,
-                "{dark}"
-            );
-            assert_eq!(loaded.sidebar_width, 376.);
-        }
-        for key in ["match-app", "monokai", "runner-dark", "runner-light"] {
-            let settings: AppSettings =
-                serde_json::from_str(&format!(r#"{{"terminalTheme":"{key}"}}"#)).unwrap();
-            assert_eq!(settings, AppSettings::default(), "{key}");
-        }
-        let settings: AppSettings = serde_json::from_str(r#"{"sidebarWidth":376}"#).unwrap();
-        assert_eq!(settings.light_terminal_theme, LightTerminalTheme::default());
-        assert_eq!(settings.dark_terminal_theme, DarkTerminalTheme::default());
-    }
-
-    #[test]
-    fn per_mode_terminal_themes_round_trip_every_palette() {
-        for (light, dark) in LightTerminalTheme::ALL
-            .into_iter()
-            .zip(DarkTerminalTheme::ALL)
-        {
+    fn app_themes_round_trip_every_light_and_dark_choice() {
+        for (light, dark) in LightTheme::ALL.into_iter().zip(DarkTheme::ALL) {
             let json = serde_json::to_value(AppSettings {
-                light_terminal_theme: light,
-                dark_terminal_theme: dark,
+                light_app_theme: light,
+                dark_app_theme: dark,
                 ..AppSettings::default()
             })
             .unwrap();
-            assert_eq!(json["lightTerminalTheme"], light.key());
-            assert_eq!(json["darkTerminalTheme"], dark.key());
+            assert_eq!(json["lightAppTheme"], light.key());
+            assert_eq!(json["darkAppTheme"], dark.key());
+            assert!(json.get("lightTerminalTheme").is_none());
+            assert!(json.get("darkTerminalTheme").is_none());
             assert!(json.get("terminalTheme").is_none());
+
             let reloaded: AppSettings = serde_json::from_value(json).unwrap();
-            assert_eq!(reloaded.light_terminal_theme, light);
-            assert_eq!(reloaded.dark_terminal_theme, dark);
-            assert_eq!(LightTerminalTheme::parse(light.key()), Some(light));
-            assert_eq!(DarkTerminalTheme::parse(dark.key()), Some(dark));
+            assert_eq!(reloaded.light_app_theme, light);
+            assert_eq!(reloaded.dark_app_theme, dark);
+            assert_eq!(LightTheme::parse(light.key()), Some(light));
+            assert_eq!(DarkTheme::parse(dark.key()), Some(dark));
         }
-        assert_eq!(LightTerminalTheme::parse("match-app"), None);
-        assert_eq!(DarkTerminalTheme::parse("runner-dark"), None);
+
+        assert_eq!(LightTheme::parse("unknown"), None);
+        assert_eq!(DarkTheme::parse("runner-dark"), None);
+        let fallback: AppSettings =
+            serde_json::from_str(r#"{"lightAppTheme":"invalid","darkAppTheme":"invalid"}"#)
+                .unwrap();
+        assert_eq!(fallback.light_app_theme, LightTheme::RunnerLight);
+        assert_eq!(fallback.dark_app_theme, DarkTheme::Runner);
     }
 
     #[test]
-    fn terminal_palette_follows_the_resolved_mode() {
-        let settings = AppSettings {
-            light_terminal_theme: LightTerminalTheme::Runner,
-            dark_terminal_theme: DarkTerminalTheme::CatppuccinMocha,
-            ..AppSettings::default()
-        };
-        for variant in [ThemeVariant::RunnerLight, ThemeVariant::CatppuccinLatte] {
-            assert_eq!(
-                terminal_palette(&settings, variant),
-                palette::RUNNER,
-                "{variant:?}"
-            );
-        }
-        for variant in [ThemeVariant::Carbon, ThemeVariant::CatppuccinMocha] {
-            assert_eq!(
-                terminal_palette(&settings, variant),
-                palette::CATPPUCCIN_MOCHA,
-                "{variant:?}"
-            );
-        }
+    fn terminal_palette_comes_from_the_resolved_variant() {
+        use runner_terminal::palette;
         assert_eq!(
             terminal_palette(&AppSettings::default(), ThemeVariant::RunnerLight),
             palette::ROSE_PINE_DAWN
@@ -1333,23 +1317,11 @@ mod tests {
             terminal_palette(&AppSettings::default(), ThemeVariant::Carbon),
             palette::RUNNER
         );
-        for (light, dark) in LightTerminalTheme::ALL
-            .into_iter()
-            .zip(DarkTerminalTheme::ALL)
-        {
+        for variant in ThemeVariant::ALL {
             assert_eq!(
-                light.palette(),
-                LightTerminalTheme::parse(light.key()).unwrap().palette()
-            );
-            assert_eq!(
-                DarkTerminalTheme::parse(light.key()).unwrap().palette(),
-                light.palette(),
-                "{light:?}"
-            );
-            assert_eq!(
-                LightTerminalTheme::parse(dark.key()).unwrap().palette(),
-                dark.palette(),
-                "{dark:?}"
+                terminal_palette(&AppSettings::default(), variant),
+                variant.terminal_palette(),
+                "{variant:?}"
             );
         }
     }
@@ -1404,11 +1376,11 @@ mod tests {
     fn terminal_fonts_migrate_each_legacy_choice() {
         assert_eq!(
             AppSettings::default().terminal_font_family.family(),
-            crate::terminal_fonts::BUNDLED_FONT
+            crate::terminal::fonts::BUNDLED_FONT
         );
         for (saved, expected) in [
-            ("JetBrains Mono", crate::terminal_fonts::BUNDLED_FONT),
-            ("Meslo Nerd Font", crate::terminal_fonts::BUNDLED_FONT),
+            ("JetBrains Mono", crate::terminal::fonts::BUNDLED_FONT),
+            ("Meslo Nerd Font", crate::terminal::fonts::BUNDLED_FONT),
             ("Menlo", runner_app::theme::SYSTEM_MONOSPACE_FONT),
             ("System default", "System default"),
             ("Monaco", "Monaco"),
@@ -1433,7 +1405,7 @@ mod tests {
                 .resolved_font(false)
                 .family
                 .as_ref(),
-            crate::terminal_fonts::BUNDLED_FONT
+            crate::terminal::fonts::BUNDLED_FONT
         );
         settings.save(&path).unwrap();
         assert_eq!(
@@ -1450,7 +1422,7 @@ mod tests {
         let family = TerminalFontFamily::new("SF Mono");
         let font = family.resolved_font(true);
         assert_eq!(font.family.as_ref(), "SF Mono");
-        let expected = std::iter::once(crate::terminal_fonts::BUNDLED_FONT)
+        let expected = std::iter::once(crate::terminal::fonts::BUNDLED_FONT)
             .chain(
                 runner_app::platform_fonts::TERMINAL_FONT_FALLBACKS
                     .iter()
@@ -1500,6 +1472,29 @@ mod tests {
             assert!(!settings.is_agent_enabled(runtime, default_enabled(runtime)));
         }
         assert!(settings.is_agent_enabled(Runtime::Trae, default_enabled(Runtime::Trae)));
+    }
+
+    #[test]
+    fn usage_runtimes_are_the_enabled_runtimes_that_report_usage() {
+        let mut settings = AppSettings::default();
+        let mut defaults = settings.usage_runtimes();
+        defaults.sort_by_key(|runtime| runtime.key());
+        assert_eq!(defaults, [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse]);
+        assert!(
+            !settings.model_runtimes().contains(&Runtime::Muse),
+            "Muse reports usage without discovering models"
+        );
+        settings.disabled_agents.insert(Runtime::Muse.key().into());
+        assert!(!settings.usage_runtimes().contains(&Runtime::Muse));
+        assert!(settings.usage_runtimes().contains(&Runtime::Codex));
+    }
+
+    #[test]
+    fn usage_badges_include_muse_by_default_and_allow_it_to_be_hidden() {
+        let mut settings = AppSettings::default();
+        assert!(settings.usage.badge(Runtime::Muse));
+        settings.usage.muse = false;
+        assert!(!settings.usage.badge(Runtime::Muse));
     }
 
     #[test]
@@ -1667,5 +1662,53 @@ mod notification_tests {
         assert!(json["notifications"]["missions"].get("enabled").is_none());
         let loaded: AppSettings = serde_json::from_str(&saved).unwrap();
         assert_eq!(loaded.notifications, settings.notifications);
+    }
+}
+
+#[test]
+fn usage_preferences_defaults_roundtrip_and_fetching_rules() {
+    let defaults: AppSettings = serde_json::from_str("{}").unwrap();
+    assert!(
+        defaults.usage.sidebar
+            && defaults.usage.codex
+            && defaults.usage.claude_code
+            && defaults.usage.antigravity
+            && defaults.usage.five_hour
+    );
+    let legacy: UsageSettings = serde_json::from_str(
+        r#"{"sidebar":true,"codex":false,"claudeCode":true,"fiveHour":false}"#,
+    )
+    .unwrap();
+    assert!(legacy.antigravity);
+    assert!(!legacy.codex);
+    assert!(!legacy.five_hour);
+    assert!(legacy.badge(Runtime::Antigravity));
+    assert!(defaults.notifications.usage.near_limit);
+    assert_eq!(defaults.notifications.usage.threshold, 80);
+    let mut settings = defaults;
+    settings.usage.sidebar = false;
+    settings.usage.codex = false;
+    settings.usage.antigravity = false;
+    settings.usage.five_hour = false;
+    settings.notifications.usage.near_limit = false;
+    settings.notifications.usage.threshold = 60;
+    let saved: AppSettings =
+        serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+    assert_eq!(saved, settings);
+    for badges in [false, true] {
+        for agent in [false, true] {
+            for alert in [false, true] {
+                let usage = UsageSettings {
+                    sidebar: badges,
+                    codex: agent,
+                    claude_code: agent,
+                    antigravity: agent,
+                    ..Default::default()
+                };
+                for runtime in [Runtime::Codex, Runtime::ClaudeCode, Runtime::Antigravity] {
+                    assert_eq!(usage.checks(runtime, alert), (badges && agent) || alert);
+                }
+            }
+        }
     }
 }

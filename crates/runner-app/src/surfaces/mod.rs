@@ -1,20 +1,20 @@
 //! App surfaces and the pure helpers each product area owns.
 
+pub(crate) mod agent_recovery;
 pub(crate) mod agent_update;
 pub(crate) mod app_shell;
+pub(crate) mod background_tasks;
 pub(crate) mod chat;
 pub(crate) mod chat_lifecycle;
 pub(crate) mod command_palette;
 pub(crate) mod crews;
 pub(crate) mod files;
 pub(crate) mod front_page;
-pub(crate) mod mission_composer;
-pub(crate) mod mission_feed;
 pub(crate) mod mission_markdown;
+pub(crate) mod mission_control;
 pub(crate) mod mission_workspace;
 pub(crate) mod panes;
 pub(crate) mod profile_page;
-pub(crate) mod project_field;
 pub(crate) mod quit_dialog;
 pub(crate) mod remote_client;
 pub(crate) mod render_cache;
@@ -23,7 +23,6 @@ pub(crate) mod root;
 pub(crate) mod settings;
 pub(crate) mod side_panel;
 pub(crate) mod sidebar;
-pub(crate) mod sidebar_logic;
 pub(crate) mod start_chat;
 mod terminal_attachment;
 pub(crate) mod update_ui;

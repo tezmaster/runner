@@ -452,7 +452,8 @@ fn composer_tracks_keyboard_and_mouse_caret_moves_and_completes_without_resettin
     visual.simulate_input("please check @rev");
     let query = |visual: &VisualTestContext| {
         workspace.read_with(visual, |workspace, _| {
-            crate::surfaces::mission_composer::mention_query(&workspace.composer).map(str::to_owned)
+            crate::surfaces::mission_workspace::composer_model::mention_query(&workspace.composer)
+                .map(str::to_owned)
         })
     };
     assert_eq!(query(&visual).as_deref(), Some("rev"));
@@ -626,7 +627,7 @@ fn sidebar_and_mission_fills_follow_carbon_and_runner_light() {
             temp.path().join("settings.json"),
             AppSettings {
                 app_theme: theme::ThemeIntent::Dark,
-                dark_terminal_theme: app_settings::DarkTerminalTheme::RosePineDawn,
+                dark_app_theme: theme::DarkTheme::CatppuccinMocha,
                 ..AppSettings::default()
             },
             None,
@@ -675,14 +676,17 @@ fn sidebar_and_mission_fills_follow_carbon_and_runner_light() {
         });
         root
     });
-    assert_eq!(theme::active_variant(), theme::ThemeVariant::Carbon);
+    assert_eq!(
+        theme::active_variant(),
+        theme::ThemeVariant::CatppuccinMocha
+    );
     assert_eq!(
         bridge.session("direct").unwrap().palette(),
-        runner_terminal::palette::ROSE_PINE_DAWN
+        runner_terminal::palette::CATPPUCCIN_MOCHA
     );
     assert_eq!(
         bridge.session("slot").unwrap().palette(),
-        runner_terminal::palette::ROSE_PINE_DAWN
+        runner_terminal::palette::CATPPUCCIN_MOCHA
     );
     let mut visual = VisualTestContext::from_window(host.into(), &cx);
     visual.simulate_resize(size(px(1200.), px(900.)));
@@ -694,7 +698,7 @@ fn sidebar_and_mission_fills_follow_carbon_and_runner_light() {
             store.update_settings(
                 |settings| {
                     settings.app_theme = intent;
-                    settings.dark_terminal_theme = app_settings::DarkTerminalTheme::Runner;
+                    settings.dark_app_theme = theme::DarkTheme::Runner;
                     true
                 },
                 false,
@@ -1063,7 +1067,10 @@ fn selecting_feed_forgets_the_remembered_session_so_reopening_restores_feed() {
             cx,
         );
     });
-    let visual = cx.add_empty_window();
+    let host = cx.add_window(|_, _| gpui::Empty);
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
+    visual.run_until_parked();
+    let visual = &mut visual;
     let workspace = visual.update(|window, cx| {
         cx.new(|cx| {
             let mut workspace = MissionWorkspace::new(
@@ -1295,6 +1302,7 @@ fn cached_mission_header_tabs_and_feed_span_the_content_column() {
         }
     }
 
+    assert!(visual.debug_bounds("MISSION_NO_EVENTS").is_some());
     assert!(visual.debug_bounds("MISSION_NO_ROLES").is_some());
     assert!(visual.debug_bounds("MISSION_RAIL_NO_ROLES").is_some());
     assert!(visual.debug_bounds("MISSION_RAIL_ADD_ROLE").is_some());
@@ -1520,6 +1528,167 @@ fn mission_rail_scrolls_long_roster_and_goal_above_corner_padding() {
             last.top() >= viewport.top() && last.bottom() <= viewport.bottom(),
             "{view:?}: {last:?} {viewport:?}"
         );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls() {
+    use crate::theme_snapshot::ThemeGuard;
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext};
+    let _theme = ThemeGuard::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let store = crate::app_store::test_lifecycle_store(&mut cx, temp.path());
+    store.update(&mut cx, |store, _| {
+        crate::app_store::seed_mixed_working_sessions(store)
+    });
+    let mission = store.read_with(&cx, |store, _| {
+        runner_daemon::ops::mission::mission_get(&store.test_core, "test-mission").unwrap()
+    });
+    let host = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| {
+            let mut workspace = MissionWorkspace::new(
+                "rail-scroll".into(),
+                WeakEntity::new_invalid(),
+                store,
+                window,
+                cx,
+            );
+            workspace.mission = Some(mission);
+            workspace.goal =
+                Some("A long goal that must remain reachable in a short window.\n".repeat(40));
+            workspace.sessions = (0..20)
+                .map(|index| SessionRow {
+                    session: runner_core::protocol::model::Session {
+                        id: format!("slot-{index}"),
+                        mission_id: Some("test-mission".into()),
+                        role_id: "test-shell-role".into(),
+                        slot_id: None,
+                        cwd: None,
+                        status: SessionStatus::Stopped,
+                        pid: None,
+                        started_at: None,
+                        stopped_at: None,
+                    },
+                    handle: format!("worker-{index}"),
+                    role_handle: String::new(),
+                    lead: index == 0,
+                    runtime: "shell".into(),
+                    live_title: None,
+                    agent_session_key: None,
+                })
+                .collect();
+            workspace.sessions[0].agent_session_key = Some("key-0".into());
+            workspace.sessions[1].agent_session_key = Some("key-1".into());
+            workspace.set_review_for_test(usage_card_fixture(), &["worker-0", "worker-1"]);
+            workspace
+        });
+        MissionRailLayoutTest {
+            workspace,
+            width: None,
+        }
+    });
+    let mut visual = VisualTestContext::from_window(host.into(), &cx);
+    visual.simulate_resize(size(px(960.), px(300.)));
+    visual.run_until_parked();
+    for (view, viewport_selector, final_selector) in [
+        (PanelViewId::Info, "MISSION_META_SCROLL", "MISSION_META_END"),
+    ] {
+        host.update(&mut visual, |host, _, cx| {
+            host.workspace
+                .update(cx, |workspace, _| workspace.rail_surfaces.open.open(view));
+            cx.notify();
+        })
+        .unwrap();
+        visual.run_until_parked();
+        let rail = visual.debug_bounds("MISSION_RAIL").unwrap();
+        let viewport = visual.debug_bounds(viewport_selector).unwrap();
+        assert_eq!(viewport.bottom(), rail.bottom() - px(9.));
+        let last = visual.debug_bounds(final_selector).unwrap();
+        assert!(
+            last.bottom() > viewport.bottom(),
+            "{view:?}: {last:?} {viewport:?}"
+        );
+        // The scrollbar is beside the scroll box, not inside it: its track must stay
+        // where it is while the content scrolls, and its thumb must move down.
+        let track_before = visual.debug_bounds("SCROLLBAR_TRACK").expect("the Info panel has a scrollbar");
+        let thumb_before = visual.debug_bounds("SCROLLBAR_THUMB");
+        visual.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Lines(point(0., -1000.)),
+            ..Default::default()
+        });
+        visual.run_until_parked();
+        let track_after = visual.debug_bounds("SCROLLBAR_TRACK").unwrap();
+        assert_eq!(track_before, track_after, "the scrollbar track moved with the content");
+        assert!(
+            track_after.top() >= viewport.top() - px(1.) && track_after.bottom() <= viewport.bottom() + px(1.),
+            "the track must lie inside the visible scroll area: {track_after:?} {viewport:?}"
+        );
+        // Scrolled to the end, the thumb rests at the bottom of its fixed track.
+        let thumb_after = visual
+            .debug_bounds("SCROLLBAR_THUMB")
+            .expect("the thumb is drawn once the panel has scrolled");
+        if let Some(before) = thumb_before {
+            assert!(thumb_after.top() > before.top(), "the thumb should move down: {before:?} {thumb_after:?}");
+        }
+        assert!(
+            thumb_after.top() >= track_after.top() && thumb_after.bottom() <= track_after.bottom() + px(1.),
+            "the thumb must stay inside its track: {thumb_after:?} {track_after:?}"
+        );
+        assert!(
+            (track_after.bottom() - thumb_after.bottom()).abs() <= px(8.),
+            "at the end of the content the thumb sits at the bottom of the track: {thumb_after:?} {track_after:?}"
+        );
+        let last = visual.debug_bounds(final_selector).unwrap();
+        assert!(
+            last.top() >= viewport.top() && last.bottom() <= viewport.bottom(),
+            "{view:?}: {last:?} {viewport:?}"
+        );
+    }
+}
+
+
+fn usage_card_fixture() -> runner_core::protocol::MissionReview {
+    use runner_core::protocol::{BudgetState, CallUsage, MissionBudget, MissionReview};
+    let call = |index: usize, key: &str| CallUsage {
+        usage_id: format!("u{index}"),
+        runtime: "muse".into(),
+        session_key: key.into(),
+        at: format!("2026-11-12T10:{:02}:00+00:00", index % 60),
+        input_tokens: 1_000 + index as i64 * 37,
+        output_tokens: 50,
+        cached_tokens: 600,
+        reasoning_tokens: 0,
+        points_cached_in_full: Some(0.01 + index as f64 * 0.001),
+        points_cached_free: Some(0.03 + index as f64 * 0.001),
+    };
+    MissionReview {
+        mission_id: "test-mission".into(),
+        rating: None,
+        slots: Vec::new(),
+        budget: vec![MissionBudget {
+            runtime: "muse".into(),
+            window: "Week".into(),
+            state: BudgetState::Measured,
+            first_percent: 44.0,
+            latest_percent: 45.0,
+            used_points: Some(1.0),
+            first_read_at: "2026-11-12T10:00:00+00:00".into(),
+            latest_read_at: "2026-11-12T10:30:00+00:00".into(),
+            readings: 3,
+            other_sessions: 0,
+            attributed_low: Some(0.5),
+            attributed_high: Some(1.5),
+            rounding_margin: Some(0.05),
+            window_points: Some(45.0),
+            share_low: Some(0.01),
+            share_high: Some(0.03),
+        }],
+        calls: (0..40)
+            .map(|index| call(index, if index % 2 == 0 { "key-0" } else { "key-1" }))
+            .collect(),
     }
 }
 
@@ -2558,7 +2727,9 @@ fn roster_changes_are_dividers_with_person_attribution() {
         ("role_removed", "left", "removed"),
     ] {
         let event = signal(kind, serde_json::json!({"handle":"worker-2"}));
-        let blocks = crate::surfaces::mission_feed::group_feed_blocks(std::slice::from_ref(&event));
+        let blocks = crate::surfaces::mission_workspace::feed_model::group_feed_blocks(
+            std::slice::from_ref(&event),
+        );
         assert!(matches!(blocks.as_slice(), [FeedBlock::Divider(_)]));
         assert!(mission_divider_label(&event)
             .starts_with(&format!("@worker-2 {verb} · {action} by you · ")));
@@ -2572,7 +2743,9 @@ fn an_interruption_is_a_feed_warning_that_names_the_member() {
         serde_json::json!({"at": "2026-11-05T07:50:17Z"}),
     );
     event.from = "coder".into();
-    let blocks = crate::surfaces::mission_feed::group_feed_blocks(std::slice::from_ref(&event));
+    let blocks = crate::surfaces::mission_workspace::feed_model::group_feed_blocks(
+        std::slice::from_ref(&event),
+    );
     assert!(matches!(blocks.as_slice(), [FeedBlock::Signal(_)]));
     assert_eq!(
         mission_signal_body(&event),
@@ -2900,7 +3073,7 @@ fn assert_feed_projection(workspace: &MissionWorkspace) {
         format!("{:?}", workspace.feed_blocks),
         format!(
             "{:?}",
-            crate::surfaces::mission_feed::group_feed_blocks(&workspace.events)
+            crate::surfaces::mission_workspace::feed_model::group_feed_blocks(&workspace.events)
         ),
     );
     assert_eq!(
@@ -4633,7 +4806,10 @@ fn osc52_visibility_follows_the_mission_terminals_a_window_draws() {
     let mission = store.read_with(&cx, |store, _| {
         runner_daemon::ops::mission::mission_get(&store.test_core, "test-mission").unwrap()
     });
-    let visual = cx.add_empty_window();
+    let host = cx.add_window(|_, _| gpui::Empty);
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
+    visual.run_until_parked();
+    let visual = &mut visual;
     let workspace = visual.update(|window, cx| {
         cx.new(|cx| {
             let mut workspace = MissionWorkspace::new(
@@ -4906,5 +5082,111 @@ fn a_file_link_in_a_mission_terminal_opens_the_rails_preview() {
         });
         click(&mut visual, root.join("lib.rs"));
         assert_eq!(launched(), 1);
+    }
+}
+
+#[test]
+fn remote_mission_refusals_keep_resume_and_restart_distinct_through_update() {
+    use crate::surfaces::remote_client::{tests as remote_test, RemoteItem};
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    for action in ["resume", "restart", "resumeMission"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cx = gpui::TestAppContext::single();
+        let (store, fake, _) = remote_test::fixture(&mut cx, temp.path());
+        remote_test::enable_missions(&fake);
+        fake.set_features(&[
+            "catalog",
+            "feed",
+            "follow",
+            "unfollow",
+            "answer",
+            "post",
+            "resume",
+            "restart",
+            "resumeMission",
+            "runtimeTaskStart",
+            "runtimeTask",
+        ]);
+        fake.set_overview(serde_json::from_value(serde_json::json!({"projects":[],"tabs":[],"missions":[{"id":"remote-mission","project":null,"title":"Host mission","crew":"Duo","state":"running","pinned":false,"members":[{"handle":"coder","session":"member","lead":false}],"asks":[],"shells":[]}],"sessions":{"member":{"kind":"missionSlot","title":"Member","runtime":"codex","status":"stopped","unread":false}}})).unwrap());
+        fake.queue_result(action, Err(remote_test::update_gate_error()));
+        fake.queue_result("runtimeTaskStart", Ok(remote_test::completed_update()));
+        let window = remote_test::add_window(&mut cx, &store, temp.path(), action);
+        window
+            .update(&mut cx, |root, window, cx| {
+                remote_test::choose_host(root, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |root, _, cx| {
+                root.select_remote_item(RemoteItem::Mission("remote-mission".into()), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let workspace = window
+            .read_with(&cx, |root, _| {
+                root.remote_client
+                    .workspace()
+                    .unwrap()
+                    .mission_workspace
+                    .clone()
+            })
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), &cx);
+        visual.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                if action == "resumeMission" {
+                    workspace.resume_open_mission(window, cx);
+                } else {
+                    workspace.act_on_slot(
+                        "member",
+                        if action == "restart" {
+                            SessionControlKind::Restart
+                        } else {
+                            SessionControlKind::Resume
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            })
+        });
+        visual.run_until_parked();
+        window
+            .read_with(&visual, |root, cx| {
+                let host = root.front_page_client(cx).target;
+                let gate = root
+                    .agent_tasks
+                    .gates
+                    .get(&(host, "member".into()))
+                    .expect("validated remote refusal reaches recovery");
+                assert_eq!(
+                    gate.action == crate::surfaces::agent_recovery::RecoveryAction::Restart,
+                    action == "restart"
+                );
+            })
+            .unwrap();
+        // Select the slot so its recovery card is shown.
+        visual.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.select_mission_session("member", window, cx)
+            })
+        });
+        visual.run_until_parked();
+        let button = visual
+            .debug_bounds("AGENT_RECOVERY_UPDATE:member")
+            .expect("mission recovery action");
+        visual.simulate_click(button.center(), Default::default());
+        visual.run_until_parked();
+        assert_eq!(fake.request_count("runtimeTaskStart"), 1);
+        if action == "restart" {
+            assert_eq!(fake.request_count("restart"), 2);
+            assert_eq!(fake.request_count("resume"), 0);
+        } else {
+            assert_eq!(
+                fake.request_count("resume"),
+                if action == "resume" { 2 } else { 1 }
+            );
+        }
     }
 }

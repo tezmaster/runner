@@ -1,17 +1,22 @@
 mod actions;
 mod attach;
 mod composer;
+mod composer_model;
 mod drawer;
 mod events;
 mod feed;
+mod feed_model;
 mod input;
 mod rail;
 mod remote;
 #[cfg(test)]
 mod remote_tests;
+mod review;
 mod routing;
 mod state;
 mod terminal_pane;
+mod usage_chart;
+pub(crate) use usage_chart::points_text;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -33,9 +38,9 @@ use runner_core::protocol::session::SessionRow;
 
 use super::front_page::client::is_concurrent_resume_error;
 use super::*;
-use crate::surfaces::mission_composer::ComposerState;
-use crate::surfaces::mission_feed::{message_text, FeedBlock};
 use crate::surfaces::mission_markdown::{FeedMarkdown, FeedSelection};
+use crate::surfaces::mission_workspace::composer_model::ComposerState;
+use crate::surfaces::mission_workspace::feed_model::{message_text, FeedBlock};
 use crate::surfaces::side_panel::PanelViewId;
 use crate::*;
 
@@ -360,6 +365,9 @@ pub(crate) struct MissionWorkspace {
     session_statuses: BTreeMap<String, SessionActivityState>,
     session_observations: BTreeMap<String, runner_core::protocol::status::AgentStatus>,
     goal: Option<String>,
+    review: review::ReviewState,
+    meta_scroll: gpui::ScrollHandle,
+    meta_scrollbar: Entity<Scrollbar>,
     feed_blocks: Vec<FeedBlock>,
     feed_rows: Vec<FeedRow>,
     feed_block_starts: Vec<usize>,

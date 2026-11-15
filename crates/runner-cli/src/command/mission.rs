@@ -10,6 +10,7 @@ pub(super) fn mission_arg(command: &MissionCommand) -> Option<&Option<String>> {
         | MissionCommand::Pin { mission }
         | MissionCommand::Unpin { mission }
         | MissionCommand::Move { mission, .. }
+        | MissionCommand::Review { mission, .. }
         | MissionCommand::Feed { mission, .. } => Some(mission),
         _ => None,
     }
@@ -225,6 +226,88 @@ pub(super) async fn run_mission(
         MissionCommand::Unlink { mission } => {
             let mission_id = resolve_mission(client, mission).await?;
             call(client, "mission_unlink", json!({"mission_id": mission_id})).await
+        }
+        MissionCommand::Rate {
+            mission,
+            verdict,
+            note,
+            clear,
+        } => {
+            if matches!(context, BusContext::Mission(_)) {
+                return Err(CliError::usage(
+                    "runner mission rate is for the person; ask the person to rate the mission",
+                ));
+            }
+            let verdict = match (verdict.as_deref(), clear) {
+                (Some("up"), false) => Some("up"),
+                (Some("down"), false) => Some("down"),
+                (None, true) => None,
+                (Some(other), false) => {
+                    return Err(CliError::usage(format!(
+                        "invalid rating {other:?}; expected up or down"
+                    )))
+                }
+                (None, false) => {
+                    return Err(CliError::usage(
+                        "runner mission rate needs up or down, or --clear",
+                    ))
+                }
+                (Some(_), true) => unreachable!("clap refuses a verdict with --clear"),
+            };
+            let mission_id = resolve_mission(client, mission).await?;
+            call(
+                client,
+                "mission_rate",
+                json!({"mission_id": mission_id, "verdict": verdict,
+                "note": note.clone().unwrap_or_default()}),
+            )
+            .await
+        }
+        MissionCommand::Review { mission, sample } => {
+            let id = resolve_mission_arg(client, mission.as_deref(), context).await?;
+            if *sample {
+                call(client, "mission_budget_sample", json!({"mission_id": id})).await?;
+            }
+            call(client, "mission_review_get", json!({"mission_id": id})).await
+        }
+        MissionCommand::UsageBackfill { days } => {
+            if matches!(context, BusContext::Mission(_)) {
+                return Err(CliError::usage(
+                    "runner mission usage-backfill is for the person; ask the person to run it",
+                ));
+            }
+            call(client, "mission_usage_backfill", json!({"days": days})).await
+        }
+        MissionCommand::Usage { days } => {
+            call(client, "mission_usage_list", json!({"days": days})).await
+        }
+        MissionCommand::UsageRecord { mission, file } => {
+            if matches!(context, BusContext::Mission(_)) {
+                return Err(CliError::usage(
+                    "runner mission usage-record is for the person; ask the person to record usage",
+                ));
+            }
+            let mission_id = resolve_mission(client, mission).await?;
+            let text = read_file(file, "usage")?;
+            let parsed: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| CliError::usage(format!("usage JSON: {error}")))?;
+            let slots = match parsed {
+                serde_json::Value::Array(_) => parsed,
+                serde_json::Value::Object(mut map) => map.remove("slots").ok_or_else(|| {
+                    CliError::usage("usage JSON needs a \"slots\" array".to_owned())
+                })?,
+                _ => {
+                    return Err(CliError::usage(
+                        "usage JSON must be an array of slots or an object with \"slots\"",
+                    ))
+                }
+            };
+            call(
+                client,
+                "mission_usage_record",
+                json!({"mission_id": mission_id, "slots": slots}),
+            )
+            .await
         }
         MissionCommand::Feed {
             mission,

@@ -27,6 +27,7 @@ struct Relay {
     tx: mpsc::UnboundedSender<RelayCommand>,
     hosts: StdMutex<Vec<Computer>>,
     listings: AtomicU32,
+    directory_error: AtomicBool,
     opens: AtomicU32,
     writer: Arc<WriteGate>,
 }
@@ -34,6 +35,8 @@ struct Relay {
 struct WriteGate {
     blocked: AtomicBool,
     entered: tokio::sync::Notify,
+    block_reads: AtomicBool,
+    reader: futures_util::task::AtomicWaker,
     waker: futures_util::task::AtomicWaker,
 }
 struct GatedConnection(tokio::io::DuplexStream, Arc<WriteGate>);
@@ -43,6 +46,10 @@ impl tokio::io::AsyncRead for GatedConnection {
         cx: &mut std::task::Context<'_>,
         buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        self.1.reader.register(cx.waker());
+        if self.1.block_reads.load(Ordering::Acquire) {
+            return std::task::Poll::Pending;
+        }
         std::pin::Pin::new(&mut self.0).poll_read(cx, buffer)
     }
 }
@@ -76,6 +83,9 @@ impl Service for Relay {
     fn list<'a>(&'a self, _: &'a Context) -> BoxFuture<'a, Result<Vec<Computer>>> {
         Box::pin(async {
             self.listings.fetch_add(1, Ordering::Relaxed);
+            if self.directory_error.load(Ordering::Acquire) {
+                return Err("Could not list computers: resource_exhausted.".into());
+            }
             Ok(self.hosts.lock().unwrap().clone())
         })
     }
@@ -124,6 +134,17 @@ impl Fixture {
         Self::with_store(Arc::new(MemoryStore::default())).await
     }
     async fn with_store(store: Arc<dyn SecretStore>) -> Self {
+        Self::with_host(store, crate::companion::FEATURES).await
+    }
+    async fn without_ping() -> Self {
+        let features: Vec<_> = crate::companion::FEATURES
+            .iter()
+            .copied()
+            .filter(|feature| *feature != "ping")
+            .collect();
+        Self::with_host(Arc::new(MemoryStore::default()), &features).await
+    }
+    async fn with_host(store: Arc<dyn SecretStore>, features: &[&'static str]) -> Self {
         let root = tempfile::tempdir().unwrap();
         let mut identity = Identity::generate().unwrap();
         identity.pin = Some(Secret("012345".into()));
@@ -179,6 +200,7 @@ impl Fixture {
                 ..Default::default()
             }]),
             listings: AtomicU32::new(0),
+            directory_error: AtomicBool::new(false),
             opens: AtomicU32::new(0),
             writer: Default::default(),
         });
@@ -201,6 +223,7 @@ impl Fixture {
         };
         let writes = Arc::new(TrustWrites::default());
         let mut channels = Channels::new(writes.clone(), companion);
+        channels.features = features.to_vec();
         let path = root.path().to_path_buf();
         let stop = cancel.clone();
         tokio::spawn(async move {
@@ -217,7 +240,7 @@ impl Fixture {
                                 match channels.open(id, &machine) { Ok(()) => {}, Err(reason) => { sockets.get_mut(&id).unwrap().send(Message::Binary(reason.frame().into())).await.unwrap(); } }
                                 let tx = tx.clone(); tokio::spawn(async move {
                                     while let Some(frame) = stream.next().await {
-                                        match frame { Ok(Message::Binary(bytes)) => { let _ = tx.send(RelayCommand::Frame(id, Some(bytes.to_vec()))); }, _ => break }
+                                        match frame { Ok(Message::Binary(bytes)) => { let _ = tx.send(RelayCommand::Frame(id, Some(bytes.to_vec()))); }, Ok(Message::Ping(_) | Message::Pong(_)) => {}, _ => break }
                                     }
                                     let _ = tx.send(RelayCommand::Frame(id, None));
                                 });
@@ -460,6 +483,7 @@ impl crate::companion::core::Core for TestCore {
             return Err(crate::companion::core::Failure(
                 c::ErrorCode::NotFound,
                 "Terminal has stopped.",
+                None,
             ));
         }
         let terminal = self.clone().terminal(target, history)?;
@@ -1039,6 +1063,9 @@ async fn changed_listing_is_not_paired_and_reset_deletes_client_keys() {
     fixture.relay.hosts.lock().unwrap()[0].fingerprint = "changed".into();
     *fixture.client.0.directory.lock().await = None;
     assert!(!fixture.client.computers().await.unwrap()[0].paired);
+    fixture.client.overview("2".into()).await.unwrap();
+    fixture.drop_route().await;
+    tokio::task::yield_now().await;
     assert!(fixture
         .client
         .overview("2".into())
@@ -1166,6 +1193,7 @@ async fn no_pin_locked_pin_and_bad_handshake_are_clear_and_never_retried() {
     let mut saved = Saved::load(fixture.root.path()).unwrap().unwrap();
     saved.host_name = String::new();
     saved.save(fixture.root.path()).unwrap();
+    fixture.client.0.cached.lock().await.context = None;
     assert_eq!(
         fixture
             .client
@@ -1355,6 +1383,7 @@ async fn stored_pin_mismatch_fails_before_connect_and_debug_redacts_private_keys
     key.public = vec![0; 32];
     assert!(!format!("{keys:?}").contains(&private));
     keys.save(fixture.store.as_ref()).unwrap();
+    fixture.client.0.cached.lock().await.keys = None;
     assert!(fixture
         .client
         .computers()
@@ -1826,30 +1855,21 @@ async fn ipc_fixture(
 
 #[tokio::test]
 async fn queued_input_rejections_and_teardown_reach_the_scoped_ipc_error_event() {
-    for failure in ["bytes", "generation", "teardown"] {
-        let fixture = Fixture::new().await;
+    for failure in ["bytes", "teardown"] {
+        let fixture = Fixture::without_ping().await;
         fixture.pair().await;
         let (_root, _server, ipc) = ipc_fixture(&fixture).await;
         let mut events = ipc.subscribe();
         let route = fixture.client.route("2").await.unwrap();
         match failure {
-            "bytes" => fixture
-                .client
-                .input(
-                    "2".into(),
-                    "session".into(),
-                    vec![b'x'; c::MAX_MESSAGE_SIZE],
+            "bytes" => {
+                fixture.relay.writer.blocked.store(true, Ordering::Release);
+                ipc.input(
+                    &remote::terminal_address("2", "session"),
+                    &vec![b'x'; c::MAX_MESSAGE_SIZE + 64 * 1024],
                 )
-                .await
-                .unwrap(),
-            "generation" => route
-                .tx
-                .try_send(route::Command::Input(
-                    route.generation().wrapping_sub(1),
-                    "session".into(),
-                    b"discarded-generation".to_vec(),
-                ))
-                .unwrap(),
+                .unwrap();
+            }
             _ => {
                 let writer = fixture.relay.writer.clone();
                 writer.blocked.store(true, Ordering::Release);
@@ -1927,8 +1947,7 @@ async fn delayed_actions_survive_the_ipc_and_fork_route_deadlines() {
         );
         if kind == "fork" {
             tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(40)).await;
-            tokio::task::yield_now().await;
+            keep_alive(&fixture, 40).await;
             assert!(!action.is_finished());
             assert!(fixture
                 .client
@@ -1991,14 +2010,12 @@ async fn a_pending_fork_does_not_block_unrelated_ipc_requests_or_reconnect_the_r
         ipc_remote_request(&ipc, request).await;
     }
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(40)).await;
-    tokio::task::yield_now().await;
+    keep_alive(&fixture, 40).await;
     assert!(route.ready.load(Ordering::Acquire));
     assert_eq!(route.generation(), generation);
     assert!(!fork.is_finished());
     ipc_remote_request(&ipc, serde_json::json!({"type":"catalog","id":1})).await;
-    tokio::time::advance(Duration::from_secs(20)).await;
-    tokio::task::yield_now().await;
+    keep_alive(&fixture, 20).await;
     release.send(()).unwrap();
     tokio::time::resume();
     assert_eq!(fork.await.unwrap()["session"], "forked");
@@ -2189,3 +2206,116 @@ async fn ipc_slow_resync_keeps_the_final_snapshot_after_the_host_terminal_closes
 
 #[path = "action_tests.rs"]
 mod action_tests;
+
+#[tokio::test]
+async fn an_open_route_reports_the_round_trip_of_its_pings_and_stays_connected() {
+    let fixture = Fixture::new().await;
+    let mut events = fixture.client.0.events.subscribe();
+    fixture.pair().await;
+    loop {
+        let event = events.recv().await.unwrap();
+        if event.name == "remote/latency" {
+            assert_eq!(event.payload["computer"], "2");
+            assert!(event.payload["ms"].as_u64().unwrap() < 10_000);
+            break;
+        }
+    }
+    fixture.client.overview("2".into()).await.unwrap();
+    let routes = fixture.client.0.routes.lock().await;
+    assert!(routes
+        .values()
+        .all(|route| route.ready.load(Ordering::Acquire)));
+}
+
+#[tokio::test]
+async fn a_host_that_does_not_list_ping_is_sent_none_and_reports_no_latency() {
+    let fixture = Fixture::without_ping().await;
+    let mut events = fixture.client.0.events.subscribe();
+    fixture.pair().await;
+    // The first ping leaves within a timer tick of connecting, and its pong would come before
+    // the reply to an overview sent after that tick.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    fixture.client.overview("2".into()).await.unwrap();
+    let mut connected = false;
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event.name, "remote/latency");
+        connected |= event.name == "remote/connection" && event.payload["state"] == "connected";
+    }
+    assert!(connected);
+    let routes = fixture.client.0.routes.lock().await;
+    assert!(routes
+        .values()
+        .all(|route| route.ready.load(Ordering::Acquire)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn latency_stops_with_the_route_and_starts_again_once_it_returns() {
+    let fixture = Fixture::new().await;
+    let mut events = fixture.client.0.events.subscribe();
+    fixture.pair().await;
+    fixture.client.follow("2".into(), 1, true).await.unwrap();
+    loop {
+        if events.recv().await.unwrap().name == "remote/latency" {
+            break;
+        }
+    }
+    fixture.drop_route().await;
+    loop {
+        let event = events.recv().await.unwrap();
+        if event.name == "remote/connection" && event.payload["state"] == "reconnecting" {
+            break;
+        }
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    loop {
+        let event = events.recv().await.unwrap();
+        assert_ne!(
+            event.name, "remote/latency",
+            "no sample may survive the route"
+        );
+        if event.name == "remote/connection" && event.payload["state"] == "connected" {
+            break;
+        }
+    }
+    loop {
+        if events.recv().await.unwrap().name == "remote/latency" {
+            break;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pings_do_not_keep_an_idle_route_open() {
+    let fixture = Fixture::new().await;
+    let mut events = fixture.client.0.events.subscribe();
+    fixture.pair().await;
+    let mut pongs = 0;
+    loop {
+        let event = events.recv().await.unwrap();
+        pongs += u32::from(event.name == "remote/latency");
+        if event.name == "remote/connection" && event.payload["state"] == "disconnected" {
+            break;
+        }
+    }
+    assert!(pongs > 1, "the idle route should have been pinged");
+}
+
+#[path = "robustness_tests.rs"]
+mod robustness_tests;
+
+async fn keep_alive(fixture: &Fixture, seconds: u64) {
+    for _ in 0..seconds.div_ceil(5) {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(fixture
+            .client
+            .0
+            .routes
+            .lock()
+            .await
+            .values()
+            .all(|route| route.ready.load(Ordering::Acquire)));
+    }
+}

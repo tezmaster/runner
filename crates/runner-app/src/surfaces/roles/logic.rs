@@ -177,7 +177,7 @@ pub(crate) fn role_edit_runtime_options(
 }
 
 /// The effort choices for a runtime and model. A slot's blank choice inherits
-/// the role's effort while it runs the role's own runtime.
+/// the role's model and effort while it runs the role's own runtime.
 pub(crate) fn effort_options(
     runtimes: &[RuntimeCatalogEntry],
     runtime: &str,
@@ -186,12 +186,14 @@ pub(crate) fn effort_options(
     model: &str,
 ) -> Vec<SelectOption> {
     runtime_entry(runtimes, runtime)
-        .map(|runtime| {
-            if edits_slot {
-                runtime.efforts_for_model(model)
-            } else {
-                role_model_efforts(runtime, model)
-            }
+        .map(|entry| {
+            let effective_model =
+                if edits_slot && model.trim().is_empty() && runtime == role.runtime {
+                    role.model.as_deref().unwrap_or_default()
+                } else {
+                    model
+                };
+            role_model_efforts(entry, effective_model)
         })
         .unwrap_or_default()
         .iter()
@@ -249,7 +251,11 @@ fn role_model_efforts(runtime: &RuntimeCatalogEntry, model: &str) -> Vec<Runtime
         model
     };
     if model.trim().is_empty() {
-        runtime.efforts.clone()
+        if runtime.capabilities.effort_needs_launch_model {
+            runtime.efforts_for_model("")
+        } else {
+            runtime.efforts.clone()
+        }
     } else {
         runtime.efforts_for_model(model)
     }
@@ -302,11 +308,19 @@ pub(super) fn role_edit_is_dirty(form: &RoleEditForm, cx: &Context<NativeRoot>) 
         || trimmed_option(form.system_prompt.read(cx).text()) != stored(&role.system_prompt)
 }
 
-/// Mission permissions are fixed, so old role permission flags stay out of the form.
 pub(super) fn role_visible_args(role: &Role) -> Vec<String> {
     runner_core::protocol::runtime_metadata::for_key(&role.runtime)
         .permissions()
         .strip(&role.args)
+}
+
+pub(super) fn role_command_label(role: &Role) -> String {
+    let args = role_visible_args(role);
+    if args.is_empty() {
+        role.command.clone()
+    } else {
+        format!("{} {}", role.command, args.join(" "))
+    }
 }
 
 /// The args a save writes. The field joins args with spaces, so while it
@@ -315,7 +329,10 @@ pub(super) fn role_visible_args(role: &Role) -> Vec<String> {
 /// whitespace.
 pub(super) fn role_edit_args(form: &RoleEditForm, cx: &Context<NativeRoot>) -> Vec<String> {
     let visible = role_visible_args(&form.role);
-    let edited = split_args(form.args.read(cx).text());
+    let Some(args) = form.args.as_ref() else {
+        return visible;
+    };
+    let edited = split_args(args.read(cx).text());
     if edited == split_args(&visible.join(" ")) {
         visible
     } else {
@@ -338,7 +355,6 @@ pub(super) fn create_role_form_is_composing(
 ) -> bool {
     form.handle.read(cx).is_composing()
         || form.display_name.read(cx).is_composing()
-        || form.args.read(cx).is_composing()
         || form.model.read(cx).is_composing()
         || form.working_dir.read(cx).is_composing()
         || form.system_prompt.read(cx).is_composing()
@@ -346,7 +362,10 @@ pub(super) fn create_role_form_is_composing(
 
 pub(super) fn role_edit_form_is_composing(form: &RoleEditForm, cx: &Context<NativeRoot>) -> bool {
     form.display_name.read(cx).is_composing()
-        || form.args.read(cx).is_composing()
+        || form
+            .args
+            .as_ref()
+            .is_some_and(|args| args.read(cx).is_composing())
         || form.model.read(cx).is_composing()
         || form.working_dir.read(cx).is_composing()
         || form.system_prompt.read(cx).is_composing()

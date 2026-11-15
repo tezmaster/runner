@@ -192,6 +192,7 @@ pub mod codex {
         ));
         Some(RuntimeCatalog {
             name: Runtime::Codex,
+            min_version: Some("0.149.0"),
             display_name: Runtime::Codex.display_name(),
             command: Runtime::Codex.command().unwrap(),
             capabilities: capabilities(),
@@ -310,6 +311,7 @@ pub mod claude_code {
         ];
         Some(RuntimeCatalog {
             name: Runtime::ClaudeCode,
+            min_version: None,
             display_name: Runtime::ClaudeCode.display_name(),
             command: Runtime::ClaudeCode.command().unwrap(),
             capabilities: capabilities(),
@@ -333,18 +335,41 @@ pub mod claude_code {
     pub const SKILL_DIRS: &[&str] = &[".claude/skills"];
 }
 pub const ANTIGRAVITY_MODELS: &[(&str, &[&str])] = &[
+    ("gemini-4-carbon", &["low", "medium", "high"]),
+    ("gemini-4-argon", &["low", "medium", "high"]),
+    ("gemini-4-hydrogen", &["low", "medium", "high", "xhigh"]),
+    ("gemini-pro-orchestrator", &[]),
+    ("gemini-pro-orchestrator-argon", &[]),
     ("gemini-3.8-flash", &["low", "medium", "high"]),
-    ("gemini-3.7-flash", &["low", "medium", "high"]),
-    ("gemini-3.6-flash", &["low", "medium", "high"]),
-    ("gemini-3.1-pro", &["low", "high"]),
-    ("claude-sonnet-4-6", &[]),
-    ("claude-opus-4-6-thinking", &[]),
-    ("gpt-oss-120b-medium", &[]),
+    ("claude-opus-5-5", &["low", "medium", "high"]),
+    ("claude-sonnet-5-5", &["low", "medium", "high"]),
+    ("gpt-oss-120b", &["medium"]),
 ];
-pub const ANTIGRAVITY_EFFORTS: &[&str] = &["low", "medium", "high"];
+pub const ANTIGRAVITY_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 pub mod antigravity {
     use super::super::runtime_options::*;
     use super::*;
+
+    /// Split an Antigravity effort-suffixed model ID such as
+    /// `gemini-4-hydrogen-xhigh` into `(base_model, effort_level)`.
+    pub fn split_leveled_model(id: &str) -> Option<(&str, &str)> {
+        ANTIGRAVITY_EFFORTS.iter().find_map(|&level| {
+            let base = id.strip_suffix(level)?.strip_suffix('-')?;
+            (!base.is_empty()).then_some((base, level))
+        })
+    }
+
+    /// Split an Antigravity `agy models` `(id, label)` pair when `id` ends with
+    /// `-<level>` and `label` ends with ` (<level>)` (ASCII case-insensitive).
+    pub fn split_leveled_model_with_label<'a>(
+        id: &'a str,
+        label: &'a str,
+    ) -> Option<(&'a str, &'a str, &'a str)> {
+        let (base_id, level) = split_leveled_model(id)?;
+        let (base_label, tag) = label.strip_suffix(')')?.rsplit_once(" (")?;
+        (!base_label.is_empty() && tag.eq_ignore_ascii_case(level))
+            .then_some((base_id, base_label, level))
+    }
     pub static PERMISSIONS: Permissions = Permissions {
         offered: &[
             PermissionMode::Default,
@@ -384,6 +409,7 @@ pub mod antigravity {
     }
     pub fn capabilities() -> RuntimeCapabilities {
         RuntimeCapabilities {
+            usage: true,
             effort_needs_launch_model: true,
             ..Default::default()
         }
@@ -391,6 +417,7 @@ pub mod antigravity {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::Antigravity,
+            min_version: None,
             display_name: Runtime::Antigravity.display_name(),
             command: Runtime::Antigravity.command().unwrap(),
             capabilities: capabilities(),
@@ -480,6 +507,7 @@ pub mod copilot {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::Copilot,
+            min_version: None,
             display_name: Runtime::Copilot.display_name(),
             command: Runtime::Copilot.command().unwrap(),
             capabilities: capabilities(),
@@ -552,6 +580,7 @@ pub mod pi {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::Pi,
+            min_version: None,
             display_name: Runtime::Pi.display_name(),
             command: Runtime::Pi.command().unwrap(),
             capabilities: capabilities(),
@@ -610,6 +639,7 @@ pub mod trae {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::Trae,
+            min_version: None,
             display_name: Runtime::Trae.display_name(),
             command: Runtime::Trae.command().unwrap(),
             capabilities: capabilities(),
@@ -695,6 +725,7 @@ pub mod muse {
         ];
         Some(RuntimeCatalog {
             name: Runtime::Muse,
+            min_version: None,
             display_name: Runtime::Muse.display_name(),
             command: Runtime::Muse.command().unwrap(),
             capabilities: capabilities(),
@@ -707,11 +738,15 @@ pub mod muse {
             skills_dirs: SKILL_DIRS,
             update_args: &[],
             npm_package: None,
+            min_version: None,
         })
     }
     pub const SKILL_DIRS: &[&str] = &[".agents/skills"];
     pub fn capabilities() -> RuntimeCapabilities {
-        RuntimeCapabilities::default()
+        RuntimeCapabilities {
+            usage: true,
+            ..Default::default()
+        }
     }
 }
 pub mod cursor_agent {
@@ -748,6 +783,7 @@ pub mod cursor_agent {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::Cursor,
+            min_version: None,
             display_name: Runtime::Cursor.display_name(),
             command: Runtime::Cursor.command().unwrap(),
             capabilities: RuntimeCapabilities::default(),
@@ -816,6 +852,7 @@ pub mod grok {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::Grok,
+            min_version: None,
             display_name: Runtime::Grok.display_name(),
             command: Runtime::Grok.command().unwrap(),
             capabilities: RuntimeCapabilities::default(),
@@ -861,6 +898,7 @@ pub mod opencode {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::OpenCode,
+            min_version: None,
             display_name: "OpenCode",
             command: "opencode",
             capabilities: RuntimeCapabilities {

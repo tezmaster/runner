@@ -654,7 +654,6 @@ Options:
       --permission <PERMISSION>    Permission mode: default, accept_edits, auto, or bypass
       --prompt <PROMPT>            Inline system prompt; pass an empty value to clear it
       --prompt-file <PROMPT_FILE>  Read the system prompt from a file, or - for stdin
-      --arg <ARGS>                 Append one runtime argument; repeat for multiple arguments
       --env <ENV>                  Set one KEY=VALUE environment entry; repeat as needed
       --cwd <CWD>                  Working directory; pass an empty value to clear it
   -h, --help                       Print help
@@ -681,7 +680,6 @@ Options:
       --permission <PERMISSION>    Permission mode: default, accept_edits, auto, or bypass
       --prompt <PROMPT>            Inline system prompt; pass an empty value to clear it
       --prompt-file <PROMPT_FILE>  Read the system prompt from a file, or - for stdin
-      --arg <ARGS>                 Append one runtime argument; repeat for multiple arguments
       --env <ENV>                  Set one KEY=VALUE environment entry; repeat as needed
       --cwd <CWD>                  Working directory; pass an empty value to clear it
   -h, --help                       Print help
@@ -1332,9 +1330,10 @@ Arguments:
   <SESSION>
 
 Options:
-      --json  Print the tool result as exact JSON
-  -q          Print only result IDs
-  -h, --help  Print help
+      --json           Print the tool result as exact JSON
+      --with-missions  Stop and archive unarchived missions linked to this chat too
+  -q                   Print only result IDs
+  -h, --help           Print help
 ```
 
 ## runner session resume

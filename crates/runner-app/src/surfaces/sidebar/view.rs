@@ -5,7 +5,7 @@ use super::elements::workspace_new_tab_row;
 use super::elements::workspace_row;
 
 use super::*;
-use crate::surfaces::sidebar_logic::{
+use crate::surfaces::sidebar::logic::{
     attention_rollups, indicator_visible, take_drag_state, DropKind, SidebarTree,
 };
 use crate::*;
@@ -442,6 +442,8 @@ impl Sidebar {
                         WorkspaceEntry::Role | WorkspaceEntry::Crew => {
                             self.front_page.supports(&["catalog"])
                         }
+                        // Usage is read from the local daemon only.
+                        WorkspaceEntry::Usage | WorkspaceEntry::MissionControl => false,
                     }
             })
             .map(|entry| {
@@ -517,6 +519,40 @@ impl Sidebar {
                                 if let Some(shell) = shell.upgrade() {
                                     shell.update(cx, |shell, shell_cx| {
                                         shell.open_crews(window, shell_cx)
+                                    });
+                                }
+                            }
+                        },
+                    ),
+                    WorkspaceEntry::Usage => workspace_row(
+                        "workspace-usage",
+                        "gauge.svg",
+                        crate::i18n::text("ui.usage_page_title"),
+                        active,
+                        true,
+                        {
+                            let shell = self.shell.clone();
+                            move |window, cx| {
+                                if let Some(shell) = shell.upgrade() {
+                                    shell.update(cx, |shell, shell_cx| {
+                                        shell.open_usage(window, shell_cx)
+                                    });
+                                }
+                            }
+                        },
+                    ),
+                    WorkspaceEntry::MissionControl => workspace_row(
+                        "workspace-mission-control",
+                        "users.svg",
+                        "Mission Control",
+                        active,
+                        true,
+                        {
+                            let shell = self.shell.clone();
+                            move |window, cx| {
+                                if let Some(shell) = shell.upgrade() {
+                                    shell.update(cx, |shell, shell_cx| {
+                                        shell.open_page_route(crate::AppRoute::MissionControl, window, shell_cx)
                                     });
                                 }
                             }

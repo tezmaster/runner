@@ -60,7 +60,7 @@ impl Sample for crate::remote::RemoteLogout {
 trait Sample {
     fn sample() -> Self;
 }
-macro_rules! scalar { ($($ty:ty => $value:expr),* $(,)?) => { $(impl Sample for $ty { fn sample() -> Self { $value } })* }; }
+macro_rules! scalar { ($($ty:ty => $value:expr_2021),* $(,)?) => { $(impl Sample for $ty { fn sample() -> Self { $value } })* }; }
 scalar!(() => (), bool => true, u8 => 7, u16 => 80, u32 => 3, u64 => 7, usize => 2, i32 => -2, i64 => -3, f64 => 42.5, String => "样例\nvalue".into(), PathBuf => PathBuf::from("sample/路径"), serde_json::Value => serde_json::json!({"nested": [null, true, 42, "样例"]}), chrono::DateTime<chrono::Utc> => "2026-10-05T00:00:00Z".parse().unwrap());
 impl<T: Sample> Sample for Option<T> {
     fn sample() -> Self {
@@ -94,7 +94,7 @@ impl<A: Sample, B: Sample> Sample for Result<A, B> {
 }
 macro_rules! record { ($ty:ident { $($field:ident),* $(,)? }) => { impl Sample for $ty { fn sample() -> Self { Self { $($field: Sample::sample()),* } } } }; }
 macro_rules! variant {
-    ($ty:ident => $value:expr) => {
+    ($ty:ident => $value:expr_2021) => {
         impl Sample for $ty {
             fn sample() -> Self {
                 $value
@@ -123,7 +123,13 @@ record!(AgentObservation {
     background
 });
 record!(ProgramStatusEvidence { message });
+record!(StartupError {
+    runtime,
+    message,
+    output
+});
 record!(AgentStatus {
+    startup_error,
     lifecycle,
     observation,
     exit_code,
@@ -132,8 +138,14 @@ record!(AgentStatus {
     unread_since,
     interrupted_since
 });
+record!(UsageCredits {
+    balance,
+    has_credits,
+    unlimited
+});
 record!(AgentUsage {
     windows,
+    credits,
     updated_at
 });
 record!(AutoResumeReport { resumed, errors });
@@ -314,6 +326,87 @@ record!(MissionLinkInput {
     no_report,
     caller_session_id
 });
+variant!(RatingVerdict => Self::Up);
+record!(MissionRating {
+    verdict,
+    note,
+    rated_at
+});
+record!(MissionRateInput {
+    mission_id,
+    verdict,
+    note
+});
+record!(SlotUsage {
+    handle,
+    runtime,
+    model,
+    effort,
+    prompt_hash,
+    input_tokens,
+    output_tokens,
+    cached_tokens,
+    reasoning_tokens,
+    steps,
+    input_includes_cached,
+    wall_minutes,
+    not_recorded_reason,
+    recorded_at
+});
+record!(MissionUsageRecordInput { mission_id, slots });
+variant!(BudgetState => Self::Measured);
+record!(MissionBudget {
+    runtime,
+    window,
+    state,
+    first_percent,
+    latest_percent,
+    used_points,
+    first_read_at,
+    latest_read_at,
+    readings,
+    other_sessions,
+    attributed_low,
+    attributed_high,
+    rounding_margin,
+    window_points,
+    share_low,
+    share_high
+});
+record!(CallUsage {
+    usage_id,
+    runtime,
+    session_key,
+    at,
+    input_tokens,
+    output_tokens,
+    cached_tokens,
+    reasoning_tokens,
+    points_cached_in_full,
+    points_cached_free
+});
+record!(BackfillSummary { measured, skipped });
+record!(MissionUsageSummary {
+    mission_id,
+    title,
+    status,
+    started_at,
+    stopped_at,
+    last_read_at,
+    last_call_at,
+    runtime,
+    attributed_low,
+    attributed_high,
+    window_points,
+    verdict
+});
+record!(MissionReview {
+    mission_id,
+    rating,
+    slots,
+    budget,
+    calls
+});
 variant!(MissionActivityState => Self::Busy);
 variant!(MissionFeedOrder => Self::OldestFirst);
 record!(MissionFeedArgs {
@@ -379,6 +472,41 @@ record!(MissionWarningSnapshot {
     message,
     payload
 });
+variant!(MissionControlLane => Self::Backlog);
+variant!(MissionControlSourceKind => Self::Ticket);
+record!(MissionControlEvidence { kind, path });
+record!(MissionControlFieldProvenance { field, evidence });
+record!(MissionControlSourceHealth {
+    kind,
+    path,
+    warning
+});
+record!(MissionControlMission {
+    id,
+    title,
+    active_slots,
+    pending_question,
+    newest_handoff,
+    branch,
+    worktree
+});
+record!(MissionControlCard {
+    ticket_id,
+    summary,
+    severity,
+    blockers,
+    triage_state,
+    lane,
+    mission,
+    evidence,
+    provenance
+});
+record!(MissionControlSnapshot {
+    project_id,
+    project_path,
+    cards,
+    health
+});
 record!(MissionStart {
     crew_id,
     scope,
@@ -421,6 +549,7 @@ record!(NodeTabUpsertInput {
 });
 variant!(NodeType => Self::Project);
 variant!(ObservationSource => Self::Hook);
+record!(CustomFlagsValidationError { code, message });
 record!(OverrideValidationError { code, message });
 variant!(PermissionMode => Self::Default);
 variant!(Recipients => Self::new(vec!["coder".into(), "qa".into()]));
@@ -502,6 +631,7 @@ record!(RuntimeCatalogOption {
 });
 variant!(RuntimeCommandSource => Self::Override);
 record!(RuntimeExecutableStatus {
+    launch_options,
     name,
     display_name,
     command,
@@ -514,7 +644,9 @@ record!(RuntimeExecutableStatus {
     state,
     invalid_reason,
     installed_version,
-    available_version
+    available_version,
+    min_version,
+    below_minimum
 });
 variant!(RuntimeRowState => Self::Detected);
 record!(RuntimeStatusResponse { shell, runtimes });
@@ -754,7 +886,7 @@ impl Sample for MissionRoleChange {
 }
 
 macro_rules! round_trip_api {
-    ($( $name:ident($( $arg:ident: $client_ty:ty => $wire_ty:ty = $convert:block ),*) -> $out:ty [$fast:literal] => $handler:expr; )*) => {
+    ($( $name:ident($( $arg:ident: $client_ty:ty => $wire_ty:ty = $convert:block ),*) -> $out:ty [$fast:literal] => $handler:expr_2021; )*) => {
         #[test]
         fn every_request_and_success_or_error_response_crosses_json() {
             $(round_trip(Request::$name { $($arg: <$wire_ty>::sample()),* });
@@ -797,15 +929,7 @@ record!(TerminalMetadata {
     rows,
     controller
 });
-record!(RuntimeUpdateCommand {
-    session_id,
-    command,
-    args,
-    cwd,
-    env,
-    shell_path,
-    size
-});
+
 impl Sample for TerminalController {
     fn sample() -> Self {
         Self::Desktop
@@ -968,3 +1092,231 @@ impl Sample for files::FileContent {
         }
     }
 }
+
+impl Sample for changes::ChangesTarget {
+    fn sample() -> Self {
+        Self::Commit("abc1234".into())
+    }
+}
+impl Sample for changes::CommitSummary {
+    fn sample() -> Self {
+        Self {
+            id: Sample::sample(),
+            short_id: Sample::sample(),
+            subject: Sample::sample(),
+            author: Sample::sample(),
+            date: Sample::sample(),
+            parent_count: Sample::sample(),
+        }
+    }
+}
+impl Sample for changes::ChangesCommits {
+    fn sample() -> Self {
+        Self {
+            checkout_top: Sample::sample(),
+            branch: Sample::sample(),
+            head_commit: Sample::sample(),
+            base: Sample::sample(),
+            commits: Sample::sample(),
+            total: Sample::sample(),
+        }
+    }
+}
+impl Sample for changes::DiffCounts {
+    fn sample() -> Self {
+        Self::Lines {
+            added: 3,
+            removed: 1,
+        }
+    }
+}
+impl Sample for changes::ChangedFile {
+    fn sample() -> Self {
+        Self {
+            path: "src/样例.rs".into(),
+            status: files::FileStatus::Renamed {
+                from: "src/旧.rs".into(),
+            },
+            counts: Sample::sample(),
+            old_blob_id: Sample::sample(),
+            new_blob_id: Sample::sample(),
+            viewed: true,
+            changed_since_viewed: false,
+        }
+    }
+}
+impl Sample for changes::ChangesTotals {
+    fn sample() -> Self {
+        Self {
+            files: 1,
+            viewed: 1,
+            added: 3,
+            removed: 1,
+        }
+    }
+}
+impl Sample for changes::ChangesFiles {
+    fn sample() -> Self {
+        Self {
+            checkout_top: Sample::sample(),
+            files: Sample::sample(),
+            totals: Sample::sample(),
+        }
+    }
+}
+impl Sample for changes::ModeChange {
+    fn sample() -> Self {
+        Self {
+            old: "100644".into(),
+            new: "100755".into(),
+        }
+    }
+}
+impl Sample for changes::DiffOp {
+    fn sample() -> Self {
+        Self::Added { count: 2 }
+    }
+}
+impl Sample for changes::DiffHunk {
+    fn sample() -> Self {
+        Self {
+            header: "@@ -1,2 +1,4 @@ fn demo()".into(),
+            old_start: 1,
+            old_lines: 2,
+            new_start: 1,
+            new_lines: 4,
+            ops: vec![
+                changes::DiffOp::Context { count: 1 },
+                changes::DiffOp::Removed { count: 1 },
+                changes::DiffOp::Added { count: 3 },
+            ],
+        }
+    }
+}
+impl Sample for changes::DiffBody {
+    fn sample() -> Self {
+        Self::Text {
+            old: crate::companion::TerminalBytes(b"old\n".to_vec()),
+            new: crate::companion::TerminalBytes(b"new\n".to_vec()),
+            hunks: Sample::sample(),
+        }
+    }
+}
+impl Sample for changes::ChangesDiff {
+    fn sample() -> Self {
+        Self {
+            path: "src/样例.rs".into(),
+            status: files::FileStatus::Renamed {
+                from: "src/旧.rs".into(),
+            },
+            counts: Sample::sample(),
+            old_blob_id: Sample::sample(),
+            new_blob_id: Sample::sample(),
+            mode_change: Sample::sample(),
+            conflicted: false,
+            body: Sample::sample(),
+        }
+    }
+}
+impl Sample for changes::ChangesViewed {
+    fn sample() -> Self {
+        Self {
+            checkout_top: Sample::sample(),
+            path: "src/样例.rs".into(),
+            old_blob_id: Sample::sample(),
+            new_blob_id: Sample::sample(),
+            viewed: true,
+        }
+    }
+}
+
+#[test]
+fn changes_variants_cross_json() {
+    round_trip(changes::ChangesTarget::Uncommitted);
+    round_trip(changes::ChangesTarget::Commit("deadbeef".into()));
+    round_trip(changes::DiffCounts::Binary);
+    round_trip(changes::DiffBody::Binary {
+        old_size: Some(12),
+        new_size: None,
+    });
+    round_trip(changes::DiffBody::TooLarge {
+        old_size: Some(11_000_000),
+        new_size: Some(20),
+    });
+    round_trip(changes::DiffBody::ModeOnly {
+        old_mode: "100644".into(),
+        new_mode: "100755".into(),
+    });
+    round_trip(changes::DiffBody::Submodule {
+        old_commit: Some("abc".into()),
+        new_commit: Some("def".into()),
+    });
+    round_trip(changes::ChangesViewed::sample());
+}
+
+impl Sample for RuntimeLaunchOptions {
+    fn sample() -> Self {
+        Self {
+            custom_flags: "--search".into(),
+            ..Self::default()
+        }
+    }
+}
+
+variant!(RuntimeLaunchOption => Self::Bypass);
+record!(RuntimeCustomFlagsResponse { status, warning });
+record!(RuntimeCommandPreview {
+    lines,
+    custom_flags_warning
+});
+record!(RuntimeCommandLine {
+    command,
+    note,
+    option
+});
+
+variant!(RuntimeCommandNote => Self::ActiveAccount { name: "Work".into() });
+
+#[test]
+fn optional_catalog_account_preserves_older_requests() {
+    let request = Request::skill_catalogs {
+        account_id: Some("work".into()),
+    };
+    round_trip(request);
+    let legacy: Request = serde_json::from_value(serde_json::json!({"skill_catalogs":{}})).unwrap();
+    assert!(matches!(
+        legacy,
+        Request::skill_catalogs { account_id: None }
+    ));
+    round_trip(Request::usage_set_interval { seconds: 1800 });
+    let old_options: RuntimeLaunchOptions = serde_json::from_value(serde_json::json!({
+        "bypass": true,
+        "remote_plugin_catalog": false,
+        "status_hooks": true
+    }))
+    .unwrap();
+    assert_eq!(old_options.custom_flags, "");
+    assert!(old_options.bypass);
+    assert!(!old_options.remote_plugin_catalog);
+    let old_preview: RuntimeCommandPreview =
+        serde_json::from_value(serde_json::json!({"lines": []})).unwrap();
+    assert_eq!(old_preview.custom_flags_warning, None);
+    let old_response: RuntimeCustomFlagsResponse = serde_json::from_value(serde_json::json!({
+        "status": serde_json::to_value(RuntimeStatusResponse::sample()).unwrap()
+    }))
+    .unwrap();
+    assert_eq!(old_response.warning, None);
+}
+variant!(RuntimeUpdateState => Self::Running);
+record!(RuntimeUpdateTask {
+    id,
+    runtime,
+    from_version,
+    to_version,
+    state,
+    step,
+    message,
+    exit_code,
+    installed_version,
+    running_sessions
+});

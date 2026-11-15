@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 macro_rules! define_dispatch {
-    ($( $name:ident($( $arg:ident: $client_ty:ty => $wire_ty:ty = $convert:block ),*) -> $out:ty [$fast:literal] => $handler:expr; )*) => {
+    ($( $name:ident($( $arg:ident: $client_ty:ty => $wire_ty:ty = $convert:block ),*) -> $out:ty [$fast:literal] => $handler:expr_2021; )*) => {
         pub fn dispatch(core: &AppCore, request: Request) -> Response {
             match request { $( Request::$name { $($arg),* } => Response::$name(
-                ($handler)(core, $($arg),*).map_err(|error: crate::error::Error| ClientError::msg(error.to_string()))
+                ($handler)(core, $($arg),*).map_err(crate::error::Error::into_client_error)
             ), )* }
         }
     };

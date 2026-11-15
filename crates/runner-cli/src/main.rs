@@ -48,10 +48,13 @@ fn daemon(args: DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     if args.isolated {
         let home = paths.home_dir.as_ref().unwrap();
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-        std::env::set_var("CODEX_HOME", home.join(".codex"));
+        // main dispatches runnerd before logging, boot workers or Tokio can start threads.
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
+        }
     }
     let config = runner_daemon::daemon::server::Config {
         endpoint: args
@@ -69,7 +72,8 @@ fn daemon(args: DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
         paths,
         isolated: args.isolated,
     };
-    runner_daemon::daemon::server::run(config)?;
+    // The same single-threaded startup continues through environment cleanup in run.
+    unsafe { runner_daemon::daemon::server::run(config) }?;
     Ok(())
 }
 
@@ -234,11 +238,13 @@ mod tests {
         for arg0 in ["runner-dev", "runner-agent-cli", "/build/runner-agent-cli"] {
             assert_eq!(decide(&[arg0, "mission", "list"], target()), None, "{arg0}");
         }
-        assert_eq!(
-            decide(&["runner", "hook", "report"], target()),
-            None,
-            "hook reports keep their CLI"
-        );
+        for subcommand in ["report", "title"] {
+            assert_eq!(
+                decide(&["runner", "hook", subcommand], target()),
+                None,
+                "hook commands keep their CLI"
+            );
+        }
         let missing = root.path().join("gone/runner").into_os_string();
         assert_eq!(decide(&["runner"], Some(missing)), None);
         assert_eq!(decide(&["runner"], Some("runner".into())), None);

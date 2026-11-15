@@ -26,6 +26,9 @@ const CLIENT_FIXTURES: &[&str] = &[
     "layout_split",
     "start_chat_role",
     "catalog",
+    "runtime_task_start",
+    "runtime_task",
+    "usage",
     "folders",
     "start_chat",
     "start_shell",
@@ -46,6 +49,8 @@ const CLIENT_FIXTURES: &[&str] = &[
     "start_mission",
     "stop_mission",
     "resume_mission",
+    "link_mission",
+    "unlink_mission",
     "overview_request",
     "feed_request",
     "follow",
@@ -59,6 +64,7 @@ const CLIENT_FIXTURES: &[&str] = &[
     "take_control",
     "viewport",
     "detach",
+    "ping",
     "v1_without_later_fields",
     "unknown_request",
     "unknown_control",
@@ -68,6 +74,7 @@ const HOST_FIXTURES: &[&str] = &[
     "result_crew",
     "welcome",
     "result_catalog",
+    "result_usage",
     "result_folders",
     "result_session",
     "result_mission",
@@ -85,6 +92,7 @@ const HOST_FIXTURES: &[&str] = &[
     "error_unknown_request",
     "error_not_running",
     "error_failed",
+    "error_version_gate",
     "unsupported_version",
     "overview_push",
     "overview_without_sidebar",
@@ -105,6 +113,7 @@ const HOST_FIXTURES: &[&str] = &[
     "closed_stopped",
     "closed_archived",
     "closed_unknown",
+    "pong",
     "unknown_status",
     "unknown_reason",
     "unknown_push",
@@ -1068,4 +1077,201 @@ fn retired_set_lead_request_is_unknown_but_retains_its_id() {
         serde_json::to_value(request.response()).unwrap()["code"],
         "unknownRequest"
     );
+}
+
+#[test]
+fn usage_result_has_a_sanitized_wire_type() {
+    let usage: Usage = serde_json::from_value(fixture("result_usage")["result"].clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(usage).unwrap(),
+        fixture("result_usage")["result"]
+    );
+}
+
+#[test]
+fn an_unknown_usage_error_preserves_the_reply_and_other_agents() {
+    let mut result = fixture("result_usage")["result"].clone();
+    result["agents"][1]["error"] = json!("futureReason");
+    let usage: Usage = serde_json::from_value(result.clone()).unwrap();
+    assert_eq!(
+        usage.agents[0].value.as_ref().unwrap().windows[0].used_percent,
+        41.
+    );
+    let reason = usage.agents[1].error.as_ref().unwrap();
+    assert_eq!(
+        reason,
+        &UsageUnavailableReason::Unrecognized("futureReason".into())
+    );
+    assert_eq!(reason.effective(), UsageUnavailableReason::InvalidResponse);
+    assert_eq!(serde_json::to_value(usage).unwrap(), result);
+}
+
+#[test]
+fn usage_credits_round_trip_over_companion_transport() {
+    let mut result = fixture("result_usage")["result"].clone();
+    let credits =
+        json!({"balance": "1250.750012345678901234", "hasCredits": true, "unlimited": false});
+    result["agents"][0]["value"]["credits"] = credits;
+    let usage: Usage = serde_json::from_value(result.clone()).unwrap();
+    let value = usage.agents[0].value.clone().unwrap();
+    let internal: crate::protocol::usage::AgentUsage = value.clone().into();
+    assert_eq!(
+        internal.credits.as_ref().unwrap().balance.as_deref(),
+        Some("1250.750012345678901234")
+    );
+    assert_eq!(UsageValue::from(internal), value);
+    assert_eq!(serde_json::to_value(usage).unwrap(), result);
+}
+
+#[test]
+fn usage_conversions_preserve_values_and_known_errors() {
+    let usage: Usage = serde_json::from_value(fixture("result_usage")["result"].clone()).unwrap();
+    let value = usage.agents[0].value.clone().unwrap();
+    let internal: crate::protocol::usage::AgentUsage = value.clone().into();
+    assert_eq!(UsageValue::from(internal), value);
+    for reason in [
+        UsageUnavailableReason::SignIn,
+        UsageUnavailableReason::KeychainDenied,
+        UsageUnavailableReason::KeychainUnavailable,
+        UsageUnavailableReason::ClaudeUnreachable,
+        UsageUnavailableReason::CodexNoAnswer,
+        UsageUnavailableReason::AntigravityNoAnswer,
+        UsageUnavailableReason::InvalidResponse,
+    ] {
+        let internal: crate::protocol::usage::UnavailableReason = reason.clone().into();
+        assert_eq!(UsageUnavailableReason::from(internal), reason);
+    }
+    assert_eq!(
+        crate::protocol::usage::UnavailableReason::from(UsageUnavailableReason::Unrecognized(
+            "futureReason".into()
+        )),
+        crate::protocol::usage::UnavailableReason::InvalidResponse
+    );
+}
+
+#[test]
+fn update_recovery_wire_preserves_versions_and_startup_errors() {
+    let HostMessage::Error(error) = decode("error_version_gate") else {
+        panic!()
+    };
+    let gate = error.version_gate.unwrap();
+    assert_eq!(gate.runtime, crate::protocol::Runtime::Codex);
+    assert_eq!(gate.installed_version, "0.147.0");
+    assert_eq!(gate.min_version, "0.149.0");
+    let agent = AgentStatus {
+        lifecycle: Lifecycle::Stopped,
+        startup_error: Some(crate::protocol::StartupError {
+            message: "This Codex does not support Runner's hook type.".into(),
+            runtime: crate::protocol::Runtime::Codex,
+            output: "Error loading config.toml: unknown variant mcp_tool".into(),
+        }),
+        ..Default::default()
+    };
+    let status = SessionStatus::from(&agent);
+    let value = serde_json::to_value(&status).unwrap();
+    let decoded: SessionStatus = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.startup_error, agent.startup_error);
+    assert_eq!(decoded.status, Status::Stopped);
+    let old: SessionStatus = serde_json::from_value(json!({
+        "status":"stopped", "reason":null, "unread":false
+    }))
+    .unwrap();
+    assert!(old.startup_error.is_none());
+}
+
+#[test]
+fn archive_action_wire_keeps_default_shape_and_accepts_optional_with_missions() {
+    let default_req = ActionRequest::Archive {
+        id: 7,
+        target: ActionTarget {
+            kind: ActionKind::Session,
+            id: "chat-1".into(),
+        },
+        with_missions: false,
+    };
+    let default_json = serde_json::to_value(&default_req).unwrap();
+    assert!(
+        default_json.get("withMissions").is_none(),
+        "default archive wire shape omits withMissions for older hosts"
+    );
+    assert_eq!(
+        ClientMessage::decode(&serde_json::to_vec(&default_json).unwrap()).unwrap(),
+        ClientMessage::Action(Box::new(default_req))
+    );
+
+    let with_missions_req = ActionRequest::Archive {
+        id: 8,
+        target: ActionTarget {
+            kind: ActionKind::Session,
+            id: "chat-1".into(),
+        },
+        with_missions: true,
+    };
+    let with_missions_json = serde_json::to_value(&with_missions_req).unwrap();
+    assert_eq!(with_missions_json["withMissions"], true);
+    assert_eq!(
+        ClientMessage::decode(&serde_json::to_vec(&with_missions_json).unwrap()).unwrap(),
+        ClientMessage::Action(Box::new(with_missions_req))
+    );
+
+    let bad = ClientMessage::decode(
+        &serde_json::to_vec(&json!({
+            "type": "archive",
+            "id": 9,
+            "target": { "kind": "session", "id": "chat-1" },
+            "withMissions": "yes"
+        }))
+        .unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        bad.message.contains("field withMissions must be a boolean"),
+        "{}",
+        bad.message
+    );
+}
+
+#[test]
+fn mission_link_actions_validate_fields_and_preserve_id_mapping() {
+    assert!(ActionRequest::NAMES.contains(&"linkMission"));
+    assert!(ActionRequest::NAMES.contains(&"unlinkMission"));
+    for name in ["link_mission", "unlink_mission"] {
+        let body = fixture(name);
+        let message = ClientMessage::decode(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let ClientMessage::Action(mut action) = message else {
+            panic!("{name}")
+        };
+        assert_eq!(action.id(), 42);
+        action.set_id(99);
+        assert_eq!(action.id(), 99);
+        assert!(!format!("{action:?}").contains("mission-a"));
+        for field in body
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            let mut invalid = body.clone();
+            invalid[field] = json!({"private-body-canary": true});
+            let error = ClientMessage::decode(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BadRequest, "{name}.{field}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "{}: field {field} must be a string.",
+                    body["type"].as_str().unwrap()
+                )
+            );
+            assert!(!error.message.contains("private-body-canary"));
+
+            let mut missing = body.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let error = ClientMessage::decode(&serde_json::to_vec(&missing).unwrap()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BadRequest, "{name}.{field}");
+            assert_eq!(
+                error.message,
+                format!("{}: missing field {field}.", body["type"].as_str().unwrap())
+            );
+        }
+    }
 }
