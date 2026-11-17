@@ -69,7 +69,10 @@ pub(super) fn headline(range: Range) -> Headline {
     } else {
         2
     };
-    let (low, high) = (format!("{:.decimals$}", range.low), format!("{:.decimals$}", range.high));
+    let (low, high) = (
+        format!("{:.decimals$}", range.low),
+        format!("{:.decimals$}", range.high),
+    );
     if low == high {
         Headline::One(high)
     } else {
@@ -190,7 +193,11 @@ fn add_pair(total: Option<Pair>, next: Option<Pair>) -> Option<Pair> {
 
 fn local_time(at: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(at)
-        .map(|time| time.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_default()
 }
 
@@ -239,7 +246,9 @@ pub(super) fn build_chart(
             let group_value: f64 = members.iter().map(|call| value(call)).sum();
             let points = members
                 .iter()
-                .fold(Some(Pair::default()), |sum, call| add_pair(sum, pair_of(call)))
+                .try_fold(Pair::default(), |sum, call| {
+                    add_pair(Some(sum), pair_of(call))
+                })
                 .map(Pair::range);
             let tokens: i64 = members.iter().map(|call| token_total(call)).sum();
             // The biggest calls, shown in the order they happened.
@@ -280,7 +289,9 @@ pub(super) fn build_chart(
                 rest_calls: rest.len(),
                 rest_points: rest
                     .iter()
-                    .fold(Some(Pair::default()), |sum, call| add_pair(sum, pair_of(call)))
+                    .try_fold(Pair::default(), |sum, call| {
+                        add_pair(Some(sum), pair_of(call))
+                    })
                     .map(Pair::range),
                 rest_tokens: rest.iter().map(|call| token_total(call)).sum(),
                 rest_share: share(rest_value),
@@ -337,27 +348,69 @@ mod tests {
 
     #[test]
     fn the_headline_says_under_a_tenth_one_figure_or_a_range() {
-        assert!(matches!(headline(Range { low: 0.002, high: 0.008 }), Headline::Under(t) if t == "0.01"));
-        assert!(matches!(headline(Range { low: 0.009, high: 0.039 }), Headline::Between(a, b) if (a.as_str(), b.as_str()) == ("0.01", "0.04")));
+        assert!(
+            matches!(headline(Range { low: 0.002, high: 0.008 }), Headline::Under(t) if t == "0.01")
+        );
+        assert!(
+            matches!(headline(Range { low: 0.009, high: 0.039 }), Headline::Between(a, b) if (a.as_str(), b.as_str()) == ("0.01", "0.04"))
+        );
         assert_eq!(points_text(0.05), "0.05");
         assert_eq!(points_text(0.4), "0.4");
-        assert_eq!(points_text(9.96), "10.0", "rounds up, never shows 10.0 as 9.9");
-        assert!(matches!(headline(Range { low: 1.42, high: 1.44 }), Headline::One(t) if t == "1.4"));
-        assert!(matches!(headline(Range { low: 0.07, high: 0.10 }), Headline::Between(a, b) if (a.as_str(), b.as_str()) == ("0.07", "0.10")));
-        assert!(matches!(headline(Range { low: 0.001, high: 0.02 }), Headline::UpTo(t) if t == "0.02"));
-        assert!(matches!(headline(Range { low: 1.4, high: 2.1 }), Headline::Between(a, b) if (a.as_str(), b.as_str()) == ("1.4", "2.1")));
+        assert_eq!(
+            points_text(9.96),
+            "10.0",
+            "rounds up, never shows 10.0 as 9.9"
+        );
+        assert!(
+            matches!(headline(Range { low: 1.42, high: 1.44 }), Headline::One(t) if t == "1.4")
+        );
+        assert!(
+            matches!(headline(Range { low: 0.07, high: 0.10 }), Headline::Between(a, b) if (a.as_str(), b.as_str()) == ("0.07", "0.10"))
+        );
+        assert!(
+            matches!(headline(Range { low: 0.001, high: 0.02 }), Headline::UpTo(t) if t == "0.02")
+        );
+        assert!(
+            matches!(headline(Range { low: 1.4, high: 2.1 }), Headline::Between(a, b) if (a.as_str(), b.as_str()) == ("1.4", "2.1"))
+        );
         assert!(matches!(headline(Range { low: 12.2, high: 12.4 }), Headline::One(t) if t == "12"));
     }
 
     #[test]
     fn the_meter_splits_the_week_into_others_this_mission_and_what_is_left() {
-        let m = meter(44.0, Range { low: 2.0, high: 6.0 });
-        assert!(near(m.others, 0.38) && near(m.mission_solid, 0.02) && near(m.mission_range, 0.04) && near(m.left, 0.56));
-        assert!(near(m.others + m.mission_solid + m.mission_range + m.left, 1.0));
+        let m = meter(
+            44.0,
+            Range {
+                low: 2.0,
+                high: 6.0,
+            },
+        );
+        assert!(
+            near(m.others, 0.38)
+                && near(m.mission_solid, 0.02)
+                && near(m.mission_range, 0.04)
+                && near(m.left, 0.56)
+        );
+        assert!(near(
+            m.others + m.mission_solid + m.mission_range + m.left,
+            1.0
+        ));
         // A mission cannot have used more than the window shows, and a full window has nothing left.
-        let over = meter(10.0, Range { low: 5.0, high: 30.0 });
+        let over = meter(
+            10.0,
+            Range {
+                low: 5.0,
+                high: 30.0,
+            },
+        );
         assert!(near(over.mission_solid + over.mission_range, 0.10) && near(over.others, 0.0));
-        let full = meter(100.0, Range { low: 1.0, high: 2.0 });
+        let full = meter(
+            100.0,
+            Range {
+                low: 1.0,
+                high: 2.0,
+            },
+        );
         assert!(near(full.left, 0.0));
     }
 
@@ -371,11 +424,27 @@ mod tests {
         let chart = build_chart(&calls, UsageMode::Points, &names);
         assert!(chart.has_points);
         assert!(chart.points_mid.is_some_and(|mid| (mid - 5.0).abs() < 1e-9));
-        assert_eq!(chart.groups.iter().map(|g| g.handle.as_str()).collect::<Vec<_>>(), ["coder", "reviewer"]);
+        assert_eq!(
+            chart
+                .groups
+                .iter()
+                .map(|g| g.handle.as_str())
+                .collect::<Vec<_>>(),
+            ["coder", "reviewer"]
+        );
         assert!(near(chart.groups[0].share, 0.8) && near(chart.groups[1].share, 0.2));
-        assert_eq!(chart.groups[0].points, Some(Range { low: 4.0, high: 4.0 }));
+        assert_eq!(
+            chart.groups[0].points,
+            Some(Range {
+                low: 4.0,
+                high: 4.0
+            })
+        );
         assert_eq!(chart.largest, Some(("b".to_owned(), "coder".to_owned())));
-        assert!(chart.groups[0].shown.iter().any(|row| row.largest && row.usage_id == "b"));
+        assert!(chart.groups[0]
+            .shown
+            .iter()
+            .any(|row| row.largest && row.usage_id == "b"));
         assert!(near(chart.groups[0].shown[1].share, 0.6));
     }
 
@@ -384,7 +453,13 @@ mod tests {
         let mut calls = Vec::new();
         for i in 0..12 {
             // Calls 0..11 with growing size; the four smallest are 0..3.
-            calls.push(call(&format!("c{i:02}"), "k1", &format!("2026-11-12T10:{i:02}:00Z"), (i + 1) * 10, Some((i as f64, i as f64))));
+            calls.push(call(
+                &format!("c{i:02}"),
+                "k1",
+                &format!("2026-11-12T10:{i:02}:00Z"),
+                (i + 1) * 10,
+                Some((i as f64, i as f64)),
+            ));
         }
         let chart = build_chart(&calls, UsageMode::Tokens, &names);
         let group = &chart.groups[0];
@@ -392,25 +467,50 @@ mod tests {
         assert_eq!(group.shown.len(), CALLS_SHOWN);
         assert_eq!(group.rest_calls, 4);
         assert_eq!(group.rest_tokens, 10 + 20 + 30 + 40);
-        let order: Vec<&str> = group.shown.iter().map(|row| row.usage_id.as_str()).collect();
+        let order: Vec<&str> = group
+            .shown
+            .iter()
+            .map(|row| row.usage_id.as_str())
+            .collect();
         let mut sorted = order.clone();
         sorted.sort();
         assert_eq!(order, sorted, "shown calls keep the order they happened in");
-        assert!(near(group.shown.iter().map(|r| r.share).sum::<f32>() + group.rest_share, 1.0));
+        assert!(near(
+            group.shown.iter().map(|r| r.share).sum::<f32>() + group.rest_share,
+            1.0
+        ));
     }
 
     #[test]
     fn calls_without_points_fall_back_to_tokens_and_say_so() {
-        let calls = [call("a", "k1", "2026-11-12T10:00:00Z", 100, None), call("b", "k1", "2026-11-12T10:01:00Z", 300, Some((1.0, 2.0)))];
+        let calls = [
+            call("a", "k1", "2026-11-12T10:00:00Z", 100, None),
+            call("b", "k1", "2026-11-12T10:01:00Z", 300, Some((1.0, 2.0))),
+        ];
         let chart = build_chart(&calls, UsageMode::Points, &names);
-        assert!(!chart.has_points, "one call without points makes the whole chart tokens-only");
-        assert!(near(chart.groups[0].shown[1].share, 0.75), "bars are token shares then");
+        assert!(
+            !chart.has_points,
+            "one call without points makes the whole chart tokens-only"
+        );
+        assert!(
+            near(chart.groups[0].shown[1].share, 0.75),
+            "bars are token shares then"
+        );
     }
 
     #[test]
     fn unknown_sessions_are_grouped_apart_and_an_empty_mission_has_no_chart() {
-        let calls = [call("a", "unknown-key", "2026-11-12T10:00:00Z", 5, Some((0.1, 0.1)))];
-        assert_eq!(build_chart(&calls, UsageMode::Points, &names).groups[0].handle, "?");
+        let calls = [call(
+            "a",
+            "unknown-key",
+            "2026-11-12T10:00:00Z",
+            5,
+            Some((0.1, 0.1)),
+        )];
+        assert_eq!(
+            build_chart(&calls, UsageMode::Points, &names).groups[0].handle,
+            "?"
+        );
         let none = build_chart(&[], UsageMode::Points, &names);
         assert!(none.groups.is_empty() && none.largest.is_none() && !none.has_points);
     }

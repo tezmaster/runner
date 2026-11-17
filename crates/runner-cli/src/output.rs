@@ -413,7 +413,10 @@ fn render_mission_usage_list(value: &Value) -> Vec<String> {
             ]
         })
         .collect();
-    let mut lines = table(&["MISSION", "RUNTIME", "POINTS", "RATING", "STATUS", "ID"], table_rows);
+    let mut lines = table(
+        &["MISSION", "RUNTIME", "POINTS", "RATING", "STATUS", "ID"],
+        table_rows,
+    );
     if !lines.is_empty() {
         lines.push(String::new());
         lines.push("Points of the weekly allowance, split by tokens: a range, since whether cached input counts against it is not known.".to_owned());
@@ -446,7 +449,10 @@ fn render_mission_review(value: &Value) -> Vec<String> {
                 .and_then(Value::as_f64)
                 .map_or("?".to_owned(), |p| format!("{p:.0}%"))
         };
-        let others = budget.get("other_sessions").and_then(Value::as_u64).unwrap_or(0);
+        let others = budget
+            .get("other_sessions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let shared = if others == 0 {
             "no other Runner session overlapped".to_owned()
         } else {
@@ -454,11 +460,22 @@ fn render_mission_review(value: &Value) -> Vec<String> {
         };
         let figure = match budget.get("state").and_then(Value::as_str) {
             Some("measured") => {
-                let points = budget.get("used_points").and_then(Value::as_f64).unwrap_or(0.0);
+                let points = budget
+                    .get("used_points")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
                 if points < 1.0 {
-                    format!("under 1 point ({} to {})", percent("first_percent"), percent("latest_percent"))
+                    format!(
+                        "under 1 point ({} to {})",
+                        percent("first_percent"),
+                        percent("latest_percent")
+                    )
                 } else {
-                    format!("about {points:.0} points ({} to {})", percent("first_percent"), percent("latest_percent"))
+                    format!(
+                        "about {points:.0} points ({} to {})",
+                        percent("first_percent"),
+                        percent("latest_percent")
+                    )
                 }
             }
             Some("spanned_reset") => "no figure: the allowance reset during the mission".to_owned(),
@@ -541,7 +558,16 @@ fn render_mission_review(value: &Value) -> Vec<String> {
         .collect();
     lines.push(String::new());
     lines.extend(table(
-        &["SLOT", "RUNTIME", "INPUT", "OUTPUT", "CACHED", "REASONING", "STEPS", "NOTE"],
+        &[
+            "SLOT",
+            "RUNTIME",
+            "INPUT",
+            "OUTPUT",
+            "CACHED",
+            "REASONING",
+            "STEPS",
+            "NOTE",
+        ],
         rows,
     ));
     lines.push(

@@ -125,7 +125,10 @@ fn checked_slot(mut slot: SlotUsage) -> Result<SlotUsage> {
 
 /// Replace the recorded usage of a mission's slots. Whoever harvests a
 /// session log calls this at landing; harvesting again replaces the rows.
-pub fn mission_usage_record(core: &AppCore, input: MissionUsageRecordInput) -> Result<MissionReview> {
+pub fn mission_usage_record(
+    core: &AppCore,
+    input: MissionUsageRecordInput,
+) -> Result<MissionReview> {
     if input.slots.len() > MAX_SLOTS {
         return Err(Error::msg(format!("at most {MAX_SLOTS} slots")));
     }
@@ -210,7 +213,12 @@ mod tests {
             .id
         }
 
-        fn rate(&self, mission: &str, verdict: Option<RatingVerdict>, note: &str) -> Result<Option<MissionRating>> {
+        fn rate(
+            &self,
+            mission: &str,
+            verdict: Option<RatingVerdict>,
+            note: &str,
+        ) -> Result<Option<MissionRating>> {
             mission_rate(
                 &self.core,
                 MissionRateInput {
@@ -254,11 +262,21 @@ mod tests {
     fn rating_again_replaces_and_clearing_removes() {
         let f = fixture();
         let m = f.mission();
-        f.rate(&m, Some(RatingVerdict::Down), "two escapes").unwrap();
-        let second = f.rate(&m, Some(RatingVerdict::Up), "  fine\non retry ").unwrap().unwrap();
+        f.rate(&m, Some(RatingVerdict::Down), "two escapes")
+            .unwrap();
+        let second = f
+            .rate(&m, Some(RatingVerdict::Up), "  fine\non retry ")
+            .unwrap()
+            .unwrap();
         assert_eq!(second.verdict, RatingVerdict::Up);
-        assert_eq!(second.note, "fine on retry", "whitespace and newlines collapse to one line");
-        assert_eq!(mission_review_get(&f.core, &m).unwrap().rating, Some(second));
+        assert_eq!(
+            second.note, "fine on retry",
+            "whitespace and newlines collapse to one line"
+        );
+        assert_eq!(
+            mission_review_get(&f.core, &m).unwrap().rating,
+            Some(second)
+        );
         assert_eq!(f.rate(&m, None, "").unwrap(), None);
         assert_eq!(mission_review_get(&f.core, &m).unwrap().rating, None);
     }
@@ -271,16 +289,22 @@ mod tests {
         let long = "x".repeat(RATING_NOTE_MAX_CHARS + 1);
         assert!(f.rate(&m, Some(RatingVerdict::Down), &long).is_err());
         assert!(f.rate(&m, None, "a note without a verdict").is_err());
-        assert!(f.rate("no-such-mission", Some(RatingVerdict::Up), "").is_err());
+        assert!(f
+            .rate("no-such-mission", Some(RatingVerdict::Up), "")
+            .is_err());
         let kept = mission_review_get(&f.core, &m).unwrap().rating.unwrap();
-        assert_eq!((kept.verdict, kept.note.as_str()), (RatingVerdict::Up, "kept"));
+        assert_eq!(
+            (kept.verdict, kept.note.as_str()),
+            (RatingVerdict::Up, "kept")
+        );
     }
 
     #[test]
     fn recording_usage_replaces_the_earlier_rows() {
         let f = fixture();
         let m = f.mission();
-        f.record(&m, vec![slot("coder", Some(10)), slot("reviewer", Some(5))]).unwrap();
+        f.record(&m, vec![slot("coder", Some(10)), slot("reviewer", Some(5))])
+            .unwrap();
         let review = f.record(&m, vec![slot("coder", Some(99))]).unwrap();
         assert_eq!(review.slots.len(), 1);
         assert_eq!(review.slots[0].input_tokens, Some(99));
@@ -296,8 +320,14 @@ mod tests {
         let review = f.record(&m, vec![unreadable, slot("coder", None)]).unwrap();
         let by = |h: &str| review.slots.iter().find(|s| s.handle == h).unwrap().clone();
         assert_eq!(by("lead").input_tokens, None);
-        assert_eq!(by("lead").not_recorded_reason.as_deref(), Some("session not found"));
-        assert_eq!(by("coder").not_recorded_reason.as_deref(), Some("not recorded"));
+        assert_eq!(
+            by("lead").not_recorded_reason.as_deref(),
+            Some("session not found")
+        );
+        assert_eq!(
+            by("coder").not_recorded_reason.as_deref(),
+            Some("not recorded")
+        );
     }
 
     #[test]
@@ -306,7 +336,9 @@ mod tests {
         let m = f.mission();
         f.record(&m, vec![slot("coder", Some(1))]).unwrap();
         assert!(f.record(&m, vec![slot("coder", Some(-1))]).is_err());
-        assert!(f.record(&m, vec![slot("a", Some(1)), slot("a", Some(2))]).is_err());
+        assert!(f
+            .record(&m, vec![slot("a", Some(1)), slot("a", Some(2))])
+            .is_err());
         assert!(f.record(&m, vec![slot(" ", Some(1))]).is_err());
         let mut nan = slot("coder", Some(1));
         nan.wall_minutes = Some(f64::NAN);
@@ -325,7 +357,7 @@ mod tests {
         f.record(&m, vec![slot("coder", Some(1))]).unwrap();
         let mut conn = f.core.db.get().unwrap();
         let tx = conn.transaction().unwrap();
-        crate::ops::mission::delete_rows(&tx, &[m.clone()]).unwrap();
+        crate::ops::mission::delete_rows(&tx, std::slice::from_ref(&m)).unwrap();
         tx.commit().unwrap();
         let left: i64 = conn
             .query_row(

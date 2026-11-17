@@ -31,7 +31,12 @@ pub(super) enum Filter {
     NotRated,
 }
 
-pub(super) const FILTERS: [Filter; 4] = [Filter::All, Filter::Expensive, Filter::WentBadly, Filter::NotRated];
+pub(super) const FILTERS: [Filter; 4] = [
+    Filter::All,
+    Filter::Expensive,
+    Filter::WentBadly,
+    Filter::NotRated,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Flag {
@@ -192,13 +197,26 @@ pub(super) fn build(
     let unmeasured = list.len() - lanes.len();
     let counts = Counts {
         all: lanes.len(),
-        expensive: lanes.iter().filter(|lane| matches(lane, Filter::Expensive, expensive_at)).count(),
-        went_badly: lanes.iter().filter(|lane| matches(lane, Filter::WentBadly, expensive_at)).count(),
-        not_rated: lanes.iter().filter(|lane| matches(lane, Filter::NotRated, expensive_at)).count(),
+        expensive: lanes
+            .iter()
+            .filter(|lane| matches(lane, Filter::Expensive, expensive_at))
+            .count(),
+        went_badly: lanes
+            .iter()
+            .filter(|lane| matches(lane, Filter::WentBadly, expensive_at))
+            .count(),
+        not_rated: lanes
+            .iter()
+            .filter(|lane| matches(lane, Filter::NotRated, expensive_at))
+            .count(),
     };
     lanes.retain(|lane| matches(lane, filter, expensive_at));
     // Newest first, like a log.
-    lanes.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| a.mission_id.cmp(&b.mission_id)));
+    lanes.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| a.mission_id.cmp(&b.mission_id))
+    });
 
     let scale = lanes.iter().map(|lane| lane.high).fold(0.0_f64, f64::max);
     for lane in &mut lanes {
@@ -219,7 +237,11 @@ pub(super) fn build(
             running += lane.mid;
             CurvePoint {
                 x: (lane.left + lane.width).min(1.0),
-                y: if total > 0.0 { (running / total) as f32 } else { 0.0 },
+                y: if total > 0.0 {
+                    (running / total) as f32
+                } else {
+                    0.0
+                },
                 flag: lane.flag,
             }
         })
@@ -227,12 +249,19 @@ pub(super) fn build(
     let day_labels: Vec<String> = (0..days)
         .map(|index| {
             let middle = axis_start + Duration::days(i64::from(index)) + Duration::hours(12);
-            middle.with_timezone(&chrono::Local).format("%a %-d").to_string()
+            middle
+                .with_timezone(&chrono::Local)
+                .format("%a %-d")
+                .to_string()
         })
         .collect();
     let grid = (0..=days).map(|index| index as f32 / days as f32).collect();
 
-    let mut queue: Vec<Lane> = lanes.iter().filter(|lane| lane.flag != Flag::None).cloned().collect();
+    let mut queue: Vec<Lane> = lanes
+        .iter()
+        .filter(|lane| lane.flag != Flag::None)
+        .cloned()
+        .collect();
     queue.sort_by(|a, b| b.mid.total_cmp(&a.mid));
 
     Timeline {
@@ -260,7 +289,13 @@ mod tests {
         "2026-11-12T12:00:00Z".parse().unwrap()
     }
 
-    fn mission(id: &str, hours_ago: i64, hours_long: Option<i64>, points: Option<(f64, f64)>, verdict: Option<RatingVerdict>) -> MissionUsageSummary {
+    fn mission(
+        id: &str,
+        hours_ago: i64,
+        hours_long: Option<i64>,
+        points: Option<(f64, f64)>,
+        verdict: Option<RatingVerdict>,
+    ) -> MissionUsageSummary {
         let started = now() - Duration::hours(hours_ago);
         MissionUsageSummary {
             mission_id: id.into(),
@@ -292,8 +327,14 @@ mod tests {
         let a = t.lanes.iter().find(|l| l.mission_id == "a").unwrap();
         assert!(near(a.left, 0.5) && near(a.width, 12.0 / 168.0), "{a:?}");
         let b = t.lanes.iter().find(|l| l.mission_id == "b").unwrap();
-        assert!(near(b.width, MIN_BAR), "a mission of no length still shows: {b:?}");
-        assert!(b.left + b.width <= 1.0 + 1e-6, "a bar at the right edge is pulled back inside");
+        assert!(
+            near(b.width, MIN_BAR),
+            "a mission of no length still shows: {b:?}"
+        );
+        assert!(
+            b.left + b.width <= 1.0 + 1e-6,
+            "a bar at the right edge is pulled back inside"
+        );
     }
 
     #[test]
@@ -307,24 +348,56 @@ mod tests {
         // With no call recorded, the last reading is the best sign left.
         m.last_call_at = None;
         m.last_read_at = Some((now() - Duration::hours(12)).to_rfc3339());
-        assert!(near(build(&[m.clone()], 7, now(), 5.0, Filter::All).lanes[0].width, 36.0 / 168.0));
+        assert!(near(
+            build(&[m.clone()], 7, now(), 5.0, Filter::All).lanes[0].width,
+            36.0 / 168.0
+        ));
         // A sign from before it began is ignored.
         m.last_read_at = Some((now() - Duration::hours(60)).to_rfc3339());
-        assert!(near(build(&[m], 7, now(), 5.0, Filter::All).lanes[0].width, MIN_BAR));
+        assert!(near(
+            build(&[m], 7, now(), 5.0, Filter::All).lanes[0].width,
+            MIN_BAR
+        ));
     }
 
     #[test]
     fn filters_and_counts_are_taken_over_the_unfiltered_set() {
         let list = [
-            mission("dear-bad", 10, Some(1), Some((8.0, 12.0)), Some(RatingVerdict::Down)),
+            mission(
+                "dear-bad",
+                10,
+                Some(1),
+                Some((8.0, 12.0)),
+                Some(RatingVerdict::Down),
+            ),
             mission("dear-open", 20, Some(1), Some((6.0, 8.0)), None),
-            mission("dear-good", 30, Some(1), Some((6.0, 8.0)), Some(RatingVerdict::Up)),
+            mission(
+                "dear-good",
+                30,
+                Some(1),
+                Some((6.0, 8.0)),
+                Some(RatingVerdict::Up),
+            ),
             mission("cheap", 40, Some(1), Some((0.1, 0.3)), None),
             mission("none", 50, Some(1), None, None),
         ];
         let t = build(&list, 7, now(), 5.0, Filter::Expensive);
-        assert_eq!(t.counts, Counts { all: 4, expensive: 3, went_badly: 1, not_rated: 2 });
-        assert_eq!(t.lanes.iter().map(|l| l.mission_id.as_str()).collect::<Vec<_>>(), ["dear-bad", "dear-open", "dear-good"]);
+        assert_eq!(
+            t.counts,
+            Counts {
+                all: 4,
+                expensive: 3,
+                went_badly: 1,
+                not_rated: 2
+            }
+        );
+        assert_eq!(
+            t.lanes
+                .iter()
+                .map(|l| l.mission_id.as_str())
+                .collect::<Vec<_>>(),
+            ["dear-bad", "dear-open", "dear-good"]
+        );
         assert_eq!(t.summary.unmeasured, 1);
         let bad = build(&list, 7, now(), 5.0, Filter::WentBadly);
         assert_eq!(bad.lanes.len(), 1);
@@ -333,34 +406,78 @@ mod tests {
     }
 
     #[test]
-    fn expensive_missions_that_went_badly_or_were_never_rated_are_flagged_and_queued_dearest_first() {
+    fn expensive_missions_that_went_badly_or_were_never_rated_are_flagged_and_queued_dearest_first()
+    {
         let list = [
-            mission("bad", 10, Some(1), Some((9.0, 9.0)), Some(RatingVerdict::Down)),
+            mission(
+                "bad",
+                10,
+                Some(1),
+                Some((9.0, 9.0)),
+                Some(RatingVerdict::Down),
+            ),
             mission("open", 20, Some(1), Some((12.0, 12.0)), None),
-            mission("good", 30, Some(1), Some((20.0, 20.0)), Some(RatingVerdict::Up)),
-            mission("cheap-bad", 40, Some(1), Some((0.2, 0.2)), Some(RatingVerdict::Down)),
+            mission(
+                "good",
+                30,
+                Some(1),
+                Some((20.0, 20.0)),
+                Some(RatingVerdict::Up),
+            ),
+            mission(
+                "cheap-bad",
+                40,
+                Some(1),
+                Some((0.2, 0.2)),
+                Some(RatingVerdict::Down),
+            ),
         ];
         let t = build(&list, 7, now(), 5.0, Filter::All);
         let flag = |id: &str| t.lanes.iter().find(|l| l.mission_id == id).unwrap().flag;
-        assert_eq!((flag("bad"), flag("open"), flag("good"), flag("cheap-bad")), (Flag::WentBadly, Flag::NotRated, Flag::None, Flag::None));
-        assert_eq!(t.queue.iter().map(|l| l.mission_id.as_str()).collect::<Vec<_>>(), ["open", "bad"]);
+        assert_eq!(
+            (flag("bad"), flag("open"), flag("good"), flag("cheap-bad")),
+            (Flag::WentBadly, Flag::NotRated, Flag::None, Flag::None)
+        );
+        assert_eq!(
+            t.queue
+                .iter()
+                .map(|l| l.mission_id.as_str())
+                .collect::<Vec<_>>(),
+            ["open", "bad"]
+        );
         assert_eq!(t.summary.flagged, 2);
         // A lower line catches more.
-        assert_eq!(build(&list, 7, now(), 0.1, Filter::All).queue.len(), 3 + 1 - 1 /* good is rated up */ );
+        assert_eq!(
+            build(&list, 7, now(), 0.1, Filter::All).queue.len(),
+            3 + 1 - 1 /* good is rated up */
+        );
     }
 
     #[test]
     fn the_curve_adds_missions_in_the_order_they_finished_and_ends_at_the_whole_total() {
         let list = [
             mission("a", 30, Some(1), Some((2.0, 2.0)), None),
-            mission("b", 10, Some(1), Some((6.0, 6.0)), Some(RatingVerdict::Down)),
+            mission(
+                "b",
+                10,
+                Some(1),
+                Some((6.0, 6.0)),
+                Some(RatingVerdict::Down),
+            ),
             mission("c", 50, Some(1), Some((2.0, 2.0)), None),
         ];
         let t = build(&list, 7, now(), 5.0, Filter::All);
         assert_eq!(t.curve.len(), 3);
-        assert!(t.curve.windows(2).all(|pair| pair[0].x <= pair[1].x && pair[0].y <= pair[1].y));
+        assert!(t
+            .curve
+            .windows(2)
+            .all(|pair| pair[0].x <= pair[1].x && pair[0].y <= pair[1].y));
         assert!(near(t.curve[0].y, 0.2) && near(t.curve[1].y, 0.4) && near(t.curve[2].y, 1.0));
-        assert_eq!(t.curve[2].flag, Flag::WentBadly, "the dearest one finished last and carries its flag");
+        assert_eq!(
+            t.curve[2].flag,
+            Flag::WentBadly,
+            "the dearest one finished last and carries its flag"
+        );
         assert_eq!(t.day_labels.len(), 7);
         assert_eq!(t.grid.len(), 8);
         assert!(near(t.grid[0], 0.0) && near(t.grid[7], 1.0));
@@ -369,12 +486,21 @@ mod tests {
 
     #[test]
     fn points_bars_are_scaled_to_the_largest_high_figure_and_an_empty_period_has_nothing() {
-        let list = [mission("big", 5, Some(1), Some((6.0, 8.0)), None), mission("small", 6, Some(1), Some((2.0, 2.0)), None)];
+        let list = [
+            mission("big", 5, Some(1), Some((6.0, 8.0)), None),
+            mission("small", 6, Some(1), Some((2.0, 2.0)), None),
+        ];
         let t = build(&list, 7, now(), 50.0, Filter::All);
         assert!((t.scale - 8.0).abs() < 1e-9);
-        assert!(near(t.lanes[0].solid, 0.75) && near(t.lanes[0].reach, 1.0), "solid to the low end, lighter to the high end");
+        assert!(
+            near(t.lanes[0].solid, 0.75) && near(t.lanes[0].reach, 1.0),
+            "solid to the low end, lighter to the high end"
+        );
         assert!(near(t.lanes[1].solid, 0.25) && near(t.lanes[1].reach, 0.25));
-        assert!(near(t.lanes[0].width, MIN_BAR) && near(t.lanes[1].width, MIN_BAR), "length of the time bar says nothing about points");
+        assert!(
+            near(t.lanes[0].width, MIN_BAR) && near(t.lanes[1].width, MIN_BAR),
+            "length of the time bar says nothing about points"
+        );
         let empty = build(&[], 30, now(), 5.0, Filter::All);
         assert!(empty.lanes.is_empty() && empty.queue.is_empty() && empty.curve.is_empty());
         assert_eq!(empty.day_labels.len(), 30);

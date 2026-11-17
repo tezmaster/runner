@@ -343,7 +343,9 @@ pub fn call_daemon(
         "mission_budget_sample" => {
             response(client.mission_budget_sample(&argument::<String>(&args, "mission_id")?))
         }
-        "mission_usage_backfill" => response(client.mission_usage_backfill(argument(&args, "days")?)),
+        "mission_usage_backfill" => {
+            response(client.mission_usage_backfill(argument(&args, "days")?))
+        }
         "mission_usage_list" => response(client.mission_usage_list(argument(&args, "days")?)),
         "mission_review_get" => {
             response(client.mission_review_get(&argument::<String>(&args, "mission_id")?))

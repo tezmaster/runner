@@ -168,12 +168,15 @@ impl MissionWorkspace {
             .review
             .as_ref()
             .and_then(|review| review.rating.clone());
-        let pressed = |verdict: RatingVerdict| rating.as_ref().is_some_and(|r| r.verdict == verdict);
-        let rate_button = |id: &'static str,
-                           label: &'static str,
-                           verdict: RatingVerdict| {
+        let pressed =
+            |verdict: RatingVerdict| rating.as_ref().is_some_and(|r| r.verdict == verdict);
+        let rate_button = |id: &'static str, label: &'static str, verdict: RatingVerdict| {
             let root = root.clone();
-            let target = if pressed(verdict) { None } else { Some(verdict) };
+            let target = if pressed(verdict) {
+                None
+            } else {
+                Some(verdict)
+            };
             Button::new(id, label)
                 .size(ButtonSize::Compact)
                 .variant(if pressed(verdict) {
@@ -182,7 +185,7 @@ impl MissionWorkspace {
                     ButtonVariant::Outline
                 })
                 .on_press(move |_, cx| {
-                    let _ = root.update(cx, |this, cx| this.rate_mission(target, cx));
+                    root.update(cx, |this, cx| this.rate_mission(target, cx));
                 })
         };
 
@@ -243,7 +246,10 @@ impl MissionWorkspace {
                 let marked = costliest(&review.slots).map(str::to_owned);
                 let mut list = div().flex().flex_col().gap_2();
                 for slot in &review.slots {
-                    list = list.child(slot_row(slot, marked.as_deref() == Some(slot.handle.as_str())));
+                    list = list.child(slot_row(
+                        slot,
+                        marked.as_deref() == Some(slot.handle.as_str()),
+                    ));
                 }
                 list.child(
                     div()
@@ -279,7 +285,9 @@ impl MissionWorkspace {
         }
         let root = cx.entity();
         let week = review.budget.iter().find(|budget| {
-            budget.window == "Week" && budget.attributed_low.is_some() && budget.attributed_high.is_some()
+            budget.window == "Week"
+                && budget.attributed_low.is_some()
+                && budget.attributed_high.is_some()
         });
         let tint: Hsla = week
             .and_then(|budget| runner_core::protocol::Runtime::parse(&budget.runtime))
@@ -297,7 +305,9 @@ impl MissionWorkspace {
                 let runtime = runner_core::protocol::Runtime::parse(&budget.runtime)
                     .map_or_else(|| budget.runtime.clone(), |r| r.display_name().to_owned());
                 let figure = match usage_chart::headline(range) {
-                    Headline::Under(value) => crate::i18n::tf("ui.usage_headline_under", &[("value", value)]),
+                    Headline::Under(value) => {
+                        crate::i18n::tf("ui.usage_headline_under", &[("value", value)])
+                    }
                     Headline::UpTo(value) => crate::i18n::tf("ui.usage_up_to", &[("value", value)]),
                     Headline::One(value) => value,
                     Headline::Between(low, high) => {
@@ -329,7 +339,12 @@ impl MissionWorkspace {
                             .flex()
                             .items_start()
                             .gap_1()
-                            .child(div().flex_none().pt(px(1.)).child(runtime_logo(&budget.runtime, 14.)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .pt(px(1.))
+                                    .child(runtime_logo(&budget.runtime, 14.)),
+                            )
                             .child(
                                 div()
                                     .min_w(px(0.))
@@ -369,7 +384,11 @@ impl MissionWorkspace {
                     .map(|row| row.handle.clone())
             };
             let chart = usage_chart::build_chart(&review.calls, self.review.mode, &handle_of);
-            let mode = if chart.has_points { self.review.mode } else { UsageMode::Tokens };
+            let mode = if chart.has_points {
+                self.review.mode
+            } else {
+                UsageMode::Tokens
+            };
             card = card.child(self.render_waterfall(&chart, mode, tint, &root));
         } else {
             card = card.child(
@@ -407,7 +426,7 @@ impl MissionWorkspace {
                 })
                 .disabled(!enabled)
                 .on_press(move |_, cx| {
-                    let _ = root.update(cx, |this, cx| {
+                    root.update(cx, |this, cx| {
                         this.review.mode = target;
                         cx.notify();
                     });
@@ -429,8 +448,18 @@ impl MissionWorkspace {
                 div()
                     .flex()
                     .gap_1()
-                    .child(toggle("usage-mode-points", crate::i18n::text("ui.usage_mode_points"), UsageMode::Points, chart.has_points))
-                    .child(toggle("usage-mode-tokens", crate::i18n::text("ui.usage_mode_tokens"), UsageMode::Tokens, true)),
+                    .child(toggle(
+                        "usage-mode-points",
+                        crate::i18n::text("ui.usage_mode_points"),
+                        UsageMode::Points,
+                        chart.has_points,
+                    ))
+                    .child(toggle(
+                        "usage-mode-tokens",
+                        crate::i18n::text("ui.usage_mode_tokens"),
+                        UsageMode::Tokens,
+                        true,
+                    )),
             );
         let mut body = div().flex().flex_col().gap_3();
         if !chart.has_points {
@@ -459,7 +488,7 @@ impl MissionWorkspace {
                     .variant(ButtonVariant::Outline)
                     .on_press(move |_, cx| {
                         let handle = handle.clone();
-                        let _ = root.update(cx, |this, cx| {
+                        root.update(cx, |this, cx| {
                             // Opens the slot holding the largest call, or closes it again.
                             if !this.review.expanded.remove(&handle) {
                                 this.review.expanded.insert(handle);
@@ -524,8 +553,19 @@ fn week_meter(meter: usage_chart::Meter, tint: Hsla) -> AnyElement {
         .overflow_hidden()
         .flex()
         .child(div().h_full().w(relative(meter.others)).bg(theme::faint()))
-        .child(div().h_full().min_w(px(2.)).w(relative(meter.mission_solid)).bg(tint))
-        .child(div().h_full().w(relative(meter.mission_range)).bg(with_alpha(tint, 0.45)))
+        .child(
+            div()
+                .h_full()
+                .min_w(px(2.))
+                .w(relative(meter.mission_solid))
+                .bg(tint),
+        )
+        .child(
+            div()
+                .h_full()
+                .w(relative(meter.mission_range))
+                .bg(with_alpha(tint, 0.45)),
+        )
         .into_any_element()
 }
 
@@ -598,7 +638,9 @@ fn value_text(points: Option<Range>, tokens: i64, mode: UsageMode) -> String {
 /// are tiny and alike, the share is what tells calls apart), tokens otherwise.
 fn call_value_text(share: f32, tokens: i64, mode: UsageMode) -> String {
     match mode {
-        UsageMode::Points if share < 0.01 => crate::i18n::text("ui.usage_share_under_one").to_owned(),
+        UsageMode::Points if share < 0.01 => {
+            crate::i18n::text("ui.usage_share_under_one").to_owned()
+        }
         UsageMode::Points => format!("{:.0}%", share * 100.0),
         UsageMode::Tokens => compact(tokens),
     }
@@ -664,7 +706,7 @@ fn slot_group(
     .variant(ButtonVariant::Outline)
     .on_press(move |_, cx| {
         let handle = handle.clone();
-        let _ = toggle_root.update(cx, |this, cx| {
+        toggle_root.update(cx, |this, cx| {
             if !this.review.expanded.remove(&handle) {
                 this.review.expanded.insert(handle);
             }
@@ -678,7 +720,11 @@ fn slot_group(
             .flex()
             .items_center()
             .gap_2()
-            .child(div().flex_none().child(RoleAvatar::new(group.handle.clone(), 20.)))
+            .child(
+                div()
+                    .flex_none()
+                    .child(RoleAvatar::new(group.handle.clone(), 20.)),
+            )
             .child(
                 div()
                     .min_w(px(0.))
@@ -746,11 +792,19 @@ fn slot_group(
                     .child(row_line(
                         label,
                         call_value_text(row.share, row.tokens, mode),
-                        if row.largest { FontWeight::SEMIBOLD } else { FontWeight::NORMAL },
+                        if row.largest {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        },
                     ))
                     .child(share_bar(
                         row.share,
-                        if row.largest { tint } else { with_alpha(tint, 0.6) },
+                        if row.largest {
+                            tint
+                        } else {
+                            with_alpha(tint, 0.6)
+                        },
                     ))
                     .child(
                         div()
@@ -762,7 +816,10 @@ fn slot_group(
                                     ("input", compact(row.input)),
                                     ("cached", compact(row.cached)),
                                     ("output", compact(row.output)),
-                                    ("points", value_text(row.points, row.tokens, UsageMode::Points)),
+                                    (
+                                        "points",
+                                        value_text(row.points, row.tokens, UsageMode::Points),
+                                    ),
                                 ],
                             )),
                     ),
@@ -793,14 +850,15 @@ fn slot_group(
 /// One allowance window of one runtime: the share the mission used, the
 /// readings behind it and how many other Runner sessions overlapped.
 fn budget_row(budget: &MissionBudget) -> AnyElement {
-    let runtime = runner_core::protocol::Runtime::parse(&budget.runtime)
-        .map_or_else(|| budget.runtime.clone(), |runtime| runtime.display_name().to_owned());
+    let runtime = runner_core::protocol::Runtime::parse(&budget.runtime).map_or_else(
+        || budget.runtime.clone(),
+        |runtime| runtime.display_name().to_owned(),
+    );
     let figure = match budget.state {
         BudgetState::Measured => match budget.used_points {
-            Some(points) if points >= 1.0 => crate::i18n::tf(
-                "ui.budget_about",
-                &[("points", format!("{points:.0}"))],
-            ),
+            Some(points) if points >= 1.0 => {
+                crate::i18n::tf("ui.budget_about", &[("points", format!("{points:.0}"))])
+            }
             _ => crate::i18n::text("ui.budget_under_one").to_owned(),
         },
         BudgetState::NotYetMeasured => crate::i18n::text("ui.budget_measuring").to_owned(),
@@ -813,7 +871,11 @@ fn budget_row(budget: &MissionBudget) -> AnyElement {
             format!("{value:.1}")
         }
     };
-    let split = match (budget.attributed_low, budget.attributed_high, budget.window_points) {
+    let split = match (
+        budget.attributed_low,
+        budget.attributed_high,
+        budget.window_points,
+    ) {
         (Some(low), Some(high), Some(total)) => Some(if (high - low).abs() < 0.05 {
             crate::i18n::tf(
                 "ui.budget_split_one",
@@ -822,7 +884,11 @@ fn budget_row(budget: &MissionBudget) -> AnyElement {
         } else {
             crate::i18n::tf(
                 "ui.budget_split",
-                &[("low", fmt(low)), ("high", fmt(high)), ("total", format!("{total:.0}"))],
+                &[
+                    ("low", fmt(low)),
+                    ("high", fmt(high)),
+                    ("total", format!("{total:.0}")),
+                ],
             )
         }),
         _ => None,
@@ -833,7 +899,10 @@ fn budget_row(budget: &MissionBudget) -> AnyElement {
             &[
                 ("low", format!("{:.1}", low * 100.0)),
                 ("high", format!("{:.1}", high * 100.0)),
-                ("margin", fmt(budget.rounding_margin.unwrap_or(0.0).max(0.05))),
+                (
+                    "margin",
+                    fmt(budget.rounding_margin.unwrap_or(0.0).max(0.05)),
+                ),
             ],
         )),
         _ => None,
@@ -859,17 +928,13 @@ fn budget_row(budget: &MissionBudget) -> AnyElement {
         .flex_col()
         .gap_0p5()
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(theme::text_ui())
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(format!("{runtime} · {}", budget.window)),
-                ),
+            div().flex().items_center().gap_2().child(
+                div()
+                    .text_size(theme::text_ui())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child(format!("{runtime} · {}", budget.window)),
+            ),
         )
         .child(
             div()
@@ -1001,10 +1066,18 @@ mod tests {
 
     #[test]
     fn the_costliest_slot_is_marked_only_within_one_runtime() {
-        let one_runtime = [slot("a", "muse", Some(5)), slot("b", "muse", Some(9)), slot("c", "muse", None)];
+        let one_runtime = [
+            slot("a", "muse", Some(5)),
+            slot("b", "muse", Some(9)),
+            slot("c", "muse", None),
+        ];
         assert_eq!(costliest(&one_runtime), Some("b"));
         let mixed = [slot("a", "muse", Some(5)), slot("b", "codex", Some(9))];
-        assert_eq!(costliest(&mixed), None, "counts across runtimes are not comparable");
+        assert_eq!(
+            costliest(&mixed),
+            None,
+            "counts across runtimes are not comparable"
+        );
         assert_eq!(costliest(&[slot("a", "muse", None)]), None);
     }
 }

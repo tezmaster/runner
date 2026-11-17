@@ -830,56 +830,56 @@ impl MissionWorkspace {
             .flex()
             .flex_col()
             .child(
-        div()
-            .id("mission-meta-scroll")
-            .debug_selector(|| "MISSION_META_SCROLL".into())
-            .relative()
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .scrollbar_width(px(0.))
-            .track_scroll(&self.meta_scroll)
-            .child(
-        panel
-            .children(permission_mode.map(|mode| {
-                meta_section(
-                    crate::i18n::text("ui.permissions"),
-                    div()
-                        .id("mission-permission-mode")
-                        .text_size(theme::text_ui())
-                        .text_color(theme::text())
-                        .child(mode),
-                )
-            }))
-            .children(mission.started_at.map(|started_at| {
-                meta_section(
-                    crate::i18n::text("ui.started"),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_size(theme::text_ui())
-                        .child(
-                            svg()
-                                .flex_none()
-                                .path("clock.svg")
-                                .size(rems(12. / 16.))
-                                .text_color(theme::muted()),
-                        )
-                        .child(runner_app::text_util::format_relative_time(
-                            started_at,
-                            Utc::now(),
-                        )),
-                )
-            }))
-            .child(
                 div()
-                    .debug_selector(|| "MISSION_META_END".into())
-                    .h(rems(1. / 16.))
-                    .w_full()
-                    .bg(theme::border()),
-            ),
-            )
+                    .id("mission-meta-scroll")
+                    .debug_selector(|| "MISSION_META_SCROLL".into())
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(0.))
+                    .track_scroll(&self.meta_scroll)
+                    .child(
+                        panel
+                            .children(permission_mode.map(|mode| {
+                                meta_section(
+                                    crate::i18n::text("ui.permissions"),
+                                    div()
+                                        .id("mission-permission-mode")
+                                        .text_size(theme::text_ui())
+                                        .text_color(theme::text())
+                                        .child(mode),
+                                )
+                            }))
+                            .children(mission.started_at.map(|started_at| {
+                                meta_section(
+                                    crate::i18n::text("ui.started"),
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(theme::text_ui())
+                                        .child(
+                                            svg()
+                                                .flex_none()
+                                                .path("clock.svg")
+                                                .size(rems(12. / 16.))
+                                                .text_color(theme::muted()),
+                                        )
+                                        .child(runner_app::text_util::format_relative_time(
+                                            started_at,
+                                            Utc::now(),
+                                        )),
+                                )
+                            }))
+                            .child(
+                                div()
+                                    .debug_selector(|| "MISSION_META_END".into())
+                                    .h(rems(1. / 16.))
+                                    .w_full()
+                                    .bg(theme::border()),
+                            ),
+                    ),
             )
             .child(self.meta_scrollbar.clone())
             .into_any_element()

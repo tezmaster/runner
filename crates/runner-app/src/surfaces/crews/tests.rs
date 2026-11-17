@@ -301,7 +301,8 @@ fn slot_runtime_select_restores_role_and_override_in_selector_order() {
             "trae",
             "cursor",
             "grok",
-            "opencode"
+            "opencode",
+            "muse"
         ]
     );
 }

@@ -198,13 +198,16 @@ pub fn list_budget_samples(conn: &Connection, mission_id: &str) -> Result<Vec<Bu
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// A session's start, its stop (None while running) and whether it is live.
+pub type SessionSpan = (Option<String>, Option<String>, bool);
+
 /// The agent sessions that are not part of `mission_id`, on `runtime`: their
 /// start, their stop (None while running) and whether they are still live.
 pub fn other_sessions_on_runtime(
     conn: &Connection,
     mission_id: &str,
     runtime: &str,
-) -> Result<Vec<(Option<String>, Option<String>, bool)>> {
+) -> Result<Vec<SessionSpan>> {
     let mut stmt = conn.prepare(
         "SELECT started_at, stopped_at, status = 'running'
          FROM sessions
@@ -254,7 +257,11 @@ pub struct BudgetBasisRow {
     pub machine: Tokens,
 }
 
-pub fn insert_budget_basis(conn: &Connection, mission_id: &str, row: &BudgetBasisRow) -> Result<()> {
+pub fn insert_budget_basis(
+    conn: &Connection,
+    mission_id: &str,
+    row: &BudgetBasisRow,
+) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO mission_budget_basis (
              mission_id, runtime, read_at, week_start,
@@ -310,7 +317,11 @@ pub fn list_budget_basis(conn: &Connection, mission_id: &str) -> Result<Vec<Budg
 
 /// The agent session keys of a mission's sessions, which tie them to a
 /// runtime's own logs.
-pub fn mission_session_keys(conn: &Connection, mission_id: &str, runtime: &str) -> Result<Vec<String>> {
+pub fn mission_session_keys(
+    conn: &Connection,
+    mission_id: &str,
+    runtime: &str,
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT agent_session_key FROM sessions
          WHERE mission_id = ?1 AND agent_runtime = ?2 AND agent_session_key IS NOT NULL",

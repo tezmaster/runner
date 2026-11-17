@@ -1,6 +1,6 @@
 mod actions;
-mod notices;
 mod mission_usage;
+mod notices;
 mod sidebar;
 mod usage;
 pub(crate) use sidebar::{sidebar_footer_contents, SidebarFooterControl};

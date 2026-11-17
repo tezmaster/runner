@@ -552,7 +552,11 @@ impl Sidebar {
                             move |window, cx| {
                                 if let Some(shell) = shell.upgrade() {
                                     shell.update(cx, |shell, shell_cx| {
-                                        shell.open_page_route(crate::AppRoute::MissionControl, window, shell_cx)
+                                        shell.open_page_route(
+                                            crate::AppRoute::MissionControl,
+                                            window,
+                                            shell_cx,
+                                        )
                                     });
                                 }
                             }
