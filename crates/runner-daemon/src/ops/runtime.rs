@@ -24,12 +24,159 @@ pub fn runtime_list() -> Vec<RuntimeDefinition> {
         .collect()
 }
 
-pub fn runtime_status_list(state: &AppCore) -> Result<RuntimeStatusResponse> {
-    crate::runtime_status::status_list(
+use runner_core::protocol::runtime::{RuntimeRowState, RuntimeSignInStatus};
+use runner_core::protocol::usage::UnavailableReason;
+
+pub(crate) fn runtime_status_list_base(state: &AppCore) -> Result<RuntimeStatusResponse> {
+    let status = crate::runtime_status::status_list_with_events(
         &state.db,
         &state.runtime_shell_env,
         &state.runtime_discovery,
-    )
+        Some(&state.events),
+    )?;
+    for runtime in &status.runtimes {
+        if runtime.installed_version.is_some() && !runtime.below_minimum {
+            state
+                .sessions
+                .clear_obsolete_startup_errors(runtime.name, &state.session_events());
+        }
+    }
+    Ok(status)
+}
+
+pub fn runtime_status_list(state: &AppCore) -> Result<RuntimeStatusResponse> {
+    let mut response = runtime_status_list_base(state)?;
+    populate_sign_in_statuses(state, &mut response);
+    Ok(response)
+}
+
+fn populate_sign_in_statuses(state: &AppCore, response: &mut RuntimeStatusResponse) {
+    let shell_env = state
+        .runtime_shell_env
+        .read()
+        .map(|env| env.clone())
+        .unwrap_or_default();
+    let usage = state.usage.snapshot();
+    for entry in &mut response.runtimes {
+        let installed = matches!(
+            entry.state,
+            RuntimeRowState::Detected | RuntimeRowState::Override
+        );
+        if !installed {
+            entry.sign_in = RuntimeSignInStatus::Unknown;
+            continue;
+        }
+        entry.sign_in = match entry.name {
+            Runtime::ClaudeCode => claude_sign_in_status(state, &shell_env.vars, &usage),
+            Runtime::Codex => codex_sign_in_status(&shell_env.vars, &usage),
+            Runtime::Antigravity => antigravity_sign_in_status(&shell_env, &usage),
+            _ => RuntimeSignInStatus::Unknown,
+        };
+    }
+}
+
+fn usage_sign_in_status(
+    usage: &runner_core::protocol::UsageSnapshot,
+    runtime: Runtime,
+) -> Option<RuntimeSignInStatus> {
+    let entry = usage.runtimes.get(&runtime)?;
+    if entry.value.is_some() {
+        Some(RuntimeSignInStatus::SignedIn)
+    } else if entry.error == Some(UnavailableReason::SignIn) {
+        Some(RuntimeSignInStatus::SignInNeeded)
+    } else {
+        None
+    }
+}
+
+fn claude_sign_in_status(
+    state: &AppCore,
+    shell_vars: &std::collections::BTreeMap<String, String>,
+    usage: &runner_core::protocol::UsageSnapshot,
+) -> RuntimeSignInStatus {
+    match crate::claude_accounts::active_sign_in_status(state, shell_vars) {
+        Some(RuntimeSignInStatus::Unknown) => {
+            // An earlier `claude auth status` probe errored and was cached;
+            // avoid re-spawning it whenever `runtime/changed` reloads the list.
+            usage_sign_in_status(usage, Runtime::ClaudeCode).unwrap_or(RuntimeSignInStatus::Unknown)
+        }
+        Some(status) => status,
+        None => {
+            if let Some(status) = usage_sign_in_status(usage, Runtime::ClaudeCode) {
+                return status;
+            }
+            // Kick off a single background `claude auth status` check on native
+            // single-account setups when no cached sign-in status is available yet.
+            crate::claude_accounts::refresh(state);
+            RuntimeSignInStatus::Unknown
+        }
+    }
+}
+
+fn codex_sign_in_status(
+    shell_vars: &std::collections::BTreeMap<String, String>,
+    usage: &runner_core::protocol::UsageSnapshot,
+) -> RuntimeSignInStatus {
+    if shell_vars
+        .get("OPENAI_API_KEY")
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return RuntimeSignInStatus::SignedIn;
+    }
+    if let Some(status) = usage_sign_in_status(usage, Runtime::Codex) {
+        return status;
+    }
+    let codex_home = shell_vars
+        .get("CODEX_HOME")
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            shell_vars
+                .get("HOME")
+                .filter(|value| !value.trim().is_empty())
+                .map(|home| std::path::Path::new(home).join(".codex"))
+        })
+        .or_else(|| runner_core::app_paths::home_dir().map(|home| home.join(".codex")));
+    if let Some(codex_home) = codex_home {
+        if let Ok(raw) = std::fs::read_to_string(codex_home.join("auth.json")) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let has_key = json
+                    .get("OPENAI_API_KEY")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+                let has_tokens = json
+                    .get("tokens")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|tokens| {
+                        ["access_token", "refresh_token", "id_token"]
+                            .into_iter()
+                            .any(|field| {
+                                tokens
+                                    .get(field)
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|value| !value.trim().is_empty())
+                            })
+                    });
+                if has_key || has_tokens {
+                    return RuntimeSignInStatus::SignedIn;
+                }
+            }
+        }
+    }
+    RuntimeSignInStatus::Unknown
+}
+
+fn antigravity_sign_in_status(
+    shell_env: &crate::shell_path::LoginShellEnv,
+    usage: &runner_core::protocol::UsageSnapshot,
+) -> RuntimeSignInStatus {
+    if let Some(status) = usage_sign_in_status(usage, Runtime::Antigravity) {
+        return status;
+    }
+    if crate::runtimes::antigravity::usage::has_stored_credential(shell_env) {
+        return RuntimeSignInStatus::SignedIn;
+    }
+    RuntimeSignInStatus::Unknown
 }
 
 pub fn runtime_set_launch_option(
@@ -127,10 +274,42 @@ pub fn runtime_set_override(
     if path.is_empty() {
         crate::db::set_runtime_override(&state.db, runtime.key(), None)
             .map_err(persistence_error)?;
+        if let Ok(mut discovery) = state.runtime_discovery.write() {
+            discovery.versions.clear_runtime_probe(runtime);
+        }
     } else {
-        crate::runtime_status::validate_override(runtime, path)?;
+        let shell_env = state
+            .runtime_shell_env
+            .read()
+            .map(|env| env.clone())
+            .unwrap_or_default();
+        let validated =
+            crate::runtime_status::validate_and_probe_override(runtime, path, &shell_env)?;
         crate::db::set_runtime_override(&state.db, runtime.key(), Some(path))
             .map_err(persistence_error)?;
+        if let Some(validated) = validated {
+            if let Ok(mut discovery) = state.runtime_discovery.write() {
+                discovery.versions.record_override_probe(
+                    runtime,
+                    path.to_owned(),
+                    validated.fingerprint,
+                    validated.version.clone(),
+                );
+            }
+            let min_version = crate::runtimes::adapter(runtime)
+                .catalog()
+                .and_then(|catalog| catalog.min_version);
+            if validated.version.is_some()
+                && !crate::runtime_status::versions::below_minimum(
+                    validated.version.as_deref(),
+                    min_version,
+                )
+            {
+                state
+                    .sessions
+                    .clear_obsolete_startup_errors(runtime, &state.session_events());
+            }
+        }
         log::info!("runtime override saved: runtime={runtime} path={path}");
     }
     invalidate_override_help_flags(state, runtime, previous.as_deref());
@@ -194,6 +373,9 @@ pub fn runtime_clear_override(state: &AppCore, runtime: Runtime) -> Result<Runti
         &state.runtime_discovery,
     );
     crate::db::set_runtime_override(&state.db, runtime.key(), None)?;
+    if let Ok(mut discovery) = state.runtime_discovery.write() {
+        discovery.versions.clear_runtime_probe(runtime);
+    }
     invalidate_override_help_flags(state, runtime, previous.as_deref());
     log::info!("runtime override cleared: runtime={runtime}");
     state.events.emit("runtime/changed", &());
@@ -257,6 +439,31 @@ pub fn runtime_check_updates(state: &AppCore, force: bool) {
     );
 }
 
+/// argv, env and cwd for a global npm install of a runtime (#1171).
+pub fn runtime_install_spawn_spec(
+    state: &AppCore,
+    runtime: Runtime,
+    size: (u16, u16),
+) -> Result<crate::session::runtime::SpawnSpec> {
+    let package = crate::runtimes::adapter(runtime)
+        .catalog()
+        .and_then(|definition| definition.npm_package)
+        .ok_or_else(|| Error::msg(format!("{runtime} cannot be installed via npm")))?;
+    let shell_env = state
+        .runtime_shell_env
+        .read()
+        .map_err(|_| Error::msg("runtime shell environment lock poisoned"))?;
+    let path = crate::runtime_status::direct_chat_path(&shell_env);
+    let npm = crate::runtime_status::find_executable("npm", &path)
+        .ok_or_else(|| Error::msg("npm was not found on PATH; install Node.js first"))?;
+    Ok(state.sessions.update_spawn_spec(
+        npm.display().to_string(),
+        vec!["install".into(), "-g".into(), package.to_owned()],
+        runner_core::app_paths::home_dir(),
+        size,
+    ))
+}
+
 /// argv, env and cwd for a runtime's own update (#533): the effective
 /// executable with the runtime's update arguments, the agent environment
 /// without Runner's layers, and the home directory.
@@ -269,11 +476,12 @@ pub fn runtime_update_spawn_spec(
         .catalog()
         .filter(|definition| !definition.update_args.is_empty())
         .ok_or_else(|| Error::msg(format!("{runtime} has no update command")))?;
-    let command = crate::runtime_status::effective_runtime_command(
+    let command = crate::runtime_status::effective_runtime_command_with_events(
         runtime,
         &state.db,
         &state.runtime_shell_env,
         &state.runtime_discovery,
+        Some(&state.events),
     )?;
     if command.source == RuntimeCommandSource::Catalog {
         return Err(crate::runtime_status::runtime_not_found_error(runtime));
@@ -371,7 +579,17 @@ pub fn runtime_refresh(
         model_runtimes.to_vec(),
     )?;
     runtime_check_updates(state, true);
-    runtime_status_list(state)
+    let status = runtime_status_list(state)?;
+    if status.runtimes.iter().any(|entry| {
+        entry.name == Runtime::ClaudeCode
+            && matches!(
+                entry.state,
+                RuntimeRowState::Detected | RuntimeRowState::Override
+            )
+    }) {
+        crate::claude_accounts::refresh(state);
+    }
+    Ok(status)
 }
 
 /// Whether a runtime is one of the agents Runner ships enabled by default.
@@ -879,5 +1097,898 @@ mod tests {
             warned.warning.as_deref(),
             Some("agy --help doesn't list --unknown.")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_opencode_override_preserves_active_path_version_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path_dir = dir.path().join("path");
+        let other_dir = dir.path().join("other");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let path_v1 = path_dir.join("opencode");
+        let other_v1 = other_dir.join("opencode");
+        for script in [&path_v1, &other_v1] {
+            std::fs::write(script, "#!/bin/sh\necho '1.19.5'\n").unwrap();
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let state = crate::test_support::test_core();
+        state.runtime_shell_env.write().unwrap().path = Some(path_dir.display().to_string());
+        {
+            let mut discovery = state.runtime_discovery.write().unwrap();
+            discovery.checking = false;
+            discovery.result = Some(crate::shell_path::DiscoveryResult {
+                shell: Some("/bin/zsh".into()),
+                outcome: crate::shell_path::DiscoveryOutcome::Ok,
+                duration_ms: 10,
+                env: crate::shell_path::LoginShellEnv::default(),
+            });
+        }
+
+        // Cold model request probes the active PATH executable and caches its v1 result.
+        let mut rx = state.events.subscribe();
+        runtime_request_models(&state, &[Runtime::OpenCode]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_change = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(ev) = rx.try_recv() {
+                if ev.name == "runtime/changed" {
+                    saw_change = true;
+                    break;
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(
+            saw_change,
+            "expected cold runtime_request_models sync probe to emit runtime/changed"
+        );
+
+        let before = runtime_catalog(&state)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name == Runtime::OpenCode)
+            .unwrap();
+        assert!(!before.available);
+        assert!(before.below_minimum);
+        assert_eq!(before.installed_version.as_deref(), Some("1.19.5"));
+
+        // Rejected v1 override leaves DB unset AND preserves the active PATH cache.
+        let err = runtime_set_override(&state, Runtime::OpenCode, other_v1.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("2.0.0"), "{err}");
+        assert!(!crate::db::runtime_overrides(&state.db)
+            .unwrap()
+            .contains_key("opencode"));
+
+        let after = runtime_catalog(&state)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name == Runtime::OpenCode)
+            .unwrap();
+        assert!(!after.available);
+        assert!(after.below_minimum);
+        assert_eq!(after.installed_version.as_deref(), Some("1.19.5"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_status_list_reports_npm_availability_and_read_only_sign_in_statuses() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        for cmd in ["npm", "codex", "pi"] {
+            let path = bin.path().join(cmd);
+            std::fs::write(&path, "#!/bin/sh\necho '9.9.9'\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let codex_home = tempfile::tempdir().unwrap();
+        let empty_home = tempfile::tempdir().unwrap();
+
+        let state = crate::test_support::test_core();
+        {
+            let mut env = state.runtime_shell_env.write().unwrap();
+            env.path = Some(bin.path().display().to_string());
+            env.vars.insert(
+                crate::runtime_status::TEST_ISOLATE_PATH_ENV.into(),
+                "1".into(),
+            );
+            // Point HOME and CODEX_HOME away from developer machine creds so the
+            // initial check stays deterministic even when run locally.
+            env.vars.insert(
+                "HOME".into(),
+                empty_home.path().to_string_lossy().into_owned(),
+            );
+            env.vars.insert(
+                "CODEX_HOME".into(),
+                codex_home.path().to_string_lossy().into_owned(),
+            );
+        }
+        state.runtime_discovery.write().unwrap().checking = false;
+
+        let initial = runtime_status_list(&state).unwrap();
+        assert!(initial.npm_available);
+        assert_eq!(
+            initial
+                .runtimes
+                .iter()
+                .find(|r| r.name == Runtime::Codex)
+                .unwrap()
+                .sign_in,
+            RuntimeSignInStatus::Unknown
+        );
+        assert_eq!(
+            initial
+                .runtimes
+                .iter()
+                .find(|r| r.name == Runtime::Pi)
+                .unwrap()
+                .sign_in,
+            RuntimeSignInStatus::Unknown
+        );
+
+        // Codex `auth.json` tokens mark Codex SignedIn while Pi stays Unknown.
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            r#"{"tokens":{"access_token":"tok-123"}}"#,
+        )
+        .unwrap();
+        let with_auth_file = runtime_status_list(&state).unwrap();
+        assert_eq!(
+            with_auth_file
+                .runtimes
+                .iter()
+                .find(|r| r.name == Runtime::Codex)
+                .unwrap()
+                .sign_in,
+            RuntimeSignInStatus::SignedIn
+        );
+        assert_eq!(
+            with_auth_file
+                .runtimes
+                .iter()
+                .find(|r| r.name == Runtime::Pi)
+                .unwrap()
+                .sign_in,
+            RuntimeSignInStatus::Unknown
+        );
+
+        // Without npm on PATH, npm_available flips false.
+        let without_npm = tempfile::tempdir().unwrap();
+        state.runtime_shell_env.write().unwrap().path =
+            Some(without_npm.path().display().to_string());
+        assert!(!runtime_status_list(&state).unwrap().npm_available);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_probe_preserves_async_notification_and_generation_ordering() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        // Part 1: an unchanneled (events = None) sync probe finishing while a background
+        // probe for the same executable is in flight still lets the background probe emit.
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("async-started");
+        let release_async = dir.path().join("release-async");
+        let opencode = dir.path().join("opencode");
+        std::fs::write(
+            &opencode,
+            format!(
+                "#!/bin/sh\nif [ ! -f \"{}\" ]; then\n  : > \"{}\"\n  i=0\n  while [ ! -f \"{}\" ] && [ $i -lt 300 ]; do\n    sleep 0.01\n    i=$((i + 1))\n  done\n  echo 'unrecognized'\nelse\n  echo '1.19.5'\nfi\n",
+                started.display(),
+                started.display(),
+                release_async.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let state = crate::test_support::test_core();
+        state.runtime_shell_env.write().unwrap().path = Some(dir.path().display().to_string());
+        let mut rx = state.events.subscribe();
+
+        crate::runtime_status::versions::request_probes(
+            &state.db,
+            &state.runtime_shell_env,
+            &state.runtime_discovery,
+            &state.events,
+            &[Runtime::OpenCode],
+            false,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !started.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(started.exists(), "background probe did not start");
+
+        // Sync probe without EventChannel completes first and populates cache.
+        assert_eq!(
+            crate::runtime_status::versions::ensure_probed(
+                Runtime::OpenCode,
+                opencode.to_str().unwrap(),
+                &state.runtime_shell_env,
+                &state.runtime_discovery,
+                None,
+            )
+            .as_deref(),
+            Some("1.19.5")
+        );
+        assert_eq!(
+            state
+                .runtime_discovery
+                .read()
+                .unwrap()
+                .versions
+                .installed(Runtime::OpenCode, opencode.to_str().unwrap()),
+            Some("1.19.5")
+        );
+
+        // Releasing the background probe still delivers runtime/changed.
+        std::fs::write(&release_async, "go").unwrap();
+        let mut saw_change = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(ev) = rx.try_recv() {
+                if ev.name == "runtime/changed" {
+                    saw_change = true;
+                    break;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(saw_change, "background probe notification was swallowed");
+        assert_eq!(
+            state
+                .runtime_discovery
+                .read()
+                .unwrap()
+                .versions
+                .installed(Runtime::OpenCode, opencode.to_str().unwrap()),
+            Some("1.19.5")
+        );
+
+        // Part 2: an older in-flight sync probe cannot overwrite a newer accepted override.
+        let slow_v1 = dir.path().join("slow-v1");
+        let slow_started = dir.path().join("slow-started");
+        let release_slow = dir.path().join("release-slow");
+        std::fs::write(
+            &slow_v1,
+            format!(
+                "#!/bin/sh\n: > \"{}\"\ni=0\nwhile [ ! -f \"{}\" ] && [ $i -lt 300 ]; do\n  sleep 0.01\n  i=$((i + 1))\ndone\necho '1.19.5'\n",
+                slow_started.display(),
+                release_slow.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&slow_v1, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fast_v2 = dir.path().join("fast-v2");
+        std::fs::write(&fast_v2, "#!/bin/sh\necho '2.0.29'\n").unwrap();
+        std::fs::set_permissions(&fast_v2, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let state2 = crate::test_support::test_core();
+        crate::db::set_runtime_override(&state2.db, "opencode", Some(slow_v1.to_str().unwrap()))
+            .unwrap();
+
+        let shell_env = std::sync::Arc::clone(&state2.runtime_shell_env);
+        let discovery = std::sync::Arc::clone(&state2.runtime_discovery);
+        let events = state2.events.clone();
+        let slow_path = slow_v1.to_str().unwrap().to_owned();
+        let sync_thread = std::thread::spawn(move || {
+            crate::runtime_status::versions::ensure_probed(
+                Runtime::OpenCode,
+                &slow_path,
+                &shell_env,
+                &discovery,
+                Some(&events),
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !slow_started.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(slow_started.exists(), "slow sync probe did not start");
+
+        // Supersede the in-flight sync probe with a new v2 override, then release the old one.
+        runtime_set_override(&state2, Runtime::OpenCode, fast_v2.to_str().unwrap()).unwrap();
+        std::fs::write(&release_slow, "go").unwrap();
+        assert_eq!(sync_thread.join().unwrap().as_deref(), Some("1.19.5"));
+
+        assert_eq!(
+            state2
+                .runtime_discovery
+                .read()
+                .unwrap()
+                .versions
+                .installed(Runtime::OpenCode, fast_v2.to_str().unwrap()),
+            Some("2.0.29")
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_for(deadline_secs: u64, mut ready: impl FnMut() -> bool, failure_msg: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+        while !ready() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready(), "{failure_msg}");
+    }
+
+    #[cfg(unix)]
+    fn write_two_stage_probe_script(
+        path: &std::path::Path,
+        first_started: &std::path::Path,
+        release_first: &std::path::Path,
+        first_output: &str,
+        second_started: &std::path::Path,
+        release_second: &std::path::Path,
+        second_output: &str,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" != \"--version\" ]; then\n  exit 9\nfi\nif [ ! -f \"{}\" ]; then\n  : > \"{}\"\n  i=0\n  while [ ! -f \"{}\" ] && [ $i -lt 300 ]; do\n    sleep 0.01\n    i=$((i + 1))\n  done\n  echo '{}'\n  exit 0\nfi\n: > \"{}\"\ni=0\nwhile [ ! -f \"{}\" ] && [ $i -lt 300 ]; do\n  sleep 0.01\n  i=$((i + 1))\ndone\necho '{}'\n",
+                first_started.display(),
+                first_started.display(),
+                release_first.display(),
+                first_output,
+                second_started.display(),
+                release_second.display(),
+                second_output,
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn older_async_probe_completing_first_cannot_bypass_sync_launch_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let async_started = dir.path().join("async-started");
+        let release_async = dir.path().join("release-async");
+        let sync_started = dir.path().join("sync-started");
+        let release_sync = dir.path().join("release-sync");
+        let opencode = dir.path().join("opencode");
+        write_two_stage_probe_script(
+            &opencode,
+            &async_started,
+            &release_async,
+            "unrecognized",
+            &sync_started,
+            &release_sync,
+            "1.19.5",
+        );
+
+        let state = crate::test_support::test_core();
+        state.runtime_shell_env.write().unwrap().path = Some(dir.path().display().to_string());
+
+        request_version_probe(&state, Runtime::OpenCode);
+        wait_for(
+            10,
+            || async_started.exists(),
+            "background probe did not start",
+        );
+
+        let role = crate::session::manager::runtime_direct_role(
+            "opencode",
+            Some(opencode.to_str().unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+        let sessions = Arc::clone(&state.sessions);
+        let db = Arc::clone(&state.db);
+        let events = Arc::new(state.session_events());
+        let app_dir = dir.path().to_path_buf();
+        let spawn_handle = std::thread::spawn(move || {
+            sessions.spawn_runtime_direct(
+                &role,
+                None,
+                app_dir.to_str(),
+                None,
+                None,
+                &app_dir,
+                db,
+                events,
+            )
+        });
+
+        wait_for(
+            10,
+            || sync_started.exists(),
+            "sync launch probe did not start",
+        );
+
+        // Complete older async worker first with unrecognized output.
+        std::fs::write(&release_async, "go").unwrap();
+        wait_for(
+            10,
+            || {
+                !state
+                    .runtime_discovery
+                    .read()
+                    .unwrap()
+                    .versions
+                    .has_in_flight_async(Runtime::OpenCode)
+            },
+            "background probe did not finish",
+        );
+        assert!(
+            state
+                .runtime_discovery
+                .read()
+                .unwrap()
+                .versions
+                .probed(Runtime::OpenCode, opencode.to_str().unwrap())
+                .is_none(),
+            "superseded background probe must not write None into cache"
+        );
+
+        // Now complete newer sync probe with v1.19.5; launch must be refused by RuntimeVersionGate.
+        std::fs::write(&release_sync, "go").unwrap();
+        let err = spawn_handle
+            .join()
+            .unwrap()
+            .expect_err("opencode 1.19.5 must be refused before launching");
+        let crate::error::Error::RuntimeVersionGate(gate) = err else {
+            panic!("expected RuntimeVersionGate, got {err:#}");
+        };
+        assert_eq!(gate.runtime, Runtime::OpenCode);
+        assert_eq!(gate.installed_version, "1.19.5");
+        assert_eq!(gate.min_version, "2.0.0");
+        assert_eq!(
+            state
+                .runtime_discovery
+                .read()
+                .unwrap()
+                .versions
+                .installed(Runtime::OpenCode, opencode.to_str().unwrap()),
+            Some("1.19.5")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn older_async_probe_completing_first_still_emits_runtime_changed_on_status_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let async_started = dir.path().join("async-started");
+        let release_async = dir.path().join("release-async");
+        let sync_started = dir.path().join("sync-started");
+        let release_sync = dir.path().join("release-sync");
+        let opencode = dir.path().join("opencode");
+        write_two_stage_probe_script(
+            &opencode,
+            &async_started,
+            &release_async,
+            "unrecognized",
+            &sync_started,
+            &release_sync,
+            "1.19.5",
+        );
+
+        let state = crate::test_support::test_core();
+        crate::db::set_runtime_override(&state.db, "opencode", Some(opencode.to_str().unwrap()))
+            .unwrap();
+        let mut rx = state.events.subscribe();
+
+        request_version_probe(&state, Runtime::OpenCode);
+        wait_for(
+            10,
+            || async_started.exists(),
+            "background probe did not start",
+        );
+
+        let state_bg = state.clone();
+        let status_handle = std::thread::spawn(move || runtime_status_list(&state_bg));
+        wait_for(
+            10,
+            || sync_started.exists(),
+            "status sync probe did not start",
+        );
+
+        // Older async probe completes first; status read's sync probe still finishes and emits.
+        std::fs::write(&release_async, "go").unwrap();
+        wait_for(
+            10,
+            || {
+                !state
+                    .runtime_discovery
+                    .read()
+                    .unwrap()
+                    .versions
+                    .has_in_flight_async(Runtime::OpenCode)
+            },
+            "background probe did not finish",
+        );
+
+        std::fs::write(&release_sync, "go").unwrap();
+        let response = status_handle.join().unwrap().unwrap();
+        let row = response
+            .runtimes
+            .into_iter()
+            .find(|entry| entry.name == Runtime::OpenCode)
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::runtime_status::RuntimeRowState::InvalidOverride
+        );
+        assert!(row.below_minimum);
+        assert_eq!(row.installed_version.as_deref(), Some("1.19.5"));
+
+        let mut saw_change = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Ok(ev) = rx.try_recv() {
+                if ev.name == "runtime/changed" {
+                    saw_change = true;
+                    break;
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(
+            saw_change,
+            "status read must emit runtime/changed when older async worker finished first"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_path_replacement_before_refresh_refuses_launch_without_spawning_standalone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = dir.path().join("opencode");
+        let standalone_called = dir.path().join("standalone.called");
+        let write_script = |tmp_name: &str, version: &str| {
+            let tmp = dir.path().join(tmp_name);
+            std::fs::write(
+                &tmp,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  echo '{version}'\n  exit 0\nfi\ntouch '{}'\nexit 0\n",
+                    standalone_called.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::rename(&tmp, &opencode).unwrap();
+        };
+
+        write_script("opencode.v2", "2.0.29");
+
+        let state = crate::test_support::test_core();
+        state.runtime_shell_env.write().unwrap().path = Some(dir.path().display().to_string());
+        assert_eq!(
+            crate::runtime_status::versions::ensure_probed(
+                Runtime::OpenCode,
+                opencode.to_str().unwrap(),
+                &state.runtime_shell_env,
+                &state.runtime_discovery,
+                None,
+            )
+            .as_deref(),
+            Some("2.0.29")
+        );
+
+        // Replace binary on disk with v1.19.5 without clicking Refresh first.
+        write_script("opencode.v1", "1.19.5");
+        assert!(!standalone_called.exists());
+
+        let role =
+            crate::session::manager::runtime_direct_role("opencode", None, None, None).unwrap();
+        let err = state
+            .sessions
+            .spawn_runtime_direct(
+                &role,
+                None,
+                dir.path().to_str(),
+                None,
+                None,
+                dir.path(),
+                Arc::clone(&state.db),
+                Arc::new(state.session_events()),
+            )
+            .expect_err("replaced v1 binary must be blocked before launching --standalone");
+        let crate::error::Error::RuntimeVersionGate(gate) = err else {
+            panic!("expected RuntimeVersionGate, got {err:#}");
+        };
+        assert_eq!(gate.runtime, Runtime::OpenCode);
+        assert_eq!(gate.installed_version, "1.19.5");
+        assert_eq!(gate.min_version, "2.0.0");
+        assert!(
+            !standalone_called.exists(),
+            "opencode v1 must not be spawned when binary changed on disk before Refresh"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classified_opencode_startup_error_clears_cached_probe_so_status_list_preserves_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = dir.path().join("opencode");
+        let mode_file = dir.path().join("mode");
+        std::fs::write(&mode_file, "v2").unwrap();
+        std::fs::write(
+            &opencode,
+            format!(
+                "#!/bin/sh\nmode=$(cat '{}')\nif [ \"$1\" = --version ]; then\n  if [ \"$mode\" = v2 ]; then\n    echo '2.0.29'\n  else\n    echo '1.19.5'\n  fi\n  exit 0\nfi\nif [ \"$mode\" = v1 ]; then\n  echo \"error: unknown option '--standalone'\"\n  exit 1\nfi\nexit 0\n",
+                mode_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut state = crate::test_support::test_core_in(dir.path().to_path_buf());
+        state.sessions = crate::session::manager::SessionManager::new(
+            Arc::clone(&state.runtime_shell_env),
+            Arc::clone(&state.runtime_discovery),
+            Arc::new(crate::session::pty_runtime::PtyRuntime::new()),
+        );
+        state.sessions.set_runtime_events(state.events.clone());
+        state.runtime_shell_env.write().unwrap().path = Some(dir.path().display().to_string());
+        state.runtime_discovery.write().unwrap().checking = false;
+
+        assert_eq!(
+            crate::runtime_status::versions::ensure_probed(
+                Runtime::OpenCode,
+                opencode.to_str().unwrap(),
+                &state.runtime_shell_env,
+                &state.runtime_discovery,
+                Some(&state.events),
+            )
+            .as_deref(),
+            Some("2.0.29")
+        );
+
+        // Flip mode behind an untouched wrapper script so cached 2.0.29 allows spawn once,
+        // then v1 rejects --standalone.
+        std::fs::write(&mode_file, "v1").unwrap();
+        let mut rx = state.events.subscribe();
+        let role =
+            crate::session::manager::runtime_direct_role("opencode", None, None, None).unwrap();
+        let spawned = state
+            .sessions
+            .spawn_runtime_direct(
+                &role,
+                None,
+                dir.path().to_str(),
+                None,
+                None,
+                dir.path(),
+                Arc::clone(&state.db),
+                Arc::new(state.session_events()),
+            )
+            .unwrap();
+
+        wait_for(
+            10,
+            || {
+                state
+                    .sessions
+                    .agent_status(&spawned.id)
+                    .startup_error
+                    .is_some()
+            },
+            "startup error was not classified",
+        );
+
+        let mut saw_change = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Ok(ev) = rx.try_recv() {
+                if ev.name == "runtime/changed" {
+                    saw_change = true;
+                    break;
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(saw_change, "clearing stale probe must emit runtime/changed");
+        assert_eq!(
+            state
+                .runtime_discovery
+                .read()
+                .unwrap()
+                .versions
+                .installed(Runtime::OpenCode, opencode.to_str().unwrap()),
+            None
+        );
+
+        // Passive status_list must not immediately retire the StartupError using stale v2 cache.
+        let status = runtime_status_list(&state).unwrap();
+        let row = status
+            .runtimes
+            .into_iter()
+            .find(|entry| entry.name == Runtime::OpenCode)
+            .unwrap();
+        assert_eq!(row.installed_version, None);
+        assert!(
+            state
+                .sessions
+                .agent_status(&spawned.id)
+                .startup_error
+                .is_some(),
+            "startup error must remain visible until a compatible v2 probe succeeds"
+        );
+
+        // Once switched back to v2 and re-probed, runtime_status_list retires the StartupError.
+        std::fs::write(&mode_file, "v2").unwrap();
+        assert_eq!(
+            crate::runtime_status::versions::probe_now(
+                Runtime::OpenCode,
+                &state.db,
+                &state.runtime_shell_env,
+                &state.runtime_discovery,
+                &state.events,
+            )
+            .as_deref(),
+            Some("2.0.29")
+        );
+        let status = runtime_status_list(&state).unwrap();
+        let row = status
+            .runtimes
+            .into_iter()
+            .find(|entry| entry.name == Runtime::OpenCode)
+            .unwrap();
+        assert_eq!(row.installed_version.as_deref(), Some("2.0.29"));
+        assert!(!row.below_minimum);
+        assert!(
+            state
+                .sessions
+                .agent_status(&spawned.id)
+                .startup_error
+                .is_none(),
+            "compatible v2 refresh must retire obsolete startup error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_claude_auth_status_probe_caches_error_without_looping_until_explicit_recheck() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().unwrap();
+        let app_data_dir = temp.path().join("app-data");
+        let empty_home = temp.path().join("home");
+        let claude_dir = temp.path().join("claude-cfg");
+        let bin = temp.path().join("bin");
+        let probe_log = temp.path().join("probes.log");
+        std::fs::create_dir_all(&app_data_dir).unwrap();
+        std::fs::create_dir_all(&empty_home).unwrap();
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let claude_bin = bin.join("claude");
+        std::fs::write(
+            &claude_bin,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'probe\\n' >> '{}'\n  echo 'not-json'\n  exit 1\nfi\necho '2.1.0'\n",
+                probe_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut state = crate::test_support::test_core_in(app_data_dir);
+        state.claude_accounts = Arc::new(crate::claude_accounts::AccountService::default());
+        state.usage = Arc::new(crate::usage::UsageService::without_fetch());
+        {
+            let mut env = state.runtime_shell_env.write().unwrap();
+            env.path = Some(bin.display().to_string());
+            env.vars.insert(
+                crate::runtime_status::TEST_ISOLATE_PATH_ENV.into(),
+                "1".into(),
+            );
+            env.vars
+                .insert("HOME".into(), empty_home.to_string_lossy().into_owned());
+        }
+        state.runtime_discovery.write().unwrap().checking = false;
+        crate::db::set_runtime_override(&state.db, "claude-code", claude_bin.to_str()).unwrap();
+        crate::db::app_state_set(
+            &state.db.get().unwrap(),
+            "claude_accounts",
+            &serde_json::json!({
+                "accounts": [{
+                    "id": "native",
+                    "name": "Personal",
+                    "folder": claude_dir.to_string_lossy().into_owned(),
+                    "native": true
+                }],
+                "main_id": "native",
+                "active_id": "native"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut events = state.events.subscribe();
+        let initial = runtime_status_list(&state).unwrap();
+        assert_eq!(
+            initial
+                .runtimes
+                .iter()
+                .find(|r| r.name == Runtime::ClaudeCode)
+                .unwrap()
+                .sign_in,
+            RuntimeSignInStatus::Unknown
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::claude_accounts::snapshot(&state)
+            .unwrap()
+            .statuses
+            .get("native")
+            .is_some_and(|s| s.error)
+            || state.claude_accounts.is_refreshing()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for initial auth probe error"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let probe_count = || -> usize {
+            std::fs::read_to_string(&probe_log)
+                .map(|raw| raw.lines().count())
+                .unwrap_or(0)
+        };
+        assert_eq!(probe_count(), 1);
+
+        let mut saw_runtime_changed = false;
+        while let Ok(evt) = events.try_recv() {
+            if evt.name == "runtime/changed" {
+                saw_runtime_changed = true;
+            }
+        }
+        assert!(saw_runtime_changed);
+
+        for _ in 0..3 {
+            let reloaded = runtime_status_list(&state).unwrap();
+            assert_eq!(
+                reloaded
+                    .runtimes
+                    .iter()
+                    .find(|r| r.name == Runtime::ClaudeCode)
+                    .unwrap()
+                    .sign_in,
+                RuntimeSignInStatus::Unknown
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(probe_count(), 1);
+            assert!(events.try_recv().is_err());
+        }
+
+        runtime_refresh(&state, &[]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while probe_count() < 2 || state.claude_accounts.is_refreshing() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for explicit recheck probe"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(probe_count(), 2);
+        let mut emitted = Vec::new();
+        while let Ok(evt) = events.try_recv() {
+            emitted.push(evt.name);
+        }
+        assert!(!emitted.contains(&"claude_accounts/changed"));
     }
 }

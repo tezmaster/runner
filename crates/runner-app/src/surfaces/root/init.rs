@@ -123,6 +123,7 @@ impl NativeRoot {
                             this.refresh_add_slot_runtimes(cx);
                             this.refresh_slot_override_runtimes(cx);
                             this.refresh_agents_pane(cx);
+                            this.refresh_setup_data(cx);
                             this.usage_installed =
                                 crate::surfaces::app_shell::usage_installed(this.core(cx));
                             let runtimes = this
@@ -137,9 +138,21 @@ impl NativeRoot {
                                 .filter(|runtime| !runtime.below_minimum)
                                 .map(|runtime| runtime.name)
                                 .collect::<Vec<_>>();
+                            let verified_supported = runtimes
+                                .iter()
+                                .filter(|runtime| {
+                                    runtime.installed_version.is_some() && !runtime.below_minimum
+                                })
+                                .map(|runtime| runtime.name)
+                                .collect::<Vec<_>>();
                             this.clear_unblocked_gates(
                                 &surfaces::front_page::FrontPageTarget::Local,
                                 &supported,
+                            );
+                            this.retire_obsolete_startup_errors(
+                                &surfaces::front_page::FrontPageTarget::Local,
+                                &verified_supported,
+                                cx,
                             );
                             this.agent_tasks.minimums = runtimes
                                 .into_iter()
@@ -373,6 +386,7 @@ impl NativeRoot {
                     .collect(),
                 ..Default::default()
             },
+            setup: Default::default(),
             agent_update: None,
             fork_confirm: None,
             forking_sessions: HashMap::new(),
@@ -393,6 +407,7 @@ impl NativeRoot {
             usage_checked: None,
             mission_usage: crate::surfaces::app_shell::MissionUsageState::new(cx),
             mission_control: crate::surfaces::mission_control::MissionControlState::default(),
+            usage_enabled: None,
             claude_account_picker: None,
             usage_anchor: None,
             usage_installed: crate::surfaces::app_shell::usage_installed(&core),
@@ -407,6 +422,8 @@ impl NativeRoot {
             chat_surfaces: crate::surfaces::side_panel::PanelSurfaces::new(Default::default(), cx),
             chat_panel_tab: None,
             chat_panel_open: None,
+            chat_panel_maximized: false,
+            chat_panel_focus: cx.focus_handle(),
             chat_panels_by_tab: HashMap::new(),
             chat_files: Default::default(),
             panel_chat_by_tab: HashMap::new(),

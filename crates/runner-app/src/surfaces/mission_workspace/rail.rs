@@ -32,6 +32,9 @@ impl MissionWorkspace {
         if !self.presentation.is_remote() {
             self.rail_open = Some(open);
         }
+        if !open {
+            self.rail_maximized = false;
+        }
         // The store observer also refreshes the mission's terminal size hint.
         self.update_app_settings(cx, true, |settings| {
             let changed = settings.mission_rail_open != open;
@@ -40,24 +43,91 @@ impl MissionWorkspace {
         });
     }
 
-    /// The rail's width, widened while its Files view has a file open.
+    pub(crate) fn rail_contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.rail_focus.contains_focused(window, cx) || self.rail_surfaces.menu_focused(window)
+    }
+
+    pub(crate) fn focus_rail_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.settings(cx);
+        let shown = side_panel::shown(PanelSurface::Mission, settings, &self.rail_surfaces.open);
+        let subject = self
+            .mission_view()
+            .map(|mission| PanelSubject::Mission(mission.id));
+        self.rail_files
+            .focus_shown(subject.as_ref(), shown, &self.rail_focus, window, cx);
+    }
+
+    pub(super) fn rail_effectively_maximized(&self, cx: &App) -> bool {
+        !self.presentation.is_remote()
+            && self.settings(cx).show_side_panel
+            && self.rail_is_open(cx)
+            && self.rail_maximized
+    }
+
+    pub(crate) fn set_rail_maximized(
+        &mut self,
+        maximized: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let allowed = !self.presentation.is_remote()
+            && self.settings(cx).show_side_panel
+            && self.rail_is_open(cx);
+        let next = maximized && allowed;
+        if self.rail_maximized == next {
+            return;
+        }
+        self.rail_maximized = next;
+        if next {
+            self.rail_visibility = SidebarVisibilityTransition::new(true);
+            if !self.rail_contains_focus(window, cx) {
+                self.focus_rail_shown(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_rail_maximized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = !self.rail_maximized;
+        self.set_rail_maximized(next, window, cx);
+    }
+
+    pub(crate) fn toggle_maximize_rail_if_focused(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rail_maximized || self.rail_contains_focus(window, cx) {
+            self.toggle_rail_maximized(window, cx);
+        }
+    }
+
+    pub(super) fn toggle_maximize_rail_action(
+        &mut self,
+        _: &crate::ToggleMaximizePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rail_maximized || self.rail_contains_focus(window, cx) {
+            cx.stop_propagation();
+            self.toggle_rail_maximized(window, cx);
+        }
+    }
+
+    /// The rail's width, widened once Files or Changes has widened it.
     pub(super) fn rail_layout(&self, cx: &App) -> (f32, Option<side_panel::Widened>) {
         let settings = self.settings(cx);
         let subject = self
             .mission_view()
-            .filter(|_| settings.files_view)
             .map(|mission| PanelSubject::Mission(mission.id));
-        self.rail_files.layout(
+        self.rail_files.panel_layout(
+            PanelSurface::Mission,
+            settings,
+            &self.rail_surfaces,
             subject.as_ref(),
-            crate::surfaces::files::FilesSurface::of(
-                PanelSurface::Mission,
-                settings,
-                &self.rail_surfaces.open,
-            ),
             settings.mission_rail_width,
-            settings.file_viewer_width,
-            settings.file_tree_width,
             6.,
+            self.rail_maximized && !self.presentation.is_remote(),
             cx,
         )
     }
@@ -133,6 +203,7 @@ impl MissionWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let maximized = show_rail && self.rail_maximized && !self.presentation.is_remote();
         let visible_width = width * visibility;
         if !show_rail {
             self.rail_files.hide(cx);
@@ -148,6 +219,8 @@ impl MissionWorkspace {
         }
         let surface_root = cx.entity();
         let collapse_root = cx.entity();
+        let maximize_root = cx.entity();
+        let req_max_root = cx.entity();
         let settings = self.settings(cx).clone();
         let shown = side_panel::shown(PanelSurface::Mission, &settings, &self.rail_surfaces.open);
         let handler: side_panel::SurfaceHandler = Rc::new(move |action, window, cx| {
@@ -158,44 +231,88 @@ impl MissionWorkspace {
                 cx.notify();
             })
         });
-        let header = div()
-            .h(rems(WORKSPACE_HEADER_HEIGHT / 16.))
-            .flex_none()
-            .pl_2()
-            .pr_2()
-            .flex()
-            .items_center()
-            .border_b_1()
-            .border_color(theme::border())
-            .rounded_tl(rems(11. / 16.))
-            .rounded_tr(rems(11. / 16.))
-            .map(|element| {
-                #[cfg(test)]
-                let element = crate::theme_snapshot::record_fill("MISSION_RAIL_HEADER", element);
-                element
-            })
-            .child(side_panel::header_tabs(
-                PanelSurface::Mission,
-                &settings,
-                &self.rail_surfaces.open,
-                (&self.rail_surfaces, window),
-                handler,
-                IconButton::new("collapse-mission-rail", "panel-right-open.svg")
-                    .tooltip(crate::i18n::text("ui.collapse_side_panel"))
-                    .on_press(move |_, cx| {
-                        collapse_root.update(cx, |this, cx| {
-                            this.set_rail_open(false, cx);
-                            cx.notify();
-                        });
-                    }),
-            ));
-        let files = match (shown, self.mission_view()) {
-            (Some(PanelViewId::Files), Some(mission)) => Some(self.rail_files.show_with(
-                &self.rail_context(mission),
-                widened,
-                Some(cx.entity_id()),
-                cx,
-            )),
+        let maximize_control =
+            (!self.presentation.is_remote()).then(|| side_panel::MaximizeControl {
+                maximized,
+                on_toggle: Rc::new(move |window, cx| {
+                    maximize_root.update(cx, |this, cx| {
+                        this.toggle_rail_maximized(window, cx);
+                    });
+                }),
+            });
+        let on_request_maximize: side_panel::PanelCallback = Rc::new(move |window, cx| {
+            req_max_root.update(cx, |this, cx| {
+                this.set_rail_maximized(true, window, cx);
+            });
+        });
+        let header = self.render_titlebar_drag_area(
+            "mission-rail-titlebar-drag",
+            div()
+                .h(rems(WORKSPACE_HEADER_HEIGHT / 16.))
+                .flex_none()
+                .pl_2()
+                .pr_2()
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme::border())
+                .rounded_tl(rems(11. / 16.))
+                .rounded_tr(rems(11. / 16.))
+                .when(
+                    maximized && self.sidebar_collapsed && cfg!(target_os = "macos"),
+                    |header| {
+                        header
+                            .pl(px(self.workspace_titlebar_padding(window, cx)))
+                            .children(self.render_collapsed_titlebar_spacer())
+                    },
+                )
+                .map(|element| {
+                    #[cfg(test)]
+                    let element =
+                        crate::theme_snapshot::record_fill("MISSION_RAIL_HEADER", element);
+                    element
+                })
+                .child(side_panel::header_tabs(
+                    PanelSurface::Mission,
+                    &settings,
+                    &self.rail_surfaces.open,
+                    (&self.rail_surfaces, window),
+                    handler,
+                    maximize_control,
+                    IconButton::new("collapse-mission-rail", "panel-right-open.svg")
+                        .tooltip(crate::i18n::text("ui.collapse_side_panel"))
+                        .on_press(move |_, cx| {
+                            collapse_root.update(cx, |this, cx| {
+                                this.set_rail_open(false, cx);
+                                cx.notify();
+                            });
+                        }),
+                )),
+            cx,
+        );
+        let surface_view = match (shown, self.mission_view()) {
+            (Some(PanelViewId::Files), Some(mission)) => {
+                self.rail_files.hide_changes(cx);
+                Some(self.rail_files.show_with_maximize(
+                    &self.rail_context(mission),
+                    widened,
+                    Some(cx.entity_id()),
+                    maximized,
+                    Some(on_request_maximize),
+                    cx,
+                ))
+            }
+            (Some(PanelViewId::Changes), Some(mission)) => {
+                self.rail_files.hide_files(cx);
+                Some(self.rail_files.show_changes_with_maximize(
+                    &self.rail_context(mission),
+                    widened,
+                    Some(cx.entity_id()),
+                    maximized,
+                    Some(on_request_maximize),
+                    cx,
+                ))
+            }
             _ => {
                 self.rail_files.hide(cx);
                 None
@@ -203,14 +320,16 @@ impl MissionWorkspace {
         };
         let body = match shown {
             Some(PanelViewId::Info) => self.render_mission_meta_panel(cx),
-            Some(PanelViewId::Files) => files.unwrap_or_else(|| div().into_any_element()),
+            Some(PanelViewId::Files | PanelViewId::Changes) => {
+                surface_view.unwrap_or_else(|| div().into_any_element())
+            }
             Some(PanelViewId::Sessions) | None => self.render_roles_rail(width, window, cx),
         };
         let rail = div()
             .relative()
-            .w(rems(width / 16.))
+            .when(maximized, |r| r.w_full().flex_1().min_w(px(0.)))
+            .when(!maximized, |r| r.w(rems(width / 16.)).flex_none())
             .h_full()
-            .flex_none()
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -221,13 +340,29 @@ impl MissionWorkspace {
                     .min_h(px(0.))
                     .flex()
                     .flex_col()
-                    .pb(rems(8. / 16.))
+                    .when(
+                        !matches!(shown, Some(PanelViewId::Files | PanelViewId::Changes)),
+                        |body| body.pb(rems(8. / 16.)),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
+                            .when(
+                                !matches!(shown, Some(PanelViewId::Files | PanelViewId::Changes)),
+                                |el| {
+                                    el.on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            if !this.rail_contains_focus(window, cx) {
+                                                this.rail_focus.focus(window, cx);
+                                            }
+                                        }),
+                                    )
+                                },
+                            )
                             .map(|element| {
                                 #[cfg(test)]
                                 let element =
@@ -240,10 +375,11 @@ impl MissionWorkspace {
         div()
             .id("mission-rail")
             .debug_selector(|| "MISSION_RAIL".into())
+            .track_focus(&self.rail_focus)
             .relative()
-            .w(rems(visible_width / 16.))
+            .when(maximized, |r| r.flex_1().min_w(px(0.)).w_full())
+            .when(!maximized, |r| r.w(rems(visible_width / 16.)).flex_none())
             .h_full()
-            .flex_none()
             .overflow_hidden()
             .rounded(rems(12. / 16.))
             .border_1()

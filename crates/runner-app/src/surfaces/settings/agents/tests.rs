@@ -81,6 +81,7 @@ fn runtime(state: RuntimeRowState) -> RuntimeExecutableStatus {
         available_version: None,
         min_version: Some("0.149.0".into()),
         below_minimum: false,
+        sign_in: Default::default(),
     }
 }
 
@@ -94,6 +95,7 @@ fn status(runtime: RuntimeExecutableStatus, checking: bool) -> RuntimeStatusResp
             using_last_known_good: false,
             last_known_good_captured_at: None,
         },
+        npm_available: true,
         runtimes: vec![runtime],
     }
 }
@@ -317,13 +319,14 @@ fn update_button_sits_before_the_toggle_only_while_an_update_exists() {
 
 #[test]
 fn update_task_row_shows_only_caption_unless_failed_and_omits_output_buttons() {
-    use runner_core::protocol::{RuntimeUpdateState, RuntimeUpdateTask};
+    use runner_core::protocol::{RuntimeTaskKind, RuntimeUpdateState, RuntimeUpdateTask};
 
     let mut stale = versioned(RuntimeRowState::Detected, Some("0.153.4"), Some("0.155.0"));
     stale.effective_source = Some(RuntimeCommandSource::Detected);
     let make_task = |state: RuntimeUpdateState| RuntimeUpdateTask {
         id: "task-codex-1".into(),
         runtime: Runtime::Codex,
+        kind: RuntimeTaskKind::Update,
         state,
         from_version: Some("0.153.4".into()),
         to_version: Some("0.155.0".into()),
@@ -2059,4 +2062,140 @@ fn custom_flags_warning_saves_keeps_normal_border_and_recomputes_on_reload() {
         })
         .unwrap();
     });
+}
+
+#[test]
+fn not_found_opencode_below_minimum_shows_detected_v1_in_presentation_and_not_installed_page() {
+    let mut row = runtime(RuntimeRowState::NotFound);
+    row.name = Runtime::OpenCode;
+    row.display_name = "OpenCode v2".into();
+    row.command = "opencode".into();
+    row.detected_path = Some("/tmp/bin/opencode".into());
+    row.installed_version = Some("1.19.5".into());
+    row.min_version = Some("2.0.0".into());
+    row.below_minimum = true;
+
+    let presentation = runtime_presentation(&row, Some(DiscoveryOutcome::Ok), None, false);
+    assert_eq!(
+        presentation.caption.as_deref(),
+        Some("OpenCode 1.19.5 was found at /tmp/bin/opencode. Runner only supports OpenCode v2 (2.0.0 or newer).")
+    );
+    assert_eq!(
+        presentation.auto_path.resolve().as_ref(),
+        "Auto — OpenCode 1.19.5 found at /tmp/bin/opencode; Runner only supports OpenCode v2 (2.0.0 or newer)"
+    );
+
+    let mut cx = gpui::TestAppContext::single();
+    let (_temp, pane) = test_pane(vec![row], false, &mut cx);
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+    assert!(window.debug_bounds("AGENTS_NOT_INSTALLED_HEADER").is_some());
+    assert!(window.debug_bounds("AGENT_CARD_opencode").is_some());
+    open_test_page(pane, Runtime::OpenCode, &mut window);
+    assert!(window
+        .debug_bounds("AGENT_UNSUPPORTED_CAPTION_opencode")
+        .is_some());
+    pane.read_with(&window, |pane, cx| {
+        let placeholder = pane.overrides[&Runtime::OpenCode]
+            .read(cx)
+            .placeholder()
+            .to_string();
+        assert!(placeholder.contains("OpenCode 1.19.5"), "{placeholder}");
+        assert!(
+            placeholder.contains("OpenCode v2 (2.0.0 or newer)"),
+            "{placeholder}"
+        );
+    })
+    .unwrap();
+}
+
+#[test]
+fn settings_agents_renders_open_setup_and_not_installed_install_states() {
+    use runner_core::protocol::{RuntimeTaskKind, RuntimeUpdateState, RuntimeUpdateTask};
+
+    let codex_missing = runtime(RuntimeRowState::NotFound);
+    let mut trae_missing = runtime(RuntimeRowState::NotFound);
+    trae_missing.name = Runtime::Trae;
+    trae_missing.display_name = "Trae".into();
+    trae_missing.command = "trae".into();
+
+    let mut cx = gpui::TestAppContext::single();
+    let (_temp, pane) = test_pane(
+        vec![codex_missing.clone(), trae_missing.clone()],
+        false,
+        &mut cx,
+    );
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+    assert!(window.debug_bounds("AGENTS_OPEN_SETUP").is_some());
+    assert!(window.debug_bounds("AGENT_INSTALL_ROW_codex").is_some());
+    assert!(window.debug_bounds("AGENT_ROW_INSTALL_codex").is_some());
+    assert!(window.debug_bounds("AGENT_INSTALL_ROW_trae").is_none());
+    assert!(window.debug_bounds("AGENT_ROW_INSTALL_trae").is_none());
+
+    let mut cx = gpui::TestAppContext::single();
+    let (_temp, pane) = test_pane(vec![codex_missing.clone()], false, &mut cx);
+    pane.update(&mut cx, |pane, _, cx| {
+        let mut snap = status(codex_missing.clone(), false);
+        snap.npm_available = false;
+        pane.apply_status(snap, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+    assert!(window.debug_bounds("AGENT_INSTALL_ROW_codex").is_none());
+    assert!(window.debug_bounds("AGENT_ROW_INSTALL_codex").is_none());
+
+    let make_install = |state: RuntimeUpdateState| RuntimeUpdateTask {
+        id: "install-codex-1".into(),
+        runtime: Runtime::Codex,
+        kind: RuntimeTaskKind::Install,
+        state,
+        from_version: None,
+        to_version: None,
+        installed_version: None,
+        step: String::new(),
+        message: None,
+        exit_code: None,
+        running_sessions: 0,
+    };
+
+    let mut cx = gpui::TestAppContext::single();
+    let (_temp, pane) = test_pane(vec![codex_missing.clone()], false, &mut cx);
+    pane.update(&mut cx, |pane, _, cx| {
+        pane.tasks = vec![make_install(RuntimeUpdateState::Running)];
+        cx.notify();
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+    assert!(window.debug_bounds("AGENT_INSTALL_ROW_codex").is_some());
+    assert!(window.debug_bounds("AGENT_TASK_CAPTION_codex").is_some());
+    assert!(window.debug_bounds("AGENT_ROW_INSTALL_codex").is_none());
+    assert!(window.debug_bounds("AGENT_INSTALL_ANSWER_codex").is_none());
+    assert!(window.debug_bounds("AGENT_TASK_RETRY_codex").is_none());
+
+    let mut cx = gpui::TestAppContext::single();
+    let (_temp, pane) = test_pane(vec![codex_missing.clone()], false, &mut cx);
+    pane.update(&mut cx, |pane, _, cx| {
+        pane.tasks = vec![make_install(RuntimeUpdateState::MayNeedInput)];
+        cx.notify();
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+    assert!(window.debug_bounds("AGENT_INSTALL_ROW_codex").is_some());
+    assert!(window.debug_bounds("AGENT_TASK_CAPTION_codex").is_some());
+    assert!(window.debug_bounds("AGENT_INSTALL_ANSWER_codex").is_some());
+
+    let mut cx = gpui::TestAppContext::single();
+    let (_temp, pane) = test_pane(vec![codex_missing], false, &mut cx);
+    pane.update(&mut cx, |pane, _, cx| {
+        pane.tasks = vec![make_install(RuntimeUpdateState::Failed)];
+        cx.notify();
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mut window = gpui::VisualTestContext::from_window(pane.into(), &cx);
+    assert!(window.debug_bounds("AGENT_INSTALL_ROW_codex").is_some());
+    assert!(window.debug_bounds("AGENT_TASK_CAPTION_codex").is_some());
+    assert!(window.debug_bounds("AGENT_TASK_RETRY_codex").is_some());
 }

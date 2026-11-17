@@ -15,6 +15,7 @@ pub mod mission_review;
 pub mod mod_types;
 pub mod model;
 pub mod node;
+pub mod onboarding;
 pub mod permissions;
 pub mod project;
 pub mod role;
@@ -29,6 +30,7 @@ pub mod terminal;
 pub mod usage;
 pub mod window;
 pub mod wire;
+pub mod worktree;
 pub use api::{Request, Response};
 pub use client::*;
 pub use crew::*;
@@ -40,6 +42,7 @@ pub use mission_review::*;
 pub use mod_types::*;
 pub use model::*;
 pub use node::*;
+pub use onboarding::*;
 pub use permissions::*;
 pub use project::*;
 pub use role::*;
@@ -49,6 +52,7 @@ pub use slot::*;
 pub use status::*;
 pub use usage::*;
 pub use window::*;
+pub use worktree::*;
 
 pub fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where

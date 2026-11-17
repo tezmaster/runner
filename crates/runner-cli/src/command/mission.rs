@@ -74,11 +74,20 @@ pub(super) async fn run_mission(
             title,
             project,
             cwd,
+            worktree,
+            base,
             no_report,
         } => {
             let crew = match crew {
                 Some(crew) => Some(resolve_named(client, "crew", "crew_list", crew).await?),
-                None => None,
+                None => {
+                    if list(client, "crew_list", json!({})).await?.is_empty() {
+                        return Err(CliError::usage(
+                            "no crews exist yet; create roles and a crew with `runner role create` and `runner crew create`, or open Runner to run setup",
+                        ));
+                    }
+                    None
+                }
             };
             let goal = read_text(goal.as_deref(), goal_file.as_deref(), "goal")?;
             let project_id = match project {
@@ -94,20 +103,22 @@ pub(super) async fn run_mission(
             } else {
                 None
             };
-            call(
-                client,
-                "mission_start",
-                json!({
-                    "crew_id": crew.map(|crew| crew.id),
-                    "project_id": project_id,
-                    "title": title,
-                    "goal_override": goal,
-                    "cwd": cwd,
-                    "started_by_session_id": session,
-                    "no_report": no_report,
-                }),
-            )
-            .await
+            let mut body = json!({
+                "crew_id": crew.map(|crew| crew.id),
+                "project_id": project_id,
+                "title": title,
+                "goal_override": goal,
+                "cwd": cwd,
+                "started_by_session_id": session,
+                "no_report": no_report,
+            });
+            if let Some(branch) = worktree {
+                body["worktree"] = json!({
+                    "branch": branch,
+                    "base": base,
+                });
+            }
+            call(client, "mission_start", body).await
         }
         MissionCommand::AddRole {
             mission,

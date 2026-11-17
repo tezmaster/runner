@@ -8,6 +8,8 @@ pub mod fs;
 pub mod git;
 pub mod root;
 pub mod watch;
+pub mod worktree;
+pub(crate) use worktree::{worktree_checkout, worktree_remove};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -176,6 +178,8 @@ pub struct FilesService {
     worktree_list_without_z: Arc<AtomicBool>,
     status_runs: Arc<StatusRuns>,
     watches: Mutex<HashMap<PathBuf, Watched>>,
+    worktree_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    pub(crate) worktree_gate: worktree::WorktreeGate,
     pub(crate) changes_viewed: changes::ViewedMarks,
     /// Holds the next [`Self::prepare_watch`]: it reports on the first and
     /// waits on the second.
@@ -200,6 +204,8 @@ impl FilesService {
             worktree_list_without_z: Default::default(),
             status_runs: Default::default(),
             watches: Default::default(),
+            worktree_locks: Default::default(),
+            worktree_gate: Default::default(),
             changes_viewed: Default::default(),
             #[cfg(test)]
             watch_gate: Default::default(),
@@ -245,7 +251,11 @@ impl FilesService {
     pub fn worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>> {
         fs::check_root(root)?;
         match (git::checkout_top(root), self.git()) {
-            (Some(_), Some(git)) => git.worktrees(root),
+            (Some(_), Some(git)) => {
+                let mut entries = git.worktrees(root)?;
+                git.populate_worktree_uncommitted(&mut entries);
+                Ok(entries)
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -347,9 +357,12 @@ impl FilesService {
 
     /// Whether `client` holds an active watch on any folder inside `checkout_top`.
     pub fn is_client_watching_checkout(&self, client: u64, checkout_top: &Path) -> bool {
+        let target = runner_core::app_paths::normalize_checkout_path(checkout_top);
         self.watches.lock().unwrap().values().any(|watched| {
             watched.subscribers.contains_key(&client)
-                && watched.checkout_top.as_deref() == Some(checkout_top)
+                && watched.checkout_top.as_deref().is_some_and(|top| {
+                    runner_core::app_paths::same_normalized_checkout_path(top, &target)
+                })
         })
     }
 
@@ -461,7 +474,7 @@ pub fn set_root(
 /// The recent folders that still exist, newest first.
 pub fn recent_folders(core: &crate::AppCore) -> Result<Vec<PathBuf>> {
     let mut folders = crate::db::files_recent_folders(&core.db)?;
-    folders.retain(|folder| folder.is_dir());
+    folders.retain(|folder| runner_core::app_paths::is_existing_dir(folder));
     Ok(folders)
 }
 
@@ -471,7 +484,9 @@ pub fn read(root: &Path, path: &str, want_bytes: bool) -> Result<FileContent> {
     fs::read(root, path, want_bytes)
 }
 
-pub use changes::{changes_commits, changes_diff, changes_files, changes_set_viewed};
+pub use changes::{
+    changes_branches, changes_commits, changes_diff, changes_files, changes_set_viewed,
+};
 
 #[cfg(test)]
 pub(crate) mod fixture {
@@ -540,3 +555,5 @@ pub(crate) mod fixture {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_tests;

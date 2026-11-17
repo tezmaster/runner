@@ -27,6 +27,8 @@ struct Host {
     app_zooms: Vec<&'static str>,
     /// Whether the owner's layout shows the tree beside an open file.
     tree_fits: bool,
+    maximized: bool,
+    maximize_requests: usize,
 }
 
 impl Render for Host {
@@ -43,13 +45,36 @@ impl Render for Host {
                     .is_some_and(|view| view.read(cx).has_tabs());
                 // As `FilesPanel::layout`: no room and no file, no widening.
                 let widened = (self.tree_fits || has_file).then_some(Widened {
-                    file: settings.file_viewer_width.max(288.),
+                    file: if self.maximized {
+                        960.
+                    } else {
+                        settings.file_viewer_width.max(288.)
+                    },
                     tree: self.tree_fits,
                     tree_width: settings.file_tree_width,
                     standard: 288.,
                 });
                 let owner = cx.entity_id();
-                Some(self.panel.show_with(context, widened, Some(owner), cx))
+                let weak = cx.weak_entity();
+                let on_request_maximize: crate::surfaces::side_panel::PanelCallback =
+                    std::rc::Rc::new(move |_, cx| {
+                        let _ = weak.update(cx, |host, cx| {
+                            host.maximized = true;
+                            host.maximize_requests += 1;
+                            cx.notify();
+                        });
+                    });
+                if !self.maximized {
+                    let _ = self.panel.show_with(context, widened, Some(owner), cx);
+                }
+                Some(self.panel.show_with_maximize(
+                    context,
+                    widened,
+                    Some(owner),
+                    self.maximized,
+                    Some(on_request_maximize),
+                    cx,
+                ))
             }
             None => {
                 self.panel.hide(cx);
@@ -195,6 +220,8 @@ fn harness(context: Option<PanelContext>) -> Harness {
         closed_panes: 0,
         app_zooms: Vec::new(),
         tree_fits: true,
+        maximized: false,
+        maximize_requests: 0,
     });
     let visual = VisualTestContext::from_window(host.into(), &cx);
     visual.simulate_resize(size(px(340.), px(900.)));
@@ -1099,8 +1126,7 @@ impl Harness {
     }
 }
 
-fn viewer(context: PanelContext) -> Harness {
-    let mut h = harness(Some(context));
+fn configure_viewer(h: &mut Harness) {
     h.visual.simulate_resize(size(px(900.), px(700.)));
     h.visual.update(|_, cx| {
         cx.bind_keys([gpui::KeyBinding::new(
@@ -1110,7 +1136,54 @@ fn viewer(context: PanelContext) -> Harness {
         )]);
         crate::keymap::install_file_viewer_bindings(cx);
     });
+}
+
+fn viewer(context: PanelContext) -> Harness {
+    let mut h = harness(Some(context));
+    configure_viewer(&mut h);
     h.wait("the root", |h| h.has("FILES_ROW a.txt"));
+    h
+}
+
+/// Shows `context` and waits until the background watcher's initial
+/// `FILES_STATUS_EVENT` has been emitted and applied by the view, so later
+/// `receive_status` calls cannot race with startup status delivery.
+fn wait_for_startup_watcher(h: &mut Harness, context: PanelContext) {
+    use runner_core::protocol::files::{FilesStatusChanged, GitStatus, FILES_STATUS_EVENT};
+    let events = h
+        .store
+        .read_with(&h.visual, |store, _| store.test_core.events.clone());
+    let mut sent = events.subscribe();
+    h.show(Some(context));
+    h.wait("the status", |h| h.status_read());
+    let root = h.read(|view| view.root().unwrap().path.clone());
+
+    h.wait("the watcher's first status", |_| {
+        std::iter::from_fn(|| sent.try_recv().ok()).any(|event| {
+            event.name == FILES_STATUS_EVENT
+                && serde_json::from_value::<FilesStatusChanged>(event.payload)
+                    .is_ok_and(|update| update.root == root)
+        })
+    });
+    let marker = GitStatus::new(Vec::new(), vec!["marker".into()]);
+    events.emit(
+        FILES_STATUS_EVENT,
+        &FilesStatusChanged {
+            root,
+            status: marker.clone(),
+        },
+    );
+    h.wait("the status sent after it", |h| {
+        h.read(|view| view.git_status().as_ref() == Some(&marker))
+    });
+}
+
+fn viewer_after_startup_watcher(context: PanelContext) -> Harness {
+    let mut h = harness(None);
+    configure_viewer(&mut h);
+    wait_for_startup_watcher(&mut h, context);
+    h.wait("the root", |h| h.has("FILES_ROW a.txt"));
+    receive_status(&mut h, runner_core::protocol::files::GitStatus::default());
     h
 }
 
@@ -1499,67 +1572,102 @@ fn the_tree_toggle_hides_the_tree_beside_an_open_file() {
 
 #[test]
 fn an_open_file_widens_the_panel_into_the_room_the_mission_leaves() {
+    use crate::surfaces::side_panel::{PanelSurfaces, PanelViewId};
     let mut h = viewer(mission("on-worktree"));
     let subject = PanelSubject::Mission("on-worktree".into());
-    let layout = |h: &mut Harness, surface: f32| {
+    let surfaces = h
+        .visual
+        .update(|_, cx| PanelSurfaces::new(Default::default(), cx));
+    let settings = crate::app_settings::AppSettings::default();
+    let panel_at = |h: &mut Harness, surfaces: &PanelSurfaces, surface: f32| {
         h.host
             .read_with(&h.visual, |host, cx| {
                 host.panel.surface.set(surface);
-                host.panel.layout(
+                host.panel.panel_layout(
+                    PanelSurface::Mission,
+                    &settings,
+                    surfaces,
                     Some(&subject),
-                    FilesSurface::Shown,
                     288.,
-                    440.,
-                    240.,
                     6.,
+                    false,
                     cx,
                 )
             })
             .unwrap()
     };
-    let beside = |h: &mut Harness, files: FilesSurface| {
-        h.host
-            .read_with(&h.visual, |host, cx| {
-                host.panel.surface.set(1200.);
-                host.panel
-                    .layout(Some(&subject), files, 288., 440., 240., 6., cx)
-                    .0
-            })
-            .unwrap()
-    };
     assert_eq!(
-        beside(&mut h, FilesSurface::Open),
-        288.,
-        "no file and another surface showing, the standard width"
+        panel_at(&mut h, &surfaces, 1200.),
+        (288., None),
+        "before Files or Changes widens the mission rail, the standard width"
     );
+    let mut surfaces = surfaces;
+    surfaces.open.open(PanelViewId::Files);
     assert!(
-        layout(&mut h, 1200.).0 > 288.,
+        panel_at(&mut h, &surfaces, 1200.).0 > 288.,
         "Files showing a root is wide before a file opens"
     );
+    surfaces.open.select(PanelViewId::Sessions);
+    assert_eq!(
+        panel_at(&mut h, &surfaces, 1200.).0,
+        680.,
+        "switching to Sessions with no open file tab retains the widened width"
+    );
+    surfaces.open.select(PanelViewId::Files);
     h.open("a.txt");
     h.wait("the file", |h| h.has("FILE_CODE"));
     // 6 + 420 + 440 + 240: the tree fits beside the file.
-    let (width, widened) = layout(&mut h, 1106.);
+    let (width, widened) = panel_at(&mut h, &surfaces, 1106.);
     assert_eq!(width, 680.);
     assert!(widened.unwrap().tree);
     // Narrower: the file gives way to the mission first, and the tree stays.
-    let (width, widened) = layout(&mut h, 1105.);
+    let (width, widened) = panel_at(&mut h, &surfaces, 1105.);
     assert_eq!(width, 679.);
     assert!(widened.unwrap().tree);
-    assert_eq!(layout(&mut h, 1000.).0, 574.);
+    assert_eq!(panel_at(&mut h, &surfaces, 1000.).0, 574.);
     assert_eq!(
-        layout(&mut h, 600.).0,
+        panel_at(&mut h, &surfaces, 600.).0,
         528.,
         "the file never below the standard width, the tree still shown"
     );
-    assert!(layout(&mut h, 600.).1.unwrap().tree);
+    assert!(panel_at(&mut h, &surfaces, 600.).1.unwrap().tree);
 
-    // A file left open keeps the width while another surface shows, and
-    // closing Files gives it back, with the file tabs kept for reopening.
-    assert!(beside(&mut h, FilesSurface::Open) > 288.);
-    assert_eq!(beside(&mut h, FilesSurface::Closed), 288.);
+    // Switching away or closing Files retains the widened width, with file tabs kept;
+    // only a fresh/reset surface state starts back at the standard width.
+    surfaces.open.select(PanelViewId::Sessions);
+    assert_eq!(panel_at(&mut h, &surfaces, 1200.).0, 680.);
+    surfaces.open.close(PanelViewId::Files, true);
+    assert_eq!(panel_at(&mut h, &surfaces, 1200.).0, 680.);
     assert!(h.read(|view| view.has_tabs()));
-    assert!(beside(&mut h, FilesSurface::Shown) > 288.);
+    surfaces.reset(Default::default());
+    assert_eq!(panel_at(&mut h, &surfaces, 1200.), (288., None));
+    surfaces.open.open(PanelViewId::Files);
+    assert_eq!(panel_at(&mut h, &surfaces, 1200.).0, 680.);
+
+    // An inactive tree-hidden Files tab does not override a tree-on retained width (unmaximized or maximized).
+    h.click("FILE_TREE_TOGGLE");
+    assert_eq!(panel_at(&mut h, &surfaces, 1200.).0, 440.);
+    surfaces.set_widened_tree(Some(true));
+    surfaces.open.select(PanelViewId::Sessions);
+    assert_eq!(panel_at(&mut h, &surfaces, 1200.).0, 680.);
+    let max = h
+        .host
+        .read_with(&h.visual, |host, cx| {
+            host.panel.surface.set(1200.);
+            host.panel.panel_layout(
+                PanelSurface::Mission,
+                &settings,
+                &surfaces,
+                Some(&subject),
+                288.,
+                6.,
+                true,
+                cx,
+            )
+        })
+        .unwrap();
+    assert_eq!(max.0, 1200.);
+    assert!(max.1.unwrap().tree);
 }
 
 #[test]
@@ -2834,6 +2942,178 @@ fn a_selection_left_elsewhere_does_not_block_clicking_a_linked_image() {
     });
 }
 
+#[test]
+fn an_unchanged_change_event_during_markdown_drag_preserves_selection_and_copy() {
+    let mut h = viewer(chat("in-project"));
+    std::fs::create_dir_all(h.repo.join("docs")).unwrap();
+    std::fs::write(
+        h.repo.join("docs/a.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40"/></svg>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        h.repo.join("DRAG.md"),
+        "First paragraph here.\n\n![A](docs/a.svg)\n\nSecond paragraph here.\n",
+    )
+    .unwrap();
+    h.open("DRAG.md");
+    h.wait("the page", |h| h.has("FILE_MD_IMAGE"));
+    let root = h.read(|view| view.root().unwrap().path.clone());
+    let view = h.view();
+    let emit_changed = |h: &mut Harness| {
+        view.update(&mut h.visual, |view, cx| {
+            view.receive(
+                FilesEvent::Changed(runner_core::protocol::files::FilesChanged {
+                    root: root.clone(),
+                    folders: vec![String::new()],
+                    paths: vec!["DRAG.md".into()],
+                }),
+                cx,
+            );
+        });
+        h.settle();
+    };
+
+    let first = h.visual.debug_bounds("FILE_MD_TEXT 0").unwrap();
+    let start = gpui::point(first.left() + px(1.), first.center().y);
+    let end = gpui::point(first.left() + px(96.), first.center().y);
+    h.visual
+        .simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+    h.visual
+        .simulate_mouse_move(end, Some(gpui::MouseButton::Left), Modifiers::default());
+    h.settle();
+
+    // A watcher flush arriving mid-drag for the untouched file must not drop selection.
+    emit_changed(&mut h);
+    h.visual
+        .simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::default());
+    h.settle();
+
+    let page = h.read(|view| view.rendered_view()).unwrap();
+    let selected = page.read_with(&h.visual, |page, _| page.selected_text());
+    let selected_text = selected.expect("selected text after mid-drag unchanged change event");
+    assert!(!selected_text.is_empty());
+
+    // A second unchanged reload after mouse-up must still preserve selection for copy.
+    emit_changed(&mut h);
+    h.visual.simulate_keystrokes(&primary("c"));
+    h.settle();
+    assert_eq!(
+        h.visual
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some(selected_text.as_str())
+    );
+
+    // Direct `set_page` keeps selection when page text matches and clears it when text changes.
+    let (same_page, images) = page.read_with(&h.visual, |page, _| {
+        (page.page().clone(), page.images().clone())
+    });
+    page.update(&mut h.visual, |page, cx| {
+        page.set_page(same_page, images.clone(), cx)
+    });
+    assert_eq!(
+        page.read_with(&h.visual, |page, _| page.selected_text()),
+        Some(selected_text)
+    );
+    let edited = Arc::new(super::markdown::Page::parse(
+        "Different content.\n",
+        "DRAG.md",
+    ));
+    page.update(&mut h.visual, |page, cx| page.set_page(edited, images, cx));
+    assert_eq!(
+        page.read_with(&h.visual, |page, _| page.selected_text()),
+        None
+    );
+}
+
+#[test]
+fn a_link_target_or_formatting_edit_updates_page_while_preserving_selection() {
+    let mut h = viewer(chat("in-project"));
+    std::fs::write(
+        h.repo.join("EDIT.md"),
+        "[site](https://old.example)\n\n- [ ] Plain task\n",
+    )
+    .unwrap();
+    h.open("EDIT.md");
+    h.wait("initial markdown", |h| {
+        h.has("FILE_MD_TEXT 0") && h.has("FILE_MD_TASK")
+    });
+    let root = h.read(|view| view.root().unwrap().path.clone());
+    let view = h.view();
+    let emit_changed = |h: &mut Harness| {
+        view.update(&mut h.visual, |view, cx| {
+            view.receive(
+                FilesEvent::Changed(runner_core::protocol::files::FilesChanged {
+                    root: root.clone(),
+                    folders: vec![String::new()],
+                    paths: vec!["EDIT.md".into()],
+                }),
+                cx,
+            );
+        });
+        h.settle();
+    };
+
+    let link_bounds = h.visual.debug_bounds("FILE_MD_TEXT 0").unwrap();
+    let from = gpui::point(link_bounds.left() + px(1.), link_bounds.center().y);
+    let to = gpui::point(link_bounds.left() + px(24.), link_bounds.center().y);
+    h.visual
+        .simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    h.visual
+        .simulate_mouse_move(to, Some(gpui::MouseButton::Left), Modifiers::default());
+    h.settle();
+    h.visual
+        .simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::default());
+    h.settle();
+    let page = h.read(|view| view.rendered_view()).unwrap();
+    let selected = page
+        .read_with(&h.visual, |page, _| page.selected_text())
+        .expect("selected text before edits");
+
+    // 1. Same-label link destination edit updates the link target while keeping selection.
+    std::fs::write(
+        h.repo.join("EDIT.md"),
+        "[site](https://new.example)\n\n- [ ] Plain task\n",
+    )
+    .unwrap();
+    emit_changed(&mut h);
+    assert_eq!(
+        page.read_with(&h.visual, |page, _| page.selected_text()),
+        Some(selected.clone())
+    );
+
+    // 2. Formatting and task-checkbox edits with matching row text render while keeping selection.
+    std::fs::write(
+        h.repo.join("EDIT.md"),
+        "[site](https://new.example)\n\n- [x] **Plain** task\n",
+    )
+    .unwrap();
+    emit_changed(&mut h);
+    h.wait("updated task checkbox", |h| h.has("FILE_MD_TASK_DONE"));
+    assert_eq!(
+        page.read_with(&h.visual, |page, _| page.selected_text()),
+        Some(selected)
+    );
+    let has_strong = page.read_with(&h.visual, |page, _| {
+        matches!(
+            &page.page().rows[1].kind,
+            super::markdown::RowKind::Paragraph(inline)
+                if inline.styles.iter().any(|(_, style)| style.strong)
+        )
+    });
+    assert!(has_strong, "bold formatting must render on updated row");
+
+    let link_bounds = h.visual.debug_bounds("FILE_MD_TEXT 0").unwrap();
+    h.visual.simulate_click(
+        gpui::point(link_bounds.left() + px(12.), link_bounds.center().y),
+        Modifiers::default(),
+    );
+    h.settle();
+    assert_eq!(h.read(|view| view.opened_urls()), ["https://new.example"]);
+}
+
 // ── Settings → Side panel → Files ──────────────────────────────────────
 
 impl Harness {
@@ -3599,42 +3879,67 @@ fn a_tree_that_does_not_fit_takes_the_panel_until_a_file_opens() {
 
 #[test]
 fn the_layout_gives_a_tree_with_no_room_the_panel_until_a_file_opens() {
+    use crate::surfaces::side_panel::{OpenSurfaces, PanelSurfaces, PanelViewId};
     let mut h = viewer(chat("in-project"));
     let subject = PanelSubject::Session("in-project".into());
-    let layout = |h: &mut Harness, surface: f32| {
+    let settings = crate::app_settings::AppSettings::default();
+    let mut open_files = OpenSurfaces::default();
+    open_files.open(PanelViewId::Files);
+    let mut surfaces = h
+        .visual
+        .update(|_, cx| PanelSurfaces::new(open_files.clone(), cx));
+    let layout = |h: &mut Harness, surfaces: &PanelSurfaces, surface: f32| {
         h.host
             .read_with(&h.visual, |host, cx| {
                 host.panel.surface.set(surface);
-                host.panel.layout(
+                host.panel.panel_layout(
+                    PanelSurface::Chat,
+                    &settings,
+                    surfaces,
                     Some(&subject),
-                    FilesSurface::Shown,
                     288.,
-                    440.,
-                    240.,
                     6.,
+                    false,
                     cx,
                 )
             })
             .unwrap()
     };
     // 6 + 420 + 288 + 240: the narrowest that holds the file area and the tree.
-    assert!(layout(&mut h, 954.).1.is_some());
-    assert_eq!(layout(&mut h, 953.), (288., None));
+    assert_eq!(layout(&mut h, &surfaces, 953.), (288., None));
+    assert!(layout(&mut h, &surfaces, 954.).1.is_some());
+
+    surfaces.reset(open_files);
+    assert_eq!(layout(&mut h, &surfaces, 953.), (288., None));
 
     h.open("a.txt");
     h.wait("the file", |h| h.has("FILE_CODE"));
-    let (width, widened) = layout(&mut h, 953.);
+    let (width, widened) = layout(&mut h, &surfaces, 953.);
     assert_eq!(width, 528., "a file open keeps the tree beside it");
     assert!(widened.unwrap().tree);
 
     h.click("FILE_TAB_CLOSE a.txt");
-    assert_eq!(layout(&mut h, 953.), (288., None));
-    assert!(layout(&mut h, 954.).1.is_some());
+    let (width, widened) = layout(&mut h, &surfaces, 953.);
+    assert_eq!(
+        width, 528.,
+        "closing the last file tab keeps the widened panel"
+    );
+    assert!(widened.unwrap().tree);
 
     h.click("FILE_TREE_TOGGLE");
+    assert_eq!(h.read(|view| view.widening()), Some(false));
+    let (width, widened) = layout(&mut h, &surfaces, 1000.);
+    assert_eq!(width, 440.);
+    assert!(!widened.unwrap().tree);
     assert!(
-        layout(&mut h, 600.).1.is_some(),
+        layout(&mut h, &surfaces, 600.).1.is_some(),
         "with the tree toggled off there is no tree to give the panel"
+    );
+    surfaces.open.close(PanelViewId::Files, false);
+    assert_eq!(
+        layout(&mut h, &surfaces, 1000.).0,
+        440.,
+        "closing Files down to Open a surface keeps the tree-off widened width"
     );
 }
 
@@ -4297,38 +4602,11 @@ fn a_hidden_view_does_no_work_for_its_root_and_catches_up_when_shown() {
 
 #[test]
 fn a_status_that_arrives_clears_the_error_of_one_that_failed() {
-    use runner_core::protocol::files::{FilesStatusChanged, GitStatus, FILES_STATUS_EVENT};
+    use runner_core::protocol::files::GitStatus;
     let mut h = harness(None);
-    let events = h
-        .store
-        .read_with(&h.visual, |store, _| store.test_core.events.clone());
-    let mut sent = events.subscribe();
-    h.show(Some(chat("in-project")));
-    h.wait("the status", |h| h.status_read());
+    wait_for_startup_watcher(&mut h, chat("in-project"));
     let view = h.view();
     let root = h.read(|view| view.root().unwrap().path.clone());
-
-    // The watcher reports its first status on its own, after the read above,
-    // and would clear the error below whenever it landed. Wait until it is
-    // sent, then until a status sent after it has reached the view.
-    h.wait("the watcher's first status", |_| {
-        std::iter::from_fn(|| sent.try_recv().ok()).any(|event| {
-            event.name == FILES_STATUS_EVENT
-                && serde_json::from_value::<FilesStatusChanged>(event.payload)
-                    .is_ok_and(|update| update.root == root)
-        })
-    });
-    let marker = GitStatus::new(Vec::new(), vec!["marker".into()]);
-    events.emit(
-        FILES_STATUS_EVENT,
-        &FilesStatusChanged {
-            root: root.clone(),
-            status: marker.clone(),
-        },
-    );
-    h.wait("the status sent after it", |h| {
-        h.read(|view| view.git_status().as_ref() == Some(&marker))
-    });
 
     let deadline = |view: &mut FilesView, cx: &mut Context<FilesView>| {
         view.status_error = Some("runnerd request deadline exceeded".into());
@@ -4362,4 +4640,210 @@ fn a_status_that_arrives_clears_the_error_of_one_that_failed() {
     h.wait("the error", |h| h.has("FILES_ERROR"));
     receive_status(&mut h, GitStatus::new(Vec::new(), vec!["other.log".into()]));
     assert!(h.has("FILES_ERROR"));
+}
+
+#[test]
+fn files_diff_toggle_swaps_changed_tab_in_place_shares_split_mode_and_resets_when_clean() {
+    use crate::app_settings::DiffViewMode;
+    use runner_core::protocol::files::{FileStatus, GitStatus, StatusEntry};
+
+    let mut h = viewer_after_startup_watcher(chat("in-project"));
+    h.store.update(&mut h.visual, |store, cx| {
+        store.update_settings(
+            |settings| {
+                settings.file_viewer_width = 520.;
+                settings.changes_diff_mode = DiffViewMode::Unified;
+                true
+            },
+            false,
+            cx,
+        );
+    });
+
+    // Clean file tab has no Diff button.
+    h.open("a.txt");
+    h.wait("clean file code and uncommitted paths settled", |h| {
+        h.has("FILE_CODE")
+            && h.read(|v| v.has_uncommitted_diff("a.txt") == Some(false))
+            && !h.has("FILE_DIFF_TOGGLE")
+            && !h.read(|v| v.showing_diff())
+    });
+
+    // Edit `src/deep/x.rs` on disk and report modified status.
+    std::fs::write(
+        h.repo.join("src/deep/x.rs"),
+        "fn x() {\n    let edited = 1;\n}\n",
+    )
+    .unwrap();
+    receive_status(
+        &mut h,
+        GitStatus::new(
+            vec![StatusEntry {
+                path: "src/deep/x.rs".into(),
+                status: FileStatus::Modified,
+            }],
+            Vec::new(),
+        ),
+    );
+    h.open("src/deep/x.rs");
+    h.wait("dirty file code and diff toggle", |h| {
+        h.has("FILE_CODE") && h.has("FILE_DIFF_TOGGLE")
+    });
+
+    // Switching back to clean `a.txt` hides the Diff button; switching back shows it again.
+    h.click("FILE_TAB a.txt");
+    h.wait("Diff button hidden on clean a.txt", |h| {
+        !h.has("FILE_DIFF_TOGGLE")
+    });
+    h.click("FILE_TAB src/deep/x.rs");
+    h.wait("Diff button shown on dirty src/deep/x.rs", |h| {
+        h.has("FILE_DIFF_TOGGLE")
+    });
+
+    // Toggle Diff in place: shows diff header + code, omits Viewed checkbox, disables Find bar.
+    h.click("FILE_DIFF_TOGGLE");
+    h.wait("in-place file diff loaded", |h| {
+        h.has("FILE_DIFF_COLUMN")
+            && h.has("CHANGES_DIFF_HEADER")
+            && h.has("CHANGES_DIFF_CODE")
+            && h.read(|v| v.showing_diff())
+    });
+    assert!(
+        !h.has("CHANGES_DIFF_VIEWED"),
+        "Files' in-place diff has no Viewed checkbox"
+    );
+    h.visual.simulate_keystrokes(&primary("f"));
+    h.settle();
+    assert!(
+        !h.has("FILE_FIND_BAR"),
+        "⌘F does not open Find while showing diff"
+    );
+
+    // Picking Split in a 520 px viewer auto-maximizes and persists `changes_diff_mode = Split`.
+    h.click("CHANGES_DIFF_MODE_SPLIT");
+    assert_eq!(
+        h.store
+            .read_with(&h.visual, |store, _| store.settings.changes_diff_mode),
+        DiffViewMode::Split
+    );
+    assert_eq!(
+        h.host
+            .read_with(&h.visual, |host, _| (
+                host.maximized,
+                host.maximize_requests
+            ))
+            .unwrap(),
+        (true, 1)
+    );
+    let diff = h.read(|v| v.tab_diff_view()).unwrap();
+    assert_eq!(
+        diff.read_with(&h.visual, |d, _| d.mode()),
+        DiffViewMode::Split
+    );
+
+    // Per-tab state: switching to `a.txt` shows the file, switching back restores the diff.
+    h.click("FILE_TAB a.txt");
+    h.wait("clean a.txt shows file code", |h| {
+        !h.read(|v| v.showing_diff()) && h.has("FILE_CODE")
+    });
+    h.click("FILE_TAB src/deep/x.rs");
+    h.wait("dirty src/deep/x.rs restores diff", |h| {
+        h.read(|v| v.showing_diff()) && h.has("FILE_DIFF_COLUMN")
+    });
+
+    // When uncommitted changes clear, hide Diff button and return the tab to the file viewer.
+    git(&h.repo, &["checkout", "--", "src/deep/x.rs"]);
+    receive_status(&mut h, GitStatus::default());
+    h.wait("tab returned to file after changes cleared", |h| {
+        h.has("FILE_CODE")
+            && h.read(|v| v.has_uncommitted_diff("src/deep/x.rs") == Some(false))
+            && !h.has("FILE_DIFF_TOGGLE")
+            && !h.has("FILE_DIFF_COLUMN")
+            && !h.read(|v| v.showing_diff())
+            && h.read(|v| v.tab_diff_view().is_none())
+    });
+}
+
+#[test]
+fn files_diff_toggle_reflects_working_tree_vs_head_when_staged_edit_is_reverted_on_disk() {
+    use runner_core::protocol::files::{FileStatus, GitStatus, StatusEntry};
+
+    let mut h = viewer_after_startup_watcher(chat("in-project"));
+
+    let path = h.repo.join("src/deep/x.rs");
+    let head_content = std::fs::read_to_string(&path).unwrap();
+
+    // Stage an edit in the index, then write the original HEAD content back on disk without
+    // unstaging: `git status --porcelain` reports `MM` (Modified), yet `Working tree vs HEAD`
+    // has zero net changes.
+    std::fs::write(&path, "fn x() {\n    staged_only();\n}\n").unwrap();
+    git(&h.repo, &["add", "src/deep/x.rs"]);
+    std::fs::write(&path, &head_content).unwrap();
+    receive_status(
+        &mut h,
+        GitStatus::new(
+            vec![StatusEntry {
+                path: "src/deep/x.rs".into(),
+                status: FileStatus::Modified,
+            }],
+            Vec::new(),
+        ),
+    );
+
+    h.open("src/deep/x.rs");
+    h.wait(
+        "reverted MM file code loaded, tab keeps M badge, and Diff button stays hidden",
+        |h| {
+            h.has("FILE_CODE")
+                && h.read(|v| v.has_uncommitted_diff("src/deep/x.rs") == Some(false))
+                && h.has("FILE_TAB_LETTER src/deep/x.rs M")
+                && !h.has("FILE_DIFF_TOGGLE")
+        },
+    );
+
+    // Edit the working tree so it now differs from HEAD: Diff button appears and opens cleanly.
+    std::fs::write(&path, "fn x() {\n    working_tree_changed();\n}\n").unwrap();
+    receive_status(
+        &mut h,
+        GitStatus::new(
+            vec![StatusEntry {
+                path: "src/deep/x.rs".into(),
+                status: FileStatus::Modified,
+            }],
+            Vec::new(),
+        ),
+    );
+    h.wait(
+        "Diff button appears with M badge once working tree differs from HEAD",
+        |h| h.has("FILE_TAB_LETTER src/deep/x.rs M") && h.has("FILE_DIFF_TOGGLE"),
+    );
+    h.click("FILE_DIFF_TOGGLE");
+    h.wait("in-place file diff loaded", |h| {
+        h.has("FILE_DIFF_COLUMN") && h.has("CHANGES_DIFF_CODE")
+    });
+
+    // Revert the working tree back to HEAD again while leaving the staged edit in the index
+    // (`git status` still reports Modified `MM`): Diff button hides and tab returns to file.
+    std::fs::write(&path, &head_content).unwrap();
+    receive_status(
+        &mut h,
+        GitStatus::new(
+            vec![StatusEntry {
+                path: "src/deep/x.rs".into(),
+                status: FileStatus::Modified,
+            }],
+            Vec::new(),
+        ),
+    );
+    h.wait(
+        "tab returned to file, keeps M badge, and Diff button hidden once working tree matches HEAD",
+        |h| {
+            h.has("FILE_CODE")
+                && h.read(|v| v.has_uncommitted_diff("src/deep/x.rs") == Some(false))
+                && h.has("FILE_TAB_LETTER src/deep/x.rs M")
+                && !h.has("FILE_DIFF_TOGGLE")
+                && !h.has("FILE_DIFF_COLUMN")
+                && !h.read(|v| v.showing_diff())
+        },
+    );
 }

@@ -2,11 +2,11 @@
 
 Runner launches separately installed agent CLIs and keeps their native terminal interfaces. Enable agents, inspect detected executables, and choose executable overrides in **Settings → Agents**.
 
-Claude Code and Codex are the primary integrations, with tuned launch and nudge timing. Antigravity CLI and the other runtimes are secondary: they run chats and missions, but do not get every Runner feature.
+Runner supports agents in two tiers. **First-tier** agents are Claude Code, Codex, Antigravity CLI, Grok Build and pi: Runner is developed and tested against them. **Community-supported** agents are GitHub Copilot CLI, Cursor, OpenCode v2, TRAE CLI and Muse Code: they run chats and missions, but Runner relies on the people who use them to find problems, so [open an issue](https://github.com/yicheng47/runner/issues/new) when something breaks. Within each tier, features still vary by agent; the sections below say what each one supports.
 
 ## Agent settings
 
-**Settings → Agents** groups agents into Installed and Not installed lists. Every row opens that agent’s page; use the **Agents** breadcrumb to return. Installed rows show the version, executable, default badge, enable switch and an Update button when available. Tab and Shift-Tab move between rows and controls; Enter or Space opens a focused row.
+**Settings → Agents** groups agents into Installed and Not installed lists. Every row opens that agent’s page; use the **Agents** breadcrumb to return, or click **Open setup** in the header to reopen the first-run setup page in this window. Installed rows show the version, executable, default badge, enable switch and an Update button when available; Not installed rows for npm-packaged agents (Claude Code, Codex, Copilot CLI, pi) show **Install** when `npm` is on `PATH`. Tab and Shift-Tab move between rows and controls; Enter or Space opens a focused row.
 
 The agent’s page has its enable switch and **Set as default** action, detection and update status, **Executable** field with Browse and Reset, and read-only **Defaults** for model and effort. Leave Executable on Auto to use discovery. A chosen path applies to new sessions using the agent’s default command; roles with a custom command keep it. A missing agent’s page includes its install instructions and Browse.
 
@@ -20,7 +20,7 @@ Every agent page has a **Launch** card and a read-only **Command** preview, incl
 | Bypass permissions | Claude Code | Off | Chats, every account |
 | Bypass permissions | Antigravity CLI | Off | Chats |
 | Remote plugin catalog | Codex | On | Chats, resumes, missions and forks |
-| Status hooks | Codex, Claude Code, pi, Copilot CLI, OpenCode; Grok on macOS/Linux | On | Chats |
+| Status hooks | Codex, Claude Code, pi, Copilot CLI, OpenCode v2; Grok on macOS/Linux | On | Chats |
 | Custom flags | All agents | Empty | Chats, roles, missions, resumes and forks |
 
 Bypass lets a chat run without asking for permission; Codex also runs outside its sandbox. Enable it only for trusted folders. The Bypass switch applies to every Codex, Claude Code and Antigravity CLI chat, including role-backed chats. Chat starts, resumes and forks strip stored role permission flags; with Bypass off, the agent’s own configuration governs approvals. Missions always use their broad-access permissions and status hooks, regardless of the chat switches.
@@ -46,7 +46,7 @@ Use each provider's setup instructions, then run its CLI in a normal terminal to
 | GitHub Copilot CLI | `copilot` | [Copilot CLI setup](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli); Copilot subscription |
 | Cursor Agent CLI | `cursor` | [Cursor CLI setup](https://cursor.com/docs/cli/installation); install the CLI separately from the editor |
 | Grok Build | `grok` | [Grok Build setup](https://docs.x.ai/build/overview); existing grok.com sign-in; updates itself |
-| OpenCode v2 | `opencode` | [OpenCode](https://opencode.ai); configure an available provider and model |
+| OpenCode v2 | `opencode` | [OpenCode v2 docs](https://opencode.ai/v2/docs); configure an available provider and model |
 | TRAE CLI | `trae` | Opt-in runtime; enable it in Settings → Agents after installing and configuring its CLI |
 | Muse Code | `muse` | Meta Muse; sign in through the `muse` CLI before starting it in Runner |
 
@@ -89,7 +89,7 @@ All listed runtimes except TRAE are enabled by default when detected. The runtim
 
 - Runner ships for macOS (Apple Silicon and Intel) and Windows x64. References to Linux above describe a runtime adapter's behavior; the Linux beta's install and validation scope is in [Install Runner](../getting-started/install.md).
 - Windows agents run natively, without WSL. Claude Code and pi's bash tool need Git for Windows. npm-installed agents need Node.js; Copilot's npm installation requires Node.js 22. PowerShell 7 is optional.
-- Antigravity CLI and pi have Windows implementation paths but no completed native Windows smoke check. Cursor, Grok and OpenCode also have Windows validation gaps.
+- Antigravity CLI and pi have Windows implementation paths but no completed native Windows smoke check. Cursor, Grok and OpenCode v2 also have Windows validation gaps.
 - Grok chats, missions and stop/resume were checked on macOS; full app-relaunch persistence remains unverified. Switching an already loaded Grok dashboard conversation updates Runner's resume key on the next prompt, not an idle dashboard switch.
 - A resume key identifies the runtime's conversation. The runtime must still have that conversation history. Working/idle and needs-input indicators depend on the runtime's reporting and do not certify completion of a task.
 
@@ -99,8 +99,10 @@ See [Sessions](../concepts/sessions.md) for lifecycle behavior and [Troubleshoot
 
 Codex needs **0.149.0 or newer** for Runner's launch hooks. The launcher marks only an older Codex’s agent row **Update needed**; role rows have no update labels or actions. The notice explains that starting Codex or a role using it updates Codex first and leaves the pane waiting; the chat starts when the update succeeds. A refused resume or fork offers the same recovery. An unknown version is allowed to try launching.
 
+OpenCode v2 needs **2.0.0 or newer** for Runner's `--standalone` server, model discovery and session history. When an older `opencode` (`0.15.x` or `1.x`) is found on `PATH`, Runner keeps **OpenCode v2** under **Not installed** in **Settings → Agents**, explains which version was found, and omits it from the launcher's installed agents. Explicit overrides below 2.0.0 are rejected, and refused launches or resumes offer **Open Settings** instead of an update task because OpenCode v2 has no Runner-managed update command.
+
 On macOS and Linux, Antigravity CLI usage checks require **1.5.8 or newer** so Runner can verify authentication without triggering interactive login before reading `/usage`. Older or unrecognized builds remain usable for chats and missions, while keeping Antigravity CLI usage unavailable without running sign-in checks. On Windows, Runner reads Antigravity's saved sign-in directly and queries quota endpoints over HTTPS without spawning `agy`.
 
 When a supported agent has a newer version, only its agent row shows the installed and available versions with **Update**; its roles keep their normal rows. You can still start chats on the supported installed version. A dot on the sidebar's Settings gear opens **Settings → Agents** and covers enabled agents with an update command, including those without a usage meter.
 
-Manual updates run as [background tasks](../guides/chats-and-windows.md#background-tasks). Starting the same update again joins the existing task. Running chats keep their current executable version until they restart. These controls update agent CLIs; Runner's own updates remain in **Settings → Updates**. Automatic agent updates are separate work.
+Manual installs and updates run as [background tasks](../guides/chats-and-windows.md#background-tasks). When `npm` is available on `PATH`, Claude Code, Codex, GitHub Copilot CLI and pi can be installed via `npm install -g` from Setup or **Settings → Agents**; runtimes without an npm package keep manual Copy and guide links. Starting the same task again joins the existing task. Running chats keep their current executable version until they restart. These controls install or update agent CLIs; Runner's own updates remain in **Settings → Updates**. Automatic agent updates are separate work.

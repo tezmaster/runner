@@ -1,6 +1,5 @@
 //! Where a subject's Files view starts.
 
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use runner_core::protocol::files::{
@@ -25,34 +24,40 @@ pub struct Resolved {
 /// network drive, so it stays saved and the error is returned.
 pub fn resolve(git: Option<&Git>, saved: Option<&Path>, own: Option<&Path>) -> Result<Resolved> {
     let mut forget_saved = false;
+    let mut forgotten_saved: Option<&Path> = None;
     if let Some(saved) = saved {
-        match std::fs::metadata(saved) {
-            Ok(metadata) if metadata.is_dir() => {
+        match runner_core::app_paths::check_existing_dir(saved) {
+            Ok(true) => {
                 return Ok(Resolved {
                     outcome: FilesRootOutcome::Root(describe(
                         git,
                         saved,
                         FilesRootSource::Saved,
                         own,
+                        None,
                     )),
                     forget_saved,
                 });
             }
-            Ok(_) => forget_saved = true,
-            Err(error)
-                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
-            {
+            Ok(false) => {
                 forget_saved = true;
+                forgotten_saved = Some(saved);
             }
             Err(error) => return Err(Error::msg(format!("{}: {error}", saved.display()))),
         }
     }
     let outcome = match own {
         None => FilesRootOutcome::ChooseFolder,
-        Some(cwd) if !cwd.is_dir() => FilesRootOutcome::Missing {
+        Some(cwd) if !runner_core::app_paths::is_existing_dir(cwd) => FilesRootOutcome::Missing {
             path: cwd.to_path_buf(),
         },
-        Some(cwd) => FilesRootOutcome::Root(describe(git, cwd, FilesRootSource::Own, Some(cwd))),
+        Some(cwd) => FilesRootOutcome::Root(describe(
+            git,
+            cwd,
+            FilesRootSource::Own,
+            Some(cwd),
+            forgotten_saved,
+        )),
     };
     Ok(Resolved {
         outcome,
@@ -68,11 +73,22 @@ fn describe(
     dir: &Path,
     source: FilesRootSource,
     cwd: Option<&Path>,
+    forgotten_saved: Option<&Path>,
 ) -> FilesRoot {
-    let checkout = git
+    let worktrees = git
         .filter(|_| checkout_top(dir).is_some())
-        .and_then(|git| git.worktrees(dir).ok())
-        .and_then(|worktrees| containing(worktrees, dir));
+        .and_then(|git| git.worktrees(dir).ok());
+    let removed_checkout =
+        forgotten_saved.map(|saved| removed_checkout_name(saved, worktrees.as_deref()));
+    let checkout = worktrees.and_then(|worktrees| containing(worktrees, dir));
+    let own_checkout_top = cwd.and_then(|own_dir| {
+        if let Some(checkout) = &checkout
+            && let Some(top) = containing_top(&checkout.worktrees, own_dir)
+        {
+            return Some(top);
+        }
+        checkout_top(own_dir).map(|(top, _)| top)
+    });
     let path = match (&checkout, source) {
         (Some(checkout), FilesRootSource::Own) => checkout.top.clone(),
         _ => dir.to_path_buf(),
@@ -87,26 +103,78 @@ fn describe(
         git: checkout,
         path,
         source,
+        own_checkout_top,
+        removed_checkout,
     }
+}
+
+fn removed_checkout_name(saved: &Path, worktrees: Option<&[WorktreeEntry]>) -> String {
+    if let Some(worktrees) = worktrees
+        && let Some(branch) = worktrees
+            .iter()
+            .find(|entry| runner_core::app_paths::same_checkout_path(&entry.path, saved))
+            .and_then(|entry| entry.branch.clone())
+    {
+        return branch;
+    }
+    saved
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| saved.display().to_string())
+}
+
+fn containing_top(worktrees: &[WorktreeEntry], dir: &Path) -> Option<PathBuf> {
+    if !runner_core::app_paths::is_existing_dir(dir) {
+        return None;
+    }
+    let dir = runner_core::app_paths::normalize_checkout_path(dir);
+    worktrees
+        .iter()
+        .filter_map(|worktree| {
+            if !runner_core::app_paths::is_existing_dir(&worktree.path) {
+                return None;
+            }
+            let top = runner_core::app_paths::normalize_checkout_path(&worktree.path);
+            runner_core::app_paths::normalized_checkout_starts_with(&dir, &top)
+                .then(|| (top.components().count(), top))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, top)| top)
 }
 
 /// The worktree whose folder holds `dir` most closely.
 fn containing(worktrees: Vec<WorktreeEntry>, dir: &Path) -> Option<GitCheckout> {
-    let dir = dir.canonicalize().ok()?;
-    worktrees
-        .into_iter()
+    if !runner_core::app_paths::is_existing_dir(dir) {
+        return None;
+    }
+    let dir = runner_core::app_paths::normalize_checkout_path(dir);
+    let (_, chosen_top, chosen) = worktrees
+        .iter()
         .filter_map(|worktree| {
-            let top = worktree.path.canonicalize().ok()?;
-            dir.starts_with(&top)
-                .then(|| (top.components().count(), worktree))
+            if !runner_core::app_paths::is_existing_dir(&worktree.path) {
+                return None;
+            }
+            let top = runner_core::app_paths::normalize_checkout_path(&worktree.path);
+            runner_core::app_paths::normalized_checkout_starts_with(&dir, &top).then(|| {
+                (
+                    top.components().count(),
+                    top,
+                    (
+                        worktree.kind,
+                        worktree.branch.clone(),
+                        worktree.commit.clone(),
+                    ),
+                )
+            })
         })
-        .max_by_key(|(depth, _)| *depth)
-        .map(|(_, worktree)| GitCheckout {
-            top: worktree.path,
-            worktree: worktree.kind,
-            branch: worktree.branch,
-            commit: worktree.commit,
-        })
+        .max_by_key(|(depth, _, _)| *depth)?;
+    Some(GitCheckout {
+        top: chosen_top,
+        worktree: chosen.0,
+        branch: chosen.1,
+        commit: chosen.2,
+        worktrees,
+    })
 }
 
 /// `dir` relative to `root` with `/` separators, when strictly below it.
@@ -252,6 +320,37 @@ mod tests {
         let error = super::resolve(Some(&fixture.git), Some(&looping), Some(fixture.path()))
             .expect_err("neither forgotten nor replaced by the own checkout");
         assert!(error.to_string().contains("loop"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_saved_root_with_denied_permissions_stays_saved_with_its_error() {
+        struct RestoreAcl(PathBuf);
+        impl Drop for RestoreAcl {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("icacls")
+                    .arg(&self.0)
+                    .args(["/remove:d", "*S-1-1-0"])
+                    .status();
+            }
+        }
+
+        let fixture = repo();
+        let locked = fixture.path().join("locked");
+        let saved = locked.join("saved");
+        std::fs::create_dir_all(&saved).unwrap();
+        let _guard = RestoreAcl(locked.clone());
+        let status = std::process::Command::new("icacls")
+            .arg(&locked)
+            .args(["/deny", "*S-1-1-0:(OI)(CI)(RX)"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "icacls deny failed: {status}");
+
+        let error = super::resolve(Some(&fixture.git), Some(&saved), Some(fixture.path()))
+            .expect_err("permission denied must stay saved with an error");
+        let saved_str = saved.to_string_lossy();
+        assert!(error.to_string().contains(saved_str.as_ref()), "{error}");
     }
 
     #[test]

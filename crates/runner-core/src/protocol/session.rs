@@ -138,7 +138,7 @@ pub struct AutoResumeReport {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct StartDirectSessionArgs {
     /// Optional role ID. Omit it for a role-free runtime chat.
     #[serde(default)]
@@ -162,4 +162,19 @@ pub struct StartDirectSessionArgs {
     /// Optional working-directory override.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Optional git worktree to create (or reuse) before starting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<super::worktree::WorktreeSpec>,
+    /// Optional project scope for membership and cwd inference.
+    #[serde(default)]
+    pub scope: Option<super::project::ProjectScope>,
+    /// Optional initial terminal width in columns.
+    #[serde(default)]
+    pub cols: Option<u16>,
+    /// Optional initial terminal height in rows.
+    #[serde(default)]
+    pub rows: Option<u16>,
+    /// Optional first user turn sent once the direct chat starts.
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
 }
