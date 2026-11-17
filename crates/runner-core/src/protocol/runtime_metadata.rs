@@ -738,7 +738,6 @@ pub mod muse {
             skills_dirs: SKILL_DIRS,
             update_args: &[],
             npm_package: None,
-            min_version: None,
         })
     }
     pub const SKILL_DIRS: &[&str] = &[".agents/skills"];
