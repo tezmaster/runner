@@ -35,7 +35,7 @@ impl Runtime {
     ];
 
     /// Priority order used in onboarding and starter-crew ranking.
-    pub const SETUP_ORDER: [Self; 9] = [
+    pub const SETUP_ORDER: [Self; 10] = [
         Self::ClaudeCode,
         Self::Codex,
         Self::Antigravity,
@@ -45,6 +45,8 @@ impl Runtime {
         Self::OpenCode,
         Self::Grok,
         Self::Trae,
+        // Fork: Muse is offered in first-run setup, ranked last.
+        Self::Muse,
     ];
 
     pub fn setup_rank(self) -> usize {

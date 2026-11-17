@@ -117,7 +117,7 @@ If Runner is useful to you, consider supporting its ongoing development and main
 
 **First-tier:** Claude Code, Codex, Antigravity CLI, Grok Build and pi. Runner is developed and tested against these.
 
-**Community-supported:** GitHub Copilot CLI, Cursor, OpenCode v2 and TRAE CLI (opt-in). They run chats and missions, and Runner relies on the people who use them to find problems: [open an issue](https://github.com/yicheng47/runner/issues/new) when something breaks.
+**Community-supported:** GitHub Copilot CLI, Cursor, OpenCode v2, TRAE CLI (opt-in) and Muse Code. They run chats and missions, and Runner relies on the people who use them to find problems: [open an issue](https://github.com/yicheng47/runner/issues/new) when something breaks.
 
 Features and platform support vary by agent.
 
