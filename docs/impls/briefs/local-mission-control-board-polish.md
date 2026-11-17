@@ -71,6 +71,44 @@ not change `MissionControlSnapshot`, the daemon join, or lane derivation.
 Out of scope, for a later data-model follow-up: ticket age, diff line counts,
 cost and CI check chips. Do not add protocol fields for them.
 
+## Addendum (Terry, 2026-11-17): adapter fixes and ticket details modal
+
+**Adapter fixes, already in the working tree.** Run live on the Refinement
+project, every ticket landed in Backlog. Claude (outside the mission) changed
+`crates/runner-daemon/src/ops/mission/control.rs`: the ticket id is `CR-<digits>`
+from the file stem, fields are read case-insensitively with list markers and
+bold (`- Status: done`, `**Severity:** nit ([Nit])`), `done`/`wontfix` count as
+closed, heading separators and parenthetical annotations are stripped, and
+`Blocker: none` is ignored. The card density was also tightened. Review this as
+part of the candidate: it changes derivation inputs, not only presentation.
+
+**Ticket details modal (read-only).** Clicking a card opens a modal with the
+ticket's details. Behaviour:
+
+- Add one read-only daemon request, e.g. `mission_control_ticket(project_id,
+  ticket_id)`, returning the ticket's current Markdown read from disk on demand,
+  its source path, and its parsed fields. Resolve the ticket only from the
+  project's own `issues/` tree (including `archive/`) and reject any id or path
+  that escapes it. Never persist the text in Runner storage; a missing or
+  unreadable file returns a clear error the modal shows, not a crash.
+- Render with the shared `ui::overlay::Modal` and the existing Markdown
+  renderer in `surfaces/mission_markdown.rs`. Header: id, severity, triage
+  state, lane and status pill. Body: rendered Markdown, scrollable. Footer:
+  "Open file" (existing file-link routing) and, only for linked cards, "Open
+  mission" (existing Mission Workspace route). Escape and the close button
+  dismiss it.
+- No edit, status change, dispatch, answer or any other mutation control.
+- Card click now opens the modal for every card, linked or not; Mission
+  Workspace stays reachable through "Open mission" and the Runner source link.
+  Source-link clicks keep stopping propagation and do not open the modal.
+- Tests: protocol round trip, daemon resolution including traversal rejection
+  and missing file, and an app test that a card click opens the modal and the
+  modal exposes no mutation control.
+
+QA adds: open the modal from a ticket-only card and from a linked card; "Open
+mission" navigates to the existing workspace; "Open file" opens the file;
+a ticket deleted after the board loaded shows the error state in the modal.
+
 ## Checks
 
 Coder: focused `cargo test -p runner-app --lib mission_control`, plus updated
@@ -80,10 +118,12 @@ propagation. Then `cargo check -p runner-app`, `make fmt` and
 `cargo clippy -p runner-app --all-targets -- -D warnings`. Coder and reviewer
 do not launch the app.
 
-Reviewer: confirm the diff is presentation only (no protocol, daemon or lane
-derivation change), that no mutation affordance appeared, that theme tokens are
-used, and that the source-evidence links still route as before. Name the live
-checks for QA.
+Reviewer: confirm the diff beyond the addendum is presentation only (no
+`MissionControlSnapshot`, daemon join or lane-derivation change), and review
+the addendum's derivation and protocol changes (adapter input fixes in
+`control.rs`, the new `mission_control_ticket` request) with the same care;
+confirm no mutation affordance appeared, that theme tokens are used, and that
+the source-evidence links still route as before. Name the live checks for QA.
 
 QA: under `script/qa-lock`, on the reviewed candidate, using a disposable
 fixture project under `/private/tmp` as the QA role allows. Check and record

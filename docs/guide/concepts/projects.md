@@ -6,13 +6,20 @@ A project gives a working directory a name and groups its chats and missions in 
 
 **Mission Control** in the sidebar reads a project's local `issues/` tickets and
 `.crew/triage/` evidence alongside Runner's existing mission state. It is a
-compact, horizontally scrolling board: all seven derived lanes remain visible,
-including empty ones, and cards emphasize their lane, ticket details and any
-pending question before terse work and source evidence. It is read-only: cards
-link to their source evidence and to a linked mission's existing workspace, but
-it cannot create or edit tickets, triage, questions, branches or worktrees.
-Missing, malformed or stale local sources show scoped warnings while the
-remaining evidence stays available.
+compact, horizontally scrolling board: a slim header shows `<project> / Mission
+Control` with ticket, running and needs-you counts, and all seven lanes run in
+flow order — Backlog, Ready, Running, Needs you, Verify / Land, Blocked, then a
+visually muted Closed — with empty lanes staying visible. Cards lead with a
+status pill (RUNNING or NEEDS YOU) beside the ticket, severity and triage chips,
+then the summary, a genuine pending question in its own panel, blockers, and a
+footer with the branch, active slot count and a compact sources affordance that
+opens each source exactly as before. A bottom strip shows source warnings when
+any source is missing, malformed or stale, and otherwise reads "read-only ·
+local evidence". It is read-only: cards link to their source evidence and to a
+linked mission's existing workspace, but it cannot create or edit tickets,
+triage, questions, branches or worktrees. Clicking any card opens a read-only
+ticket modal with the ticket's current Markdown, an "Open file" button, and,
+for linked cards, an "Open mission" button; Escape or Close dismisses it.
 
 The sidebar defaults to Projects. The list-filter button beside Search switches to Active, which gathers running chats and terminals, missions with live members, and work needing attention across projects; switching views preserves your project organization.
 

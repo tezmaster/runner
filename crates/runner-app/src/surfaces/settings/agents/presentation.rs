@@ -118,6 +118,7 @@ pub(super) fn custom_flags_placeholder(runtime: Runtime) -> &'static str {
         Runtime::Cursor => "--verbose",
         Runtime::Grok => "--verbose",
         Runtime::OpenCode => "--print-logs",
+        Runtime::Muse => "--verbose",
         Runtime::Shell => "",
     }
 }

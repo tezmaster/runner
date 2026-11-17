@@ -507,6 +507,14 @@ record!(MissionControlSnapshot {
     cards,
     health
 });
+record!(MissionControlTicket {
+    ticket_id,
+    path,
+    markdown,
+    summary,
+    severity,
+    blockers
+});
 record!(MissionStart {
     crew_id,
     scope,
