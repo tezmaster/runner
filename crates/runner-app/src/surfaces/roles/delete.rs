@@ -23,6 +23,9 @@ impl NativeRoot {
         if self.role_surfaces.delete_confirm.is_some() {
             overlays.push(self.render_role_delete_confirm(cx));
         }
+        if self.mission_control.ticket_modal.is_some() {
+            overlays.push(self.render_ticket_modal(cx));
+        }
         if matches!(self.route, AppRoute::Mission(_)) {
             let workspace = self.mission_workspace.clone();
             overlays.extend(workspace.update(cx, |workspace, workspace_cx| {

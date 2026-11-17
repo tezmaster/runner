@@ -81,6 +81,18 @@ pub struct MissionControlSnapshot {
     pub health: Vec<MissionControlSourceHealth>,
 }
 
+/// A single ticket read from disk on demand for the details modal. The
+/// Markdown is fetched fresh and never persisted in Runner storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionControlTicket {
+    pub ticket_id: String,
+    pub path: String,
+    pub markdown: String,
+    pub summary: String,
+    pub severity: Option<String>,
+    pub blockers: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +124,23 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<MissionControlSnapshot>(wire).unwrap(),
             snapshot
+        );
+    }
+
+    #[test]
+    fn ticket_round_trips_with_markdown() {
+        let ticket = MissionControlTicket {
+            ticket_id: "CR-1".into(),
+            path: "/tmp/project/issues/CR-1.md".into(),
+            markdown: "# CR-1: Do it\n\n- Status: open\n".into(),
+            summary: "Do it".into(),
+            severity: Some("nit".into()),
+            blockers: vec![],
+        };
+        let wire = serde_json::to_value(&ticket).unwrap();
+        assert_eq!(
+            serde_json::from_value::<MissionControlTicket>(wire).unwrap(),
+            ticket
         );
     }
 }

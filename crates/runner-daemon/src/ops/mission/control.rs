@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use runner_core::protocol::mission_control::{
     MissionControlCard, MissionControlEvidence, MissionControlFieldProvenance, MissionControlLane,
     MissionControlMission, MissionControlSnapshot, MissionControlSourceHealth,
-    MissionControlSourceKind,
+    MissionControlSourceKind, MissionControlTicket,
 };
 
 use crate::{error::Result, ops::project, AppCore};
@@ -192,6 +192,70 @@ pub fn snapshot(state: &AppCore, project_id: &str) -> Result<MissionControlSnaps
     })
 }
 
+/// Reads one ticket's Markdown from the project's `issues/` tree on demand for
+/// the details modal. The text is returned to the caller and never persisted.
+/// Only `CR-<digits>` ids resolve, matched against the same files the board
+/// discovers (`issues/` then `issues/archive/`), so no id can escape the
+/// tree. A missing or unreadable file is an error for the modal to show.
+pub fn ticket(state: &AppCore, project_id: &str, ticket_id: &str) -> Result<MissionControlTicket> {
+    if !valid_ticket_id(ticket_id) {
+        return Err(crate::error::Error::msg(format!(
+            "unknown ticket {ticket_id}"
+        )));
+    }
+    let project = {
+        let conn = state.db.get()?;
+        project::get(&conn, project_id)?
+    };
+    let issues = PathBuf::from(&project.cwd).join("issues");
+    let mut found = None;
+    for dir in [issues.clone(), issues.join("archive")] {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let archived = dir.ends_with("archive");
+        for path in entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+        {
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                continue;
+            }
+            if ticket_id_from_stem(stem) == ticket_id {
+                found = Some((path, archived));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let (path, archived) =
+        found.ok_or_else(|| crate::error::Error::msg(format!("ticket {ticket_id} not found")))?;
+    let markdown = fs::read_to_string(&path)
+        .map_err(|_| crate::error::Error::msg(format!("ticket {ticket_id} unreadable")))?;
+    let parsed =
+        parse_ticket(&path, archived).map_err(|health| crate::error::Error::msg(health.warning))?;
+    Ok(MissionControlTicket {
+        ticket_id: parsed.id,
+        path: path.display().to_string(),
+        markdown,
+        summary: parsed.summary,
+        severity: parsed.severity,
+        blockers: parsed.blockers,
+    })
+}
+
+/// Only `CR-<digits>` ids resolve, so a request can never carry a traversal.
+fn valid_ticket_id(ticket_id: &str) -> bool {
+    ticket_id
+        .strip_prefix("CR-")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 fn lane(
     closed: bool,
     pending_question: bool,
@@ -312,14 +376,14 @@ fn parse_ticket(
         .file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| name.starts_with("CR-"))
-        .ok_or_else(|| warning(MissionControlSourceKind::Ticket, path, "ticket id missing"))?
-        .to_owned();
-    let summary = text
+        .map(ticket_id_from_stem)
+        .ok_or_else(|| warning(MissionControlSourceKind::Ticket, path, "ticket id missing"))?;
+    let heading = text
         .lines()
         .find_map(|line| line.strip_prefix("# "))
         .unwrap_or(&id)
-        .trim_start_matches(&format!("{id}: "))
-        .to_owned();
+        .trim();
+    let summary = strip_ticket_prefix(heading, &id).to_owned();
     if summary.is_empty() {
         return Err(warning(
             MissionControlSourceKind::Ticket,
@@ -330,10 +394,10 @@ fn parse_ticket(
     Ok(Ticket {
         id,
         summary,
-        severity: field(&text, "severity"),
+        severity: field(&text, "severity").map(|severity| without_annotation(&severity)),
         blockers: fields(&text, "blocker"),
         ready: state_is(&text, "ready"),
-        closed: archived || state_is(&text, "closed"),
+        closed: archived || CLOSED_STATES.iter().any(|state| state_is(&text, state)),
         verify_land: verify_or_land(&text),
         path: path.to_owned(),
     })
@@ -371,18 +435,80 @@ fn parse_triage(path: &Path) -> std::result::Result<(String, Triage), MissionCon
     ))
 }
 
+/// Tracker states that mean the ticket is finished: `closed`, plus the
+/// `done`/`wontfix` states local trackers use for landed or rejected work.
+const CLOSED_STATES: [&str; 4] = ["closed", "done", "wontfix", "won't fix"];
+
+/// `CR-188-chapter-index` names ticket `CR-188`; a stem without a numeric
+/// suffix keeps its full name. Stems that are not `CR-` names at all are
+/// returned unchanged so directory scans never panic on short file names.
+fn ticket_id_from_stem(stem: &str) -> String {
+    let Some(rest) = stem.strip_prefix("CR-") else {
+        return stem.to_owned();
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        stem.to_owned()
+    } else {
+        stem[.."CR-".len() + digits].to_owned()
+    }
+}
+
+/// Drops a leading `CR-1:`, `CR-1 ·`, `CR-1 -` or `CR-1 —` from a heading.
+fn strip_ticket_prefix<'a>(heading: &'a str, id: &str) -> &'a str {
+    let Some(rest) = heading
+        .get(..id.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(id))
+        .map(|_| &heading[id.len()..])
+    else {
+        return heading;
+    };
+    let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || ":·-—".contains(c));
+    if trimmed.len() == rest.len() || trimmed.is_empty() {
+        heading
+    } else {
+        trimmed
+    }
+}
+
+/// `nit ([Nit])` reads as `nit`: a trailing parenthetical is annotation.
+fn without_annotation(value: &str) -> String {
+    value
+        .split_once(" (")
+        .map_or(value, |(head, _)| head)
+        .trim()
+        .to_owned()
+}
+
+/// Reads `name: value` from a line, case-insensitively, allowing a Markdown
+/// list marker and bold markup such as `- **Status:** done`.
+fn field_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let line = line
+        .trim()
+        .trim_start_matches(['-', '*', '+'])
+        .trim_start()
+        .trim_start_matches("**");
+    let head = line.get(..name.len())?;
+    if !head.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let rest = line[name.len()..].strip_prefix(':')?;
+    Some(rest.trim_start_matches("**").trim())
+}
+
 fn field(text: &str, name: &str) -> Option<String> {
     text.lines()
-        .find_map(|line| line.trim().strip_prefix(&format!("{name}:")))
-        .map(str::trim)
+        .find_map(|line| field_value(line, name))
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
 fn fields(text: &str, name: &str) -> Vec<String> {
     text.lines()
-        .filter_map(|line| line.trim().strip_prefix(&format!("{name}:")))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter_map(|line| field_value(line, name))
+        .filter(|value| {
+            !value.is_empty()
+                && !["none", "n/a", "-"].contains(&value.to_ascii_lowercase().as_str())
+        })
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -392,7 +518,7 @@ fn bool_field(text: &str, name: &str) -> bool {
 fn state_is(text: &str, state: &str) -> bool {
     field(text, "state")
         .or_else(|| field(text, "status"))
-        .is_some_and(|value| value.eq_ignore_ascii_case(state))
+        .is_some_and(|value| without_annotation(&value).eq_ignore_ascii_case(state))
 }
 
 fn verify_or_land(text: &str) -> bool {
@@ -488,6 +614,37 @@ mod tests {
         let archived = root.path().join("CR-2.md");
         fs::write(&archived, "# CR-2: Archived ticket\n").unwrap();
         assert!(parse_ticket(&archived, true).unwrap().closed);
+    }
+
+    #[test]
+    fn bulleted_tracker_fields_and_slugged_file_names_are_read() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("CR-42-widget-double-call.md");
+        fs::write(
+            &path,
+            "# CR-42: Widget is called twice\n\n- Severity: nit ([Nit])\n- Status: done\n- Blocker: none\n",
+        )
+        .unwrap();
+        let ticket = parse_ticket(&path, false).unwrap();
+        assert_eq!(ticket.id, "CR-42");
+        assert_eq!(ticket.summary, "Widget is called twice");
+        assert_eq!(ticket.severity.as_deref(), Some("nit"));
+        assert!(ticket.blockers.is_empty());
+        assert!(ticket.closed);
+        assert!(mission_links_ticket("CR-42 fix the widget", &ticket.id));
+
+        for (status, closed) in [
+            ("**Status:** wontfix", true),
+            ("* status: Done (landed)", true),
+            ("- Status: open", false),
+            ("- Status: in-progress", false),
+        ] {
+            let path = root.path().join("CR-7-state.md");
+            fs::write(&path, format!("# CR-7 · Separator heading\n{status}\n")).unwrap();
+            let ticket = parse_ticket(&path, false).unwrap();
+            assert_eq!(ticket.closed, closed, "{status}");
+            assert_eq!(ticket.summary, "Separator heading");
+        }
     }
 
     #[test]
@@ -607,6 +764,61 @@ mod tests {
         assert!(card.provenance.iter().any(|entry| entry.field == "summary"));
         assert!(card.provenance.iter().any(|entry| entry.field == "lane"));
         assert_eq!(fs::read_to_string(ticket_path).unwrap(), ticket);
+    }
+
+    #[test]
+    fn ticket_resolves_slugged_and_archived_files_but_rejects_escapes() {
+        let root = tempfile::tempdir().unwrap();
+        let issues = root.path().join("issues");
+        let archive = issues.join("archive");
+        fs::create_dir_all(&archive).unwrap();
+        fs::write(issues.join("README.md"), "# Tickets\n").unwrap();
+        // Short or non-ticket stems must never panic the scan.
+        fs::write(issues.join("a.md"), "# Not a ticket\n").unwrap();
+        fs::write(issues.join("ab.md"), "# Not a ticket\n").unwrap();
+        fs::write(issues.join("notes.md"), "# Not a ticket\n").unwrap();
+        let body = "# CR-7: Slugged name\n- Severity: should ([Should])\n";
+        fs::write(issues.join("CR-7-widget-double-call.md"), body).unwrap();
+        fs::write(archive.join("CR-9-old-work.md"), "# CR-9: Archived\n").unwrap();
+        let core = crate::test_support::test_core_in(root.path().to_path_buf());
+        let project = crate::repo::project::create(
+            &core.db.get().unwrap(),
+            "Board",
+            root.path().to_string_lossy().as_ref(),
+        )
+        .unwrap();
+
+        let resolved = ticket(&core, &project.id, "CR-7").unwrap();
+        assert_eq!(
+            resolved.path,
+            issues
+                .join("CR-7-widget-double-call.md")
+                .display()
+                .to_string()
+        );
+        assert_eq!(resolved.markdown, body);
+        assert_eq!(resolved.summary, "Slugged name");
+        assert_eq!(resolved.severity.as_deref(), Some("should"));
+
+        let archived = ticket(&core, &project.id, "CR-9").unwrap();
+        assert_eq!(
+            archived.path,
+            archive.join("CR-9-old-work.md").display().to_string()
+        );
+
+        for rejected in [
+            "CR-7-widget-double-call",
+            "CR-",
+            "CR-7.md",
+            "../CR-7",
+            "CR-7/../../etc/passwd",
+            "../../etc/passwd",
+            "CR-7x",
+            "",
+        ] {
+            assert!(ticket(&core, &project.id, rejected).is_err(), "{rejected}");
+        }
+        assert!(ticket(&core, &project.id, "CR-404").is_err());
     }
 
     #[test]
