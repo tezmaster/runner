@@ -1410,7 +1410,10 @@ fn sidebar_usage_uses_weekly_windows() {
         }],
         updated_at: chrono::Utc::now(),
     };
-    assert_eq!(weekly_usage_percent(Runtime::Muse, Some(&muse_usage)), Some(43.));
+    assert_eq!(
+        weekly_usage_percent(Runtime::Muse, Some(&muse_usage)),
+        Some(43.)
+    );
     assert_eq!(unavailable_line(None, Runtime::Codex), "Checking…");
     assert_eq!(
         unavailable_line(Some(UnavailableReason::SignIn), Runtime::Muse),

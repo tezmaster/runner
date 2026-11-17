@@ -175,11 +175,39 @@ mod tests {
     fn sums_per_session_with_sub_agents_counted_to_their_parent() {
         let root = tempfile::tempdir().unwrap();
         let t = at("2026-11-12T10:00:00Z").timestamp_micros();
-        write(root.path(), "2026/11/12", "aaa", None, &[record(t, 100, 10, 60, 5), record(t + 1, 50, 5, 0, 0)]);
-        write(root.path(), "2026/11/12", "aaa", Some("sub1"), &[record(t + 2, 7, 1, 2, 0)]);
-        write(root.path(), "2026/11/11", "bbb", None, &[record(t, 1_000, 100, 900, 0)]);
-        let sums = read_tokens(root.path(), at("2026-11-09T00:00:00Z"), &HashSet::new()).unwrap().by_session;
-        assert_eq!(sums["aaa"], TokenSums { input: 157, output: 16, cached: 62, reasoning: 5 });
+        write(
+            root.path(),
+            "2026/11/12",
+            "aaa",
+            None,
+            &[record(t, 100, 10, 60, 5), record(t + 1, 50, 5, 0, 0)],
+        );
+        write(
+            root.path(),
+            "2026/11/12",
+            "aaa",
+            Some("sub1"),
+            &[record(t + 2, 7, 1, 2, 0)],
+        );
+        write(
+            root.path(),
+            "2026/11/11",
+            "bbb",
+            None,
+            &[record(t, 1_000, 100, 900, 0)],
+        );
+        let sums = read_tokens(root.path(), at("2026-11-09T00:00:00Z"), &HashSet::new())
+            .unwrap()
+            .by_session;
+        assert_eq!(
+            sums["aaa"],
+            TokenSums {
+                input: 157,
+                output: 16,
+                cached: 62,
+                reasoning: 5
+            }
+        );
         assert_eq!(sums["bbb"].input, 1_000);
         assert_eq!(sums.len(), 2);
     }
@@ -202,17 +230,42 @@ mod tests {
                 r#"{"recorded_at":1,"payload":{"event":{"kind":"goal_usage_attribution"}}}"#.to_owned(),
             ],
         );
-        let sums = read_tokens(root.path(), at("2026-11-09T00:00:00Z"), &HashSet::new()).unwrap().by_session;
-        assert_eq!(sums["ccc"], TokenSums { input: 4, output: 2, cached: 1, reasoning: 0 });
+        let sums = read_tokens(root.path(), at("2026-11-09T00:00:00Z"), &HashSet::new())
+            .unwrap()
+            .by_session;
+        assert_eq!(
+            sums["ccc"],
+            TokenSums {
+                input: 4,
+                output: 2,
+                cached: 1,
+                reasoning: 0
+            }
+        );
     }
 
     #[test]
     fn a_log_last_written_before_the_start_is_skipped_unread() {
         let root = tempfile::tempdir().unwrap();
         let t = at("2026-11-12T10:00:00Z").timestamp_micros();
-        write(root.path(), "2026/11/12", "old", None, &[record(t, 10, 1, 0, 0)]);
-        let sums = read_tokens(root.path(), Utc::now() + chrono::Duration::days(1), &HashSet::new()).unwrap().by_session;
-        assert!(sums.is_empty(), "the file's own modified time is before the cut-off");
+        write(
+            root.path(),
+            "2026/11/12",
+            "old",
+            None,
+            &[record(t, 10, 1, 0, 0)],
+        );
+        let sums = read_tokens(
+            root.path(),
+            Utc::now() + chrono::Duration::days(1),
+            &HashSet::new(),
+        )
+        .unwrap()
+        .by_session;
+        assert!(
+            sums.is_empty(),
+            "the file's own modified time is before the cut-off"
+        );
     }
 
     #[test]
@@ -225,31 +278,74 @@ mod tests {
                 &format!(r#""record":{{"usage_id":"{id}","quantity""#),
             )
         };
-        write(root.path(), "2026/11/12", "mine", None, &[with_id("u2", t + 20, 50), with_id("u1", t + 10, 30)]);
-        write(root.path(), "2026/11/12", "mine", Some("sub"), &[with_id("u3", t + 15, 5)]);
-        write(root.path(), "2026/11/12", "theirs", None, &[with_id("u9", t + 5, 999)]);
+        write(
+            root.path(),
+            "2026/11/12",
+            "mine",
+            None,
+            &[with_id("u2", t + 20, 50), with_id("u1", t + 10, 30)],
+        );
+        write(
+            root.path(),
+            "2026/11/12",
+            "mine",
+            Some("sub"),
+            &[with_id("u3", t + 15, 5)],
+        );
+        write(
+            root.path(),
+            "2026/11/12",
+            "theirs",
+            None,
+            &[with_id("u9", t + 5, 999)],
+        );
         let keys: HashSet<String> = ["mine".to_owned()].into();
         let scan = read_tokens(root.path(), at("2026-11-09T00:00:00Z"), &keys).unwrap();
         assert_eq!(
-            scan.calls.iter().map(|c| (c.usage_id.as_str(), c.tokens.input)).collect::<Vec<_>>(),
+            scan.calls
+                .iter()
+                .map(|c| (c.usage_id.as_str(), c.tokens.input))
+                .collect::<Vec<_>>(),
             [("u1", 30), ("u3", 5), ("u2", 50)],
             "sub-agent calls count to their session; another session's calls are not returned"
         );
-        assert_eq!(scan.by_session["theirs"].input, 999, "but its tokens are still in the machine totals");
+        assert_eq!(
+            scan.by_session["theirs"].input, 999,
+            "but its tokens are still in the machine totals"
+        );
     }
 
     #[test]
     fn a_missing_store_is_an_error_not_zero() {
-        assert!(read_tokens(Path::new("/no/such/muse/sessions"), at("2026-11-09T00:00:00Z"), &HashSet::new()).is_err());
+        assert!(read_tokens(
+            Path::new("/no/such/muse/sessions"),
+            at("2026-11-09T00:00:00Z"),
+            &HashSet::new()
+        )
+        .is_err());
     }
 
     #[test]
     fn token_bases_differ_by_how_cached_input_is_counted() {
-        let sums = TokenSums { input: 100, output: 10, cached: 80, reasoning: 3 };
+        let sums = TokenSums {
+            input: 100,
+            output: 10,
+            cached: 80,
+            reasoning: 3,
+        };
         assert_eq!(sums.total_basis(), 110);
         assert_eq!(sums.uncached_basis(), 30);
-        let odd = TokenSums { input: 5, output: 1, cached: 9, reasoning: 0 };
-        assert_eq!(odd.uncached_basis(), 1, "cached above input never goes negative");
+        let odd = TokenSums {
+            input: 5,
+            output: 1,
+            cached: 9,
+            reasoning: 0,
+        };
+        assert_eq!(
+            odd.uncached_basis(),
+            1,
+            "cached above input never goes negative"
+        );
     }
 }
 

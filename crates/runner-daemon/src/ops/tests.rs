@@ -30,7 +30,12 @@ fn every_delete_leaves_foreign_key_check_empty_on_a_real_database() {
         .unwrap();
     let expected = [
         ("mission_budget_basis", "mission_id", "missions", "RESTRICT"),
-        ("mission_budget_sample", "mission_id", "missions", "RESTRICT"),
+        (
+            "mission_budget_sample",
+            "mission_id",
+            "missions",
+            "RESTRICT",
+        ),
         ("mission_rating", "mission_id", "missions", "RESTRICT"),
         ("mission_slot_usage", "mission_id", "missions", "RESTRICT"),
         ("mission_usage_call", "mission_id", "missions", "RESTRICT"),

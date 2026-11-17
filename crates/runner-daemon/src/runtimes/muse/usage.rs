@@ -25,7 +25,9 @@ fn parse_window(value: Option<&Value>, name: &str) -> Option<UsageWindow> {
 }
 
 pub(crate) fn parse_muse(value: &Value) -> Result<Vec<UsageWindow>, UnavailableReason> {
-    let allowance = value.get("allowance").filter(|allowance| !allowance.is_null());
+    let allowance = value
+        .get("allowance")
+        .filter(|allowance| !allowance.is_null());
     let Some(allowance) = allowance else {
         let reason = value
             .get("reason")
@@ -170,7 +172,10 @@ mod tests {
             parse_muse(&json!({"allowance": null, "reason": "service down"})),
             Err(UnavailableReason::InvalidResponse)
         );
-        assert_eq!(parse_muse(&json!({})), Err(UnavailableReason::InvalidResponse));
+        assert_eq!(
+            parse_muse(&json!({})),
+            Err(UnavailableReason::InvalidResponse)
+        );
         assert_eq!(
             parse_muse(&json!({"allowance": {"tier": "x"}})),
             Err(UnavailableReason::InvalidResponse)
@@ -215,7 +220,10 @@ echo '{"allowance":{"window":{"usedPercent":9,"resetsAtMs":1794506456000},"weekl
             fetch_muse_with_timeout(&hung, &env, Duration::from_millis(300)),
             Err(UnavailableReason::InvalidResponse)
         );
-        assert!(started.elapsed() < Duration::from_secs(5), "the hung command was not cut off");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the hung command was not cut off"
+        );
         let garbled = script(dir.path(), "muse-garbled", "echo not json");
         assert_eq!(
             fetch_muse_with_timeout(&garbled, &env, Duration::from_secs(5)),

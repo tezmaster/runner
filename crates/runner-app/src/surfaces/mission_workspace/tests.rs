@@ -1592,9 +1592,9 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
     let mut visual = VisualTestContext::from_window(host.into(), &cx);
     visual.simulate_resize(size(px(960.), px(300.)));
     visual.run_until_parked();
-    for (view, viewport_selector, final_selector) in [
-        (PanelViewId::Info, "MISSION_META_SCROLL", "MISSION_META_END"),
-    ] {
+    for (view, viewport_selector, final_selector) in
+        [(PanelViewId::Info, "MISSION_META_SCROLL", "MISSION_META_END")]
+    {
         host.update(&mut visual, |host, _, cx| {
             host.workspace
                 .update(cx, |workspace, _| workspace.rail_surfaces.open.open(view));
@@ -1612,7 +1612,9 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
         );
         // The scrollbar is beside the scroll box, not inside it: its track must stay
         // where it is while the content scrolls, and its thumb must move down.
-        let track_before = visual.debug_bounds("SCROLLBAR_TRACK").expect("the Info panel has a scrollbar");
+        let track_before = visual
+            .debug_bounds("SCROLLBAR_TRACK")
+            .expect("the Info panel has a scrollbar");
         let thumb_before = visual.debug_bounds("SCROLLBAR_THUMB");
         visual.simulate_event(ScrollWheelEvent {
             position: viewport.center(),
@@ -1621,9 +1623,13 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
         });
         visual.run_until_parked();
         let track_after = visual.debug_bounds("SCROLLBAR_TRACK").unwrap();
-        assert_eq!(track_before, track_after, "the scrollbar track moved with the content");
+        assert_eq!(
+            track_before, track_after,
+            "the scrollbar track moved with the content"
+        );
         assert!(
-            track_after.top() >= viewport.top() - px(1.) && track_after.bottom() <= viewport.bottom() + px(1.),
+            track_after.top() >= viewport.top() - px(1.)
+                && track_after.bottom() <= viewport.bottom() + px(1.),
             "the track must lie inside the visible scroll area: {track_after:?} {viewport:?}"
         );
         // Scrolled to the end, the thumb rests at the bottom of its fixed track.
@@ -1631,10 +1637,14 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
             .debug_bounds("SCROLLBAR_THUMB")
             .expect("the thumb is drawn once the panel has scrolled");
         if let Some(before) = thumb_before {
-            assert!(thumb_after.top() > before.top(), "the thumb should move down: {before:?} {thumb_after:?}");
+            assert!(
+                thumb_after.top() > before.top(),
+                "the thumb should move down: {before:?} {thumb_after:?}"
+            );
         }
         assert!(
-            thumb_after.top() >= track_after.top() && thumb_after.bottom() <= track_after.bottom() + px(1.),
+            thumb_after.top() >= track_after.top()
+                && thumb_after.bottom() <= track_after.bottom() + px(1.),
             "the thumb must stay inside its track: {thumb_after:?} {track_after:?}"
         );
         assert!(
@@ -1648,7 +1658,6 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
         );
     }
 }
-
 
 fn usage_card_fixture() -> runner_core::protocol::MissionReview {
     use runner_core::protocol::{BudgetState, CallUsage, MissionBudget, MissionReview};

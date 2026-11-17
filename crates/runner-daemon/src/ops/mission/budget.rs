@@ -207,7 +207,8 @@ fn read_runtime(
     core: &AppCore,
     runtime: &str,
 ) -> std::result::Result<Vec<UsageWindow>, UnavailableReason> {
-    let runtime = crate::model::Runtime::parse(runtime).ok_or(UnavailableReason::InvalidResponse)?;
+    let runtime =
+        crate::model::Runtime::parse(runtime).ok_or(UnavailableReason::InvalidResponse)?;
     let source = crate::runtimes::adapter(runtime)
         .usage()
         .ok_or(UnavailableReason::InvalidResponse)?;
@@ -273,7 +274,11 @@ pub(crate) struct Attribution {
 /// cached input counted in full and again with it free: a cache hit may or may
 /// not count against an allowance. `None` when the machine used nothing under
 /// both readings of the share.
-pub(crate) fn split_by_tokens(points: f64, mission: Tokens, machine: Tokens) -> Option<Attribution> {
+pub(crate) fn split_by_tokens(
+    points: f64,
+    mission: Tokens,
+    machine: Tokens,
+) -> Option<Attribution> {
     let sums = |tokens: Tokens| TokenSums {
         input: tokens.input,
         output: tokens.output,
@@ -305,7 +310,11 @@ pub(crate) fn split_by_tokens(points: f64, mission: Tokens, machine: Tokens) -> 
 /// A call's points under each reading of the allowance: `(cached counted in
 /// full, cached counted as free)`. A reading with nothing on the machine to
 /// divide by is `None`.
-pub(crate) fn basis_points(points: f64, tokens: Tokens, machine: Tokens) -> (Option<f64>, Option<f64>) {
+pub(crate) fn basis_points(
+    points: f64,
+    tokens: Tokens,
+    machine: Tokens,
+) -> (Option<f64>, Option<f64>) {
     let sums = |tokens: Tokens| TokenSums {
         input: tokens.input,
         output: tokens.output,
@@ -313,7 +322,9 @@ pub(crate) fn basis_points(points: f64, tokens: Tokens, machine: Tokens) -> (Opt
         reasoning: tokens.reasoning,
     };
     let (m, all) = (sums(tokens), sums(machine));
-    let part = |mine: i64, whole: i64| (whole > 0).then(|| points * (mine as f64 / whole as f64).clamp(0.0, 1.0));
+    let part = |mine: i64, whole: i64| {
+        (whole > 0).then(|| points * (mine as f64 / whole as f64).clamp(0.0, 1.0))
+    };
     (
         part(m.total_basis(), all.total_basis()),
         part(m.uncached_basis(), all.uncached_basis()),
@@ -350,7 +361,9 @@ pub fn mission_calls(conn: &rusqlite::Connection, mission_id: &str) -> Result<Ve
         };
         let Some(points) = samples
             .iter()
-            .find(|s| s.runtime == row.runtime && s.window_name == WEEK_WINDOW && s.read_at == row.read_at)
+            .find(|s| {
+                s.runtime == row.runtime && s.window_name == WEEK_WINDOW && s.read_at == row.read_at
+            })
             .map(|s| s.used_percent)
         else {
             continue;
@@ -359,7 +372,9 @@ pub fn mission_calls(conn: &rusqlite::Connection, mission_id: &str) -> Result<Ve
             .iter_mut()
             .find(|(runtime, week, _, _)| *runtime == row.runtime && *week == start)
         {
-            Some(kept) if kept.2.read_at < row.read_at => *kept = (row.runtime.clone(), start, row, points),
+            Some(kept) if kept.2.read_at < row.read_at => {
+                *kept = (row.runtime.clone(), start, row, points)
+            }
             Some(_) => {}
             None => weeks.push((row.runtime.clone(), start, row, points)),
         }
@@ -369,11 +384,9 @@ pub fn mission_calls(conn: &rusqlite::Connection, mission_id: &str) -> Result<Ve
         .map(|call| {
             let at = parse(&call.at);
             let week = at.and_then(|at| {
-                weeks
-                    .iter()
-                    .find(|(runtime, start, _, _)| {
-                        *runtime == call.runtime && *start <= at && at < *start + WEEK_LENGTH
-                    })
+                weeks.iter().find(|(runtime, start, _, _)| {
+                    *runtime == call.runtime && *start <= at && at < *start + WEEK_LENGTH
+                })
             });
             let (in_full, free) = week
                 .map(|(_, _, row, points)| basis_points(*points, call.tokens, row.machine))
@@ -420,17 +433,22 @@ pub(crate) fn backfill_with(
     let since = (now - Duration::days(i64::from(days.clamp(1, 90)))).to_rfc3339();
     let conn = core.db.get()?;
     let ids: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT id FROM missions WHERE started_at >= ?1 ORDER BY started_at")?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM missions WHERE started_at >= ?1 ORDER BY started_at")?;
         let rows = stmt.query_map(rusqlite::params![since], |row| row.get::<_, String>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
     let mut by_runtime: BTreeMap<String, Vec<(String, HashSet<String>)>> = BTreeMap::new();
     for id in &ids {
         for runtime in repo::mission_review::mission_runtimes(&conn, id)? {
-            let keys: HashSet<String> = repo::mission_review::mission_session_keys(&conn, id, &runtime)?
-                .into_iter()
-                .collect();
-            by_runtime.entry(runtime).or_default().push((id.clone(), keys));
+            let keys: HashSet<String> =
+                repo::mission_review::mission_session_keys(&conn, id, &runtime)?
+                    .into_iter()
+                    .collect();
+            by_runtime
+                .entry(runtime)
+                .or_default()
+                .push((id.clone(), keys));
         }
     }
     let mut outcome = BackfillOutcome::default();
@@ -446,7 +464,10 @@ pub(crate) fn backfill_with(
             continue;
         };
         let week_start = resets_at - WEEK_LENGTH;
-        let all_keys: HashSet<String> = missions.iter().flat_map(|(_, keys)| keys.iter().cloned()).collect();
+        let all_keys: HashSet<String> = missions
+            .iter()
+            .flat_map(|(_, keys)| keys.iter().cloned())
+            .collect();
         let Some(scan) = history(&runtime, week_start, &all_keys) else {
             continue;
         };
@@ -526,7 +547,13 @@ pub fn mission_usage_backfill(core: &AppCore, days: u32) -> Result<BackfillOutco
     if !core.usage.fetches() {
         return Ok(BackfillOutcome::default());
     }
-    backfill_with(core, days, Utc::now(), &|runtime| read_runtime(core, runtime), &read_history)
+    backfill_with(
+        core,
+        days,
+        Utc::now(),
+        &|runtime| read_runtime(core, runtime),
+        &read_history,
+    )
 }
 
 /// Missions started in the last `days` days, newest first, each with its share
@@ -535,7 +562,11 @@ pub fn mission_usage_list(core: &AppCore, days: u32) -> Result<Vec<MissionUsageS
     mission_usage_list_at(core, days, Utc::now())
 }
 
-pub(crate) fn mission_usage_list_at(core: &AppCore, days: u32, now: DateTime<Utc>) -> Result<Vec<MissionUsageSummary>> {
+pub(crate) fn mission_usage_list_at(
+    core: &AppCore,
+    days: u32,
+    now: DateTime<Utc>,
+) -> Result<Vec<MissionUsageSummary>> {
     let days = days.clamp(1, 90);
     let since = (now - Duration::days(i64::from(days))).to_rfc3339();
     let conn = core.db.get()?;
@@ -546,7 +577,13 @@ pub(crate) fn mission_usage_list_at(core: &AppCore, days: u32, now: DateTime<Utc
              WHERE started_at >= ?1 ORDER BY started_at DESC LIMIT 300",
         )?;
         let rows = stmt.query_map(rusqlite::params![since], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
@@ -554,10 +591,13 @@ pub(crate) fn mission_usage_list_at(core: &AppCore, days: u32, now: DateTime<Utc
     for (mission_id, title, status, started_at, stopped_at) in rows {
         let budgets = mission_budgets(&conn, &mission_id)?;
         let week = budgets.iter().find(|budget| {
-            budget.window == WEEK_WINDOW && budget.attributed_low.is_some() && budget.attributed_high.is_some()
+            budget.window == WEEK_WINDOW
+                && budget.attributed_low.is_some()
+                && budget.attributed_high.is_some()
         });
         out.push(MissionUsageSummary {
-            verdict: repo::mission_review::get_rating(&conn, &mission_id)?.map(|rating| rating.verdict),
+            verdict: repo::mission_review::get_rating(&conn, &mission_id)?
+                .map(|rating| rating.verdict),
             runtime: week.map(|budget| budget.runtime.clone()),
             attributed_low: week.and_then(|budget| budget.attributed_low),
             attributed_high: week.and_then(|budget| budget.attributed_high),
@@ -581,7 +621,10 @@ pub(crate) fn mission_usage_list_at(core: &AppCore, days: u32, now: DateTime<Utc
 }
 
 /// The mission's share of each allowance window it has readings for.
-pub fn mission_budgets(conn: &rusqlite::Connection, mission_id: &str) -> Result<Vec<MissionBudget>> {
+pub fn mission_budgets(
+    conn: &rusqlite::Connection,
+    mission_id: &str,
+) -> Result<Vec<MissionBudget>> {
     let samples = repo::mission_review::list_budget_samples(conn, mission_id)?;
     let basis = repo::mission_review::list_budget_basis(conn, mission_id)?;
     let mut out = Vec::new();
@@ -651,10 +694,14 @@ pub fn mission_budgets(conn: &rusqlite::Connection, mission_id: &str) -> Result<
                 let points = samples
                     .iter()
                     .find(|s| {
-                        s.runtime == runtime && s.window_name == WEEK_WINDOW && s.read_at == row.read_at
+                        s.runtime == runtime
+                            && s.window_name == WEEK_WINDOW
+                            && s.read_at == row.read_at
                     })
                     .map(|s| s.used_percent);
-                if let Some(part) = points.and_then(|p| split_by_tokens(p, row.mission, row.machine)) {
+                if let Some(part) =
+                    points.and_then(|p| split_by_tokens(p, row.mission, row.machine))
+                {
                     parts.push((row.week_start.as_str(), part));
                 }
             }
@@ -689,10 +736,10 @@ pub fn mission_budgets(conn: &rusqlite::Connection, mission_id: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SessionStatus;
     use crate::ops::mission::{start, MissionStart};
     use crate::ops::project::ProjectScope;
     use crate::test_support::{insert_session_row, test_core_in, test_session_row};
-    use crate::model::SessionStatus;
     use std::cell::RefCell;
 
     struct Fixture {
@@ -740,13 +787,28 @@ mod tests {
             insert_session_row(&self.core.db.get().unwrap(), &row).unwrap();
         }
 
-        fn sample(&self, mission: &str, kind: SampleKind, minute: i64, percent: f64, resets: &str) -> usize {
+        fn sample(
+            &self,
+            mission: &str,
+            kind: SampleKind,
+            minute: i64,
+            percent: f64,
+            resets: &str,
+        ) -> usize {
             let windows = vec![UsageWindow {
                 name: "Week".into(),
                 used_percent: percent,
                 resets_at: Some(resets.parse().unwrap()),
             }];
-            sample_with(&self.core, mission, kind, at(minute), &|_| Ok(windows.clone()), &|_, _, _| None).unwrap()
+            sample_with(
+                &self.core,
+                mission,
+                kind,
+                at(minute),
+                &|_| Ok(windows.clone()),
+                &|_, _, _| None,
+            )
+            .unwrap()
         }
 
         fn budgets(&self, mission: &str) -> Vec<MissionBudget> {
@@ -763,7 +825,10 @@ mod tests {
         f.session("s1", Some(&m), "muse", SessionStatus::Running);
         assert_eq!(f.sample(&m, SampleKind::Start, 0, 40.0, RESETS), 1);
         let one = &f.budgets(&m)[0];
-        assert_eq!((one.state, one.used_points, one.readings), (BudgetState::NotYetMeasured, None, 1));
+        assert_eq!(
+            (one.state, one.used_points, one.readings),
+            (BudgetState::NotYetMeasured, None, 1)
+        );
         f.sample(&m, SampleKind::View, 5, 49.0, RESETS);
         let two = &f.budgets(&m)[0];
         assert_eq!(two.state, BudgetState::Measured);
@@ -795,7 +860,11 @@ mod tests {
         let m = f.mission();
         f.session("s1", Some(&m), "muse", SessionStatus::Running);
         f.sample(&m, SampleKind::Start, 0, 40.0, RESETS);
-        assert_eq!(f.sample(&m, SampleKind::View, 0, 41.0, RESETS), 0, "within a minute of the last reading");
+        assert_eq!(
+            f.sample(&m, SampleKind::View, 0, 41.0, RESETS),
+            0,
+            "within a minute of the last reading"
+        );
         assert_eq!(f.sample(&m, SampleKind::View, 2, 41.0, RESETS), 1);
         // The same mission with its only session stopped is finished: never read again.
         let g = fixture();
@@ -811,10 +880,19 @@ mod tests {
         let m = f.mission();
         f.session("s1", Some(&m), "muse", SessionStatus::Running);
         f.sample(&m, SampleKind::Start, 0, 40.0, RESETS);
-        f.core.db.get().unwrap().execute("UPDATE sessions SET status = 'stopped' WHERE id = 's1'", []).unwrap();
+        f.core
+            .db
+            .get()
+            .unwrap()
+            .execute("UPDATE sessions SET status = 'stopped' WHERE id = 's1'", [])
+            .unwrap();
         assert_eq!(f.sample(&m, SampleKind::Stop, 20, 55.0, RESETS), 1);
         assert_eq!(f.budgets(&m)[0].used_points, Some(15.0));
-        assert_eq!(f.sample(&m, SampleKind::View, 40, 70.0, RESETS), 0, "no reading after the stop");
+        assert_eq!(
+            f.sample(&m, SampleKind::View, 40, 70.0, RESETS),
+            0,
+            "no reading after the stop"
+        );
     }
 
     #[test]
@@ -825,15 +903,35 @@ mod tests {
         f.sample(&m, SampleKind::Start, 0, 40.0, RESETS);
         f.session("s2", Some(&m), "codex", SessionStatus::Running);
         let seen = RefCell::new(Vec::new());
-        let windows = vec![UsageWindow { name: "Week".into(), used_percent: 10.0, resets_at: None }];
-        sample_with(&f.core, &m, SampleKind::Join, at(30), &|runtime| {
-            seen.borrow_mut().push(runtime.to_owned());
-            Ok(windows.clone())
-        }, &|_, _, _| None)
+        let windows = vec![UsageWindow {
+            name: "Week".into(),
+            used_percent: 10.0,
+            resets_at: None,
+        }];
+        sample_with(
+            &f.core,
+            &m,
+            SampleKind::Join,
+            at(30),
+            &|runtime| {
+                seen.borrow_mut().push(runtime.to_owned());
+                Ok(windows.clone())
+            },
+            &|_, _, _| None,
+        )
         .unwrap();
         assert_eq!(*seen.borrow(), ["codex", "muse"]);
-        let by_runtime = |name: &str| f.budgets(&m).into_iter().find(|b| b.runtime == name).unwrap();
-        assert_eq!(by_runtime("codex").readings, 1, "the first reading of a runtime is its baseline");
+        let by_runtime = |name: &str| {
+            f.budgets(&m)
+                .into_iter()
+                .find(|b| b.runtime == name)
+                .unwrap()
+        };
+        assert_eq!(
+            by_runtime("codex").readings,
+            1,
+            "the first reading of a runtime is its baseline"
+        );
         assert_eq!(by_runtime("muse").readings, 2);
     }
 
@@ -858,7 +956,11 @@ mod tests {
             set("s1", "2026-11-12T09:59:00+00:00", None);
             set("chat", "2026-11-12T09:00:00+00:00", None);
             set("other-runtime", "2026-11-12T09:00:00+00:00", None);
-            set("ended-before", "2026-11-12T08:00:00+00:00", Some("2026-11-12T09:30:00+00:00"));
+            set(
+                "ended-before",
+                "2026-11-12T08:00:00+00:00",
+                Some("2026-11-12T09:30:00+00:00"),
+            );
             set("starts-after", "2026-11-12T12:00:00+00:00", None);
         }
         f.sample(&m, SampleKind::Start, 0, 40.0, RESETS);
@@ -875,13 +977,26 @@ mod tests {
         let f = fixture();
         let m = f.mission();
         f.session("s1", Some(&m), "muse", SessionStatus::Running);
-        let stored = sample_with(&f.core, &m, SampleKind::Start, at(0), &|_| Err(UnavailableReason::SignIn), &|_, _, _| None).unwrap();
+        let stored = sample_with(
+            &f.core,
+            &m,
+            SampleKind::Start,
+            at(0),
+            &|_| Err(UnavailableReason::SignIn),
+            &|_, _, _| None,
+        )
+        .unwrap();
         assert_eq!(stored, 0);
         assert!(f.budgets(&m).is_empty());
     }
 
     fn tokens(input: i64, output: i64, cached: i64) -> Tokens {
-        Tokens { input, output, cached, reasoning: 0 }
+        Tokens {
+            input,
+            output,
+            cached,
+            reasoning: 0,
+        }
     }
 
     fn near(a: f64, b: f64) -> bool {
@@ -892,7 +1007,10 @@ mod tests {
     fn a_mission_gets_its_share_of_the_windows_points() {
         let a = split_by_tokens(40.0, tokens(100, 0, 0), tokens(1000, 0, 0)).unwrap();
         assert!(near(a.low, 4.0) && near(a.high, 4.0));
-        assert!(near(a.margin, 0.05), "half a point of the total, times a 10% share");
+        assert!(
+            near(a.margin, 0.05),
+            "half a point of the total, times a 10% share"
+        );
         assert!(near(a.share_low, 0.1) && near(a.window_points, 40.0));
     }
 
@@ -907,25 +1025,53 @@ mod tests {
 
     #[test]
     fn a_window_with_no_machine_tokens_gives_no_split() {
-        assert_eq!(split_by_tokens(10.0, tokens(0, 0, 0), tokens(0, 0, 0)), None);
+        assert_eq!(
+            split_by_tokens(10.0, tokens(0, 0, 0), tokens(0, 0, 0)),
+            None
+        );
         // Output only on the machine: the cached-free reading still has a denominator.
         assert!(split_by_tokens(10.0, tokens(0, 5, 0), tokens(0, 50, 0)).is_some());
     }
 
-    fn with_history(f: &Fixture, m: &str, minute: i64, percent: f64, resets: &str, history: &[(&str, TokenSums)]) {
+    fn with_history(
+        f: &Fixture,
+        m: &str,
+        minute: i64,
+        percent: f64,
+        resets: &str,
+        history: &[(&str, TokenSums)],
+    ) {
         let windows = vec![UsageWindow {
             name: "Week".into(),
             used_percent: percent,
             resets_at: Some(resets.parse().unwrap()),
         }];
-        let by_session: BTreeMap<String, TokenSums> =
-            history.iter().map(|(key, sums)| ((*key).to_owned(), *sums)).collect();
-        let scan = TokenScan { by_session, calls: Vec::new() };
-        sample_with(&f.core, m, SampleKind::View, at(minute), &|_| Ok(windows.clone()), &|_, _, _| Some(scan.clone())).unwrap();
+        let by_session: BTreeMap<String, TokenSums> = history
+            .iter()
+            .map(|(key, sums)| ((*key).to_owned(), *sums))
+            .collect();
+        let scan = TokenScan {
+            by_session,
+            calls: Vec::new(),
+        };
+        sample_with(
+            &f.core,
+            m,
+            SampleKind::View,
+            at(minute),
+            &|_| Ok(windows.clone()),
+            &|_, _, _| Some(scan.clone()),
+        )
+        .unwrap();
     }
 
     fn sums(input: i64, output: i64, cached: i64) -> TokenSums {
-        TokenSums { input, output, cached, reasoning: 0 }
+        TokenSums {
+            input,
+            output,
+            cached,
+            reasoning: 0,
+        }
     }
 
     fn keyed_session(f: &Fixture, id: &str, mission: Option<&str>, key: &str) {
@@ -934,7 +1080,10 @@ mod tests {
             .db
             .get()
             .unwrap()
-            .execute("UPDATE sessions SET agent_session_key = ?2 WHERE id = ?1", rusqlite::params![id, key])
+            .execute(
+                "UPDATE sessions SET agent_session_key = ?2 WHERE id = ?1",
+                rusqlite::params![id, key],
+            )
             .unwrap();
     }
 
@@ -961,8 +1110,15 @@ mod tests {
             ],
         );
         let b = &f.budgets(&m)[0];
-        assert_eq!(b.state, BudgetState::NotYetMeasured, "one reading is no before-and-after");
-        assert!(near(b.attributed_low.unwrap(), 4.0), "100 of 1000 machine tokens, of 40 points: {b:?}");
+        assert_eq!(
+            b.state,
+            BudgetState::NotYetMeasured,
+            "one reading is no before-and-after"
+        );
+        assert!(
+            near(b.attributed_low.unwrap(), 4.0),
+            "100 of 1000 machine tokens, of 40 points: {b:?}"
+        );
         assert!(near(b.window_points.unwrap(), 40.0));
     }
 
@@ -971,10 +1127,27 @@ mod tests {
         let f = fixture();
         let m = f.mission();
         keyed_session(&f, "s1", Some(&m), "key-mine");
-        with_history(&f, &m, 0, 10.0, RESETS, &[("key-mine", sums(50, 0, 0)), ("key-x", sums(450, 0, 0))]);
-        with_history(&f, &m, 30, 20.0, RESETS, &[("key-mine", sums(400, 0, 0)), ("key-x", sums(600, 0, 0))]);
+        with_history(
+            &f,
+            &m,
+            0,
+            10.0,
+            RESETS,
+            &[("key-mine", sums(50, 0, 0)), ("key-x", sums(450, 0, 0))],
+        );
+        with_history(
+            &f,
+            &m,
+            30,
+            20.0,
+            RESETS,
+            &[("key-mine", sums(400, 0, 0)), ("key-x", sums(600, 0, 0))],
+        );
         let b = &f.budgets(&m)[0];
-        assert!(near(b.attributed_low.unwrap(), 20.0 * 0.4), "the later reading counts, not both: {b:?}");
+        assert!(
+            near(b.attributed_low.unwrap(), 20.0 * 0.4),
+            "the later reading counts, not both: {b:?}"
+        );
     }
 
     #[test]
@@ -982,11 +1155,31 @@ mod tests {
         let f = fixture();
         let m = f.mission();
         keyed_session(&f, "s1", Some(&m), "key-mine");
-        with_history(&f, &m, 0, 50.0, "2026-11-13T00:00:00Z", &[("key-mine", sums(100, 0, 0)), ("key-x", sums(100, 0, 0))]);
-        with_history(&f, &m, 60 * 24 * 3, 5.0, "2026-11-20T00:00:00Z", &[("key-mine", sums(50, 0, 0)), ("key-x", sums(150, 0, 0))]);
+        with_history(
+            &f,
+            &m,
+            0,
+            50.0,
+            "2026-11-13T00:00:00Z",
+            &[("key-mine", sums(100, 0, 0)), ("key-x", sums(100, 0, 0))],
+        );
+        with_history(
+            &f,
+            &m,
+            60 * 24 * 3,
+            5.0,
+            "2026-11-20T00:00:00Z",
+            &[("key-mine", sums(50, 0, 0)), ("key-x", sums(150, 0, 0))],
+        );
         let b = &f.budgets(&m)[0];
-        assert!(near(b.attributed_low.unwrap(), 50.0 * 0.5 + 5.0 * 0.25), "{b:?}");
-        assert!(near(b.window_points.unwrap(), 5.0), "the latest window's total is shown");
+        assert!(
+            near(b.attributed_low.unwrap(), 50.0 * 0.5 + 5.0 * 0.25),
+            "{b:?}"
+        );
+        assert!(
+            near(b.window_points.unwrap(), 5.0),
+            "the latest window's total is shown"
+        );
     }
 
     #[test]
@@ -1001,7 +1194,14 @@ mod tests {
         assert_eq!((b.attributed_low, b.attributed_high), (None, None));
     }
 
-    fn call(id: &str, key: &str, at_us: i64, input: i64, output: i64, cached: i64) -> crate::runtimes::CallRecord {
+    fn call(
+        id: &str,
+        key: &str,
+        at_us: i64,
+        input: i64,
+        output: i64,
+        cached: i64,
+    ) -> crate::runtimes::CallRecord {
         crate::runtimes::CallRecord {
             usage_id: id.to_owned(),
             session_key: key.to_owned(),
@@ -1010,11 +1210,31 @@ mod tests {
         }
     }
 
-    fn with_calls(f: &Fixture, m: &str, minute: i64, percent: f64, machine: &[(&str, TokenSums)], calls: Vec<crate::runtimes::CallRecord>) {
-        let windows = vec![UsageWindow { name: "Week".into(), used_percent: percent, resets_at: Some(RESETS.parse().unwrap()) }];
-        let by_session: BTreeMap<String, TokenSums> = machine.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
+    fn with_calls(
+        f: &Fixture,
+        m: &str,
+        minute: i64,
+        percent: f64,
+        machine: &[(&str, TokenSums)],
+        calls: Vec<crate::runtimes::CallRecord>,
+    ) {
+        let windows = vec![UsageWindow {
+            name: "Week".into(),
+            used_percent: percent,
+            resets_at: Some(RESETS.parse().unwrap()),
+        }];
+        let by_session: BTreeMap<String, TokenSums> =
+            machine.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
         let scan = TokenScan { by_session, calls };
-        sample_with(&f.core, m, SampleKind::View, at(minute), &|_| Ok(windows.clone()), &|_, _, _| Some(scan.clone())).unwrap();
+        sample_with(
+            &f.core,
+            m,
+            SampleKind::View,
+            at(minute),
+            &|_| Ok(windows.clone()),
+            &|_, _, _| Some(scan.clone()),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1029,15 +1249,30 @@ mod tests {
             2,
             40.0,
             &[("key-mine", sums(300, 0, 0)), ("key-x", sums(700, 0, 0))],
-            vec![call("u1", "key-mine", t, 100, 0, 0), call("u2", "key-mine", t + 1, 200, 0, 0)],
+            vec![
+                call("u1", "key-mine", t, 100, 0, 0),
+                call("u2", "key-mine", t + 1, 200, 0, 0),
+            ],
         );
         let review = f.budgets(&m);
         let calls = mission_calls(&f.core.db.get().unwrap(), &m).unwrap();
         assert_eq!(calls.len(), 2);
-        assert!(near(calls[0].points_cached_in_full.unwrap(), 40.0 * 100.0 / 1000.0), "{calls:?}");
-        assert!(near(calls[1].points_cached_free.unwrap(), 40.0 * 200.0 / 1000.0));
+        assert!(
+            near(
+                calls[0].points_cached_in_full.unwrap(),
+                40.0 * 100.0 / 1000.0
+            ),
+            "{calls:?}"
+        );
+        assert!(near(
+            calls[1].points_cached_free.unwrap(),
+            40.0 * 200.0 / 1000.0
+        ));
         let sum: f64 = calls.iter().map(|c| c.points_cached_in_full.unwrap()).sum();
-        assert!(near(sum, review[0].attributed_low.unwrap()), "calls add up to the mission's figure");
+        assert!(
+            near(sum, review[0].attributed_low.unwrap()),
+            "calls add up to the mission's figure"
+        );
     }
 
     #[test]
@@ -1052,17 +1287,34 @@ mod tests {
             &m,
             2,
             30.0,
-            &[("key-mine", sums(300, 20, 270)), ("key-x", sums(700, 80, 350))],
-            vec![call("u1", "key-mine", t, 100, 5, 90), call("u2", "key-mine", t + 1, 200, 15, 180)],
+            &[
+                ("key-mine", sums(300, 20, 270)),
+                ("key-x", sums(700, 80, 350)),
+            ],
+            vec![
+                call("u1", "key-mine", t, 100, 5, 90),
+                call("u2", "key-mine", t + 1, 200, 15, 180),
+            ],
         );
         let conn = f.core.db.get().unwrap();
         let calls = mission_calls(&conn, &m).unwrap();
-        let sum = |pick: fn(&CallUsage) -> Option<f64>| -> f64 { calls.iter().map(|c| pick(c).unwrap()).sum() };
-        let (a, b) = (sum(|c| c.points_cached_in_full), sum(|c| c.points_cached_free));
+        let sum = |pick: fn(&CallUsage) -> Option<f64>| -> f64 {
+            calls.iter().map(|c| pick(c).unwrap()).sum()
+        };
+        let (a, b) = (
+            sum(|c| c.points_cached_in_full),
+            sum(|c| c.points_cached_free),
+        );
         let budget = &mission_budgets(&conn, &m).unwrap()[0];
-        assert!(near(a.min(b), budget.attributed_low.unwrap()), "{a} {b} {budget:?}");
+        assert!(
+            near(a.min(b), budget.attributed_low.unwrap()),
+            "{a} {b} {budget:?}"
+        );
         assert!(near(a.max(b), budget.attributed_high.unwrap()));
-        assert!((a - b).abs() > 0.1, "the two readings differ here, which is what the test needs");
+        assert!(
+            (a - b).abs() > 0.1,
+            "the two readings differ here, which is what the test needs"
+        );
     }
 
     #[test]
@@ -1071,12 +1323,36 @@ mod tests {
         let m = f.mission();
         keyed_session(&f, "s1", Some(&m), "key-mine");
         let t = at(1).timestamp_micros();
-        let first = vec![call("u1", "key-mine", t, 100, 5, 0), call("u2", "key-mine", t + 1, 50, 5, 0)];
-        with_calls(&f, &m, 2, 40.0, &[("key-mine", sums(150, 10, 0))], first.clone());
+        let first = vec![
+            call("u1", "key-mine", t, 100, 5, 0),
+            call("u2", "key-mine", t + 1, 50, 5, 0),
+        ];
+        with_calls(
+            &f,
+            &m,
+            2,
+            40.0,
+            &[("key-mine", sums(150, 10, 0))],
+            first.clone(),
+        );
         with_calls(&f, &m, 4, 41.0, &[("key-mine", sums(150, 10, 0))], first);
         // The runtime later compacts its log: u1 is gone. The stored call stays.
-        with_calls(&f, &m, 8, 42.0, &[("key-mine", sums(50, 5, 0))], vec![call("u2", "key-mine", t + 1, 50, 5, 0), call("u3", "key-mine", t + 9, 7, 1, 0)]);
-        let ids: Vec<String> = mission_calls(&f.core.db.get().unwrap(), &m).unwrap().into_iter().map(|c| c.usage_id).collect();
+        with_calls(
+            &f,
+            &m,
+            8,
+            42.0,
+            &[("key-mine", sums(50, 5, 0))],
+            vec![
+                call("u2", "key-mine", t + 1, 50, 5, 0),
+                call("u3", "key-mine", t + 9, 7, 1, 0),
+            ],
+        );
+        let ids: Vec<String> = mission_calls(&f.core.db.get().unwrap(), &m)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.usage_id)
+            .collect();
         assert_eq!(ids, ["u1", "u2", "u3"]);
     }
 
@@ -1087,10 +1363,30 @@ mod tests {
         keyed_session(&f, "s1", Some(&m), "key-mine");
         let t = at(1).timestamp_micros();
         // A reading whose weekly window is missing stores no basis row, so no points can be given.
-        let scan = TokenScan { by_session: BTreeMap::new(), calls: vec![call("u1", "key-mine", t, 10, 1, 0)] };
-        let no_week = vec![UsageWindow { name: "Window".into(), used_percent: 5.0, resets_at: None }];
-        sample_with(&f.core, &m, SampleKind::View, at(2), &|_| Ok(no_week.clone()), &|_, _, _| Some(scan.clone())).unwrap();
-        assert!(mission_calls(&f.core.db.get().unwrap(), &m).unwrap().is_empty(), "no week window, no token scan, nothing stored");
+        let scan = TokenScan {
+            by_session: BTreeMap::new(),
+            calls: vec![call("u1", "key-mine", t, 10, 1, 0)],
+        };
+        let no_week = vec![UsageWindow {
+            name: "Window".into(),
+            used_percent: 5.0,
+            resets_at: None,
+        }];
+        sample_with(
+            &f.core,
+            &m,
+            SampleKind::View,
+            at(2),
+            &|_| Ok(no_week.clone()),
+            &|_, _, _| Some(scan.clone()),
+        )
+        .unwrap();
+        assert!(
+            mission_calls(&f.core.db.get().unwrap(), &m)
+                .unwrap()
+                .is_empty(),
+            "no week window, no token scan, nothing stored"
+        );
     }
 
     #[test]
@@ -1098,7 +1394,14 @@ mod tests {
         let f = fixture();
         let measured = f.mission();
         keyed_session(&f, "s1", Some(&measured), "key-mine");
-        with_history(&f, &measured, 0, 40.0, RESETS, &[("key-mine", sums(100, 0, 0)), ("key-x", sums(900, 0, 0))]);
+        with_history(
+            &f,
+            &measured,
+            0,
+            40.0,
+            RESETS,
+            &[("key-mine", sums(100, 0, 0)), ("key-x", sums(900, 0, 0))],
+        );
         crate::ops::mission::review::mission_rate(
             &f.core,
             runner_core::protocol::MissionRateInput {
@@ -1114,22 +1417,35 @@ mod tests {
             .db
             .get()
             .unwrap()
-            .execute("UPDATE missions SET started_at = '2020-01-01T00:00:00+00:00' WHERE id = ?1", [&old])
+            .execute(
+                "UPDATE missions SET started_at = '2020-01-01T00:00:00+00:00' WHERE id = ?1",
+                [&old],
+            )
             .unwrap();
         let list = mission_usage_list_at(&f.core, 7, Utc::now()).unwrap();
         let ids: Vec<&str> = list.iter().map(|m| m.mission_id.as_str()).collect();
         assert!(ids.contains(&measured.as_str()) && ids.contains(&unmeasured.as_str()));
-        assert!(!ids.contains(&old.as_str()), "a mission from years ago is outside the window");
+        assert!(
+            !ids.contains(&old.as_str()),
+            "a mission from years ago is outside the window"
+        );
         let m = list.iter().find(|m| m.mission_id == measured).unwrap();
-        assert!(near(m.attributed_low.unwrap(), 4.0), "100 of 1000 tokens, of 40 points: {m:?}");
+        assert!(
+            near(m.attributed_low.unwrap(), 4.0),
+            "100 of 1000 tokens, of 40 points: {m:?}"
+        );
         assert_eq!(m.verdict, Some(runner_core::protocol::RatingVerdict::Down));
         assert_eq!(m.runtime.as_deref(), Some("muse"));
         let u = list.iter().find(|m| m.mission_id == unmeasured).unwrap();
-        assert_eq!((u.attributed_low, u.verdict, u.runtime.clone()), (None, None, None));
+        assert_eq!(
+            (u.attributed_low, u.verdict, u.runtime.clone()),
+            (None, None, None)
+        );
     }
 
     #[test]
-    fn a_backfill_measures_missions_that_ran_against_the_open_week_and_never_replaces_a_real_reading() {
+    fn a_backfill_measures_missions_that_ran_against_the_open_week_and_never_replaces_a_real_reading(
+    ) {
         let f = fixture();
         let old_mission = f.mission();
         keyed_session(&f, "s-old", Some(&old_mission), "key-old");
@@ -1138,8 +1454,19 @@ mod tests {
         let live_mission = f.mission();
         keyed_session(&f, "s-live", Some(&live_mission), "key-live");
         // The live one already has a real reading for this week.
-        with_history(&f, &live_mission, 0, 40.0, RESETS, &[("key-live", sums(50, 0, 0)), ("key-x", sums(950, 0, 0))]);
-        let windows = vec![UsageWindow { name: "Week".into(), used_percent: 40.0, resets_at: Some(RESETS.parse().unwrap()) }];
+        with_history(
+            &f,
+            &live_mission,
+            0,
+            40.0,
+            RESETS,
+            &[("key-live", sums(50, 0, 0)), ("key-x", sums(950, 0, 0))],
+        );
+        let windows = vec![UsageWindow {
+            name: "Week".into(),
+            used_percent: 40.0,
+            resets_at: Some(RESETS.parse().unwrap()),
+        }];
         let by_session: BTreeMap<String, TokenSums> = [
             ("key-old", sums(300, 0, 0)),
             ("key-live", sums(50, 0, 0)),
@@ -1153,20 +1480,40 @@ mod tests {
             calls: vec![call("u1", "key-old", at(1).timestamp_micros(), 300, 0, 0)],
         };
         let run = || {
-            backfill_with(&f.core, 7, at(10), &|_| Ok(windows.clone()), &|_, _, _| Some(scan.clone())).unwrap()
+            backfill_with(&f.core, 7, at(10), &|_| Ok(windows.clone()), &|_, _, _| {
+                Some(scan.clone())
+            })
+            .unwrap()
         };
         let first = run();
-        assert_eq!((first.measured, first.skipped), (1, 2), "old measured; empty and live skipped");
+        assert_eq!(
+            (first.measured, first.skipped),
+            (1, 2),
+            "old measured; empty and live skipped"
+        );
         let conn = f.core.db.get().unwrap();
         let old = &mission_budgets(&conn, &old_mission).unwrap()[0];
-        assert!(near(old.attributed_low.unwrap(), 40.0 * 0.3), "300 of 1000 tokens, of 40 points: {old:?}");
+        assert!(
+            near(old.attributed_low.unwrap(), 40.0 * 0.3),
+            "300 of 1000 tokens, of 40 points: {old:?}"
+        );
         assert_eq!(mission_calls(&conn, &old_mission).unwrap().len(), 1);
-        assert!(mission_budgets(&conn, &empty_mission).unwrap().is_empty(), "no tokens, no measure");
+        assert!(
+            mission_budgets(&conn, &empty_mission).unwrap().is_empty(),
+            "no tokens, no measure"
+        );
         let live = &mission_budgets(&conn, &live_mission).unwrap()[0];
-        assert!(near(live.attributed_low.unwrap(), 40.0 * 0.05), "the real reading stands: {live:?}");
+        assert!(
+            near(live.attributed_low.unwrap(), 40.0 * 0.05),
+            "the real reading stands: {live:?}"
+        );
         drop(conn);
         let again = run();
-        assert_eq!((again.measured, again.skipped), (0, 3), "running it twice changes nothing");
+        assert_eq!(
+            (again.measured, again.skipped),
+            (0, 3),
+            "running it twice changes nothing"
+        );
     }
 
     #[test]
@@ -1175,13 +1522,33 @@ mod tests {
         let m = f.mission();
         keyed_session(&f, "s1", Some(&m), "key-mine");
         let t = at(1).timestamp_micros();
-        with_calls(&f, &m, 2, 40.0, &[("key-mine", sums(30, 0, 0))], vec![call("u1", "key-mine", t, 10, 0, 0), call("u2", "key-mine", t + 5_000_000, 20, 0, 0)]);
+        with_calls(
+            &f,
+            &m,
+            2,
+            40.0,
+            &[("key-mine", sums(30, 0, 0))],
+            vec![
+                call("u1", "key-mine", t, 10, 0, 0),
+                call("u2", "key-mine", t + 5_000_000, 20, 0, 0),
+            ],
+        );
         let none = f.mission();
         let list = mission_usage_list_at(&f.core, 7, Utc::now()).unwrap();
         let measured = list.iter().find(|x| x.mission_id == m).unwrap();
         let last: DateTime<Utc> = measured.last_call_at.as_deref().unwrap().parse().unwrap();
-        assert_eq!(last.timestamp_micros(), t + 5_000_000, "the later of the two calls");
-        assert_eq!(list.iter().find(|x| x.mission_id == none).unwrap().last_call_at, None);
+        assert_eq!(
+            last.timestamp_micros(),
+            t + 5_000_000,
+            "the later of the two calls"
+        );
+        assert_eq!(
+            list.iter()
+                .find(|x| x.mission_id == none)
+                .unwrap()
+                .last_call_at,
+            None
+        );
     }
 
     #[test]
@@ -1191,7 +1558,14 @@ mod tests {
         f.session("s1", Some(&m), "muse", SessionStatus::Running);
         keyed_session(&f, "s2", Some(&m), "key-mine");
         f.sample(&m, SampleKind::Start, 0, 40.0, RESETS);
-        with_calls(&f, &m, 5, 41.0, &[("key-mine", sums(10, 0, 0))], vec![call("u1", "key-mine", at(1).timestamp_micros(), 10, 0, 0)]);
+        with_calls(
+            &f,
+            &m,
+            5,
+            41.0,
+            &[("key-mine", sums(10, 0, 0))],
+            vec![call("u1", "key-mine", at(1).timestamp_micros(), 10, 0, 0)],
+        );
         let mut conn = f.core.db.get().unwrap();
         let tx = conn.transaction().unwrap();
         crate::ops::mission::delete_rows(&tx, &[m.clone()]).unwrap();

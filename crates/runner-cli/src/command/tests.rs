@@ -1447,7 +1447,6 @@ async fn mission_lifecycle_uses_real_shapes_and_adds_the_crew_name() {
     }
 }
 
-
 #[tokio::test]
 async fn rating_and_usage_recording_are_for_the_person() {
     let in_mission = BusContext::Mission(MissionEnv {
@@ -1461,7 +1460,14 @@ async fn rating_and_usage_recording_are_for_the_person() {
     let path_arg = path.to_str().unwrap().to_owned();
     for args in [
         vec!["runner", "mission", "rate", "m", "up"],
-        vec!["runner", "mission", "usage-record", "m", "--file", path_arg.as_str()],
+        vec![
+            "runner",
+            "mission",
+            "usage-record",
+            "m",
+            "--file",
+            path_arg.as_str(),
+        ],
     ] {
         let cli = Cli::try_parse_from(&args).unwrap();
         let client = RecordingClient::default();
@@ -1472,11 +1478,18 @@ async fn rating_and_usage_recording_are_for_the_person() {
         assert!(client.calls.into_inner().unwrap().is_empty());
     }
     let cli = Cli::try_parse_from([
-        "runner", "mission", "usage-record", "01M", "--file", path_arg.as_str(),
+        "runner",
+        "mission",
+        "usage-record",
+        "01M",
+        "--file",
+        path_arg.as_str(),
     ])
     .unwrap();
     let client = RecordingClient::default();
-    run_connected(&client, &cli, &BusContext::OffBus, None).await.unwrap();
+    run_connected(&client, &cli, &BusContext::OffBus, None)
+        .await
+        .unwrap();
     let calls = client.calls.into_inner().unwrap();
     assert_eq!(calls.last().unwrap().0, "mission_usage_record");
     assert_eq!(
@@ -1497,7 +1510,11 @@ async fn a_rating_needs_up_or_down_or_clear() {
         let error = run_connected(&client, &cli, &BusContext::OffBus, None)
             .await
             .expect_err("a rating needs a verdict");
-        assert!(error.message.contains("up or down"), "{args:?}: {}", error.message);
+        assert!(
+            error.message.contains("up or down"),
+            "{args:?}: {}",
+            error.message
+        );
     }
     assert!(Cli::try_parse_from(["runner", "mission", "rate", "01M", "up", "--clear"]).is_err());
 }
@@ -1756,7 +1773,11 @@ async fn every_remote_command_builds_the_expected_tool_calls_without_a_socket() 
         ),
         (
             vec!["mission", "review", "01M", "--sample"],
-            vec!["mission_list", "mission_budget_sample", "mission_review_get"],
+            vec![
+                "mission_list",
+                "mission_budget_sample",
+                "mission_review_get",
+            ],
             json!({"mission_id": MISSION_ID}),
         ),
         (

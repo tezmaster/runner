@@ -7,13 +7,16 @@
 
 use chrono::Utc;
 use gpui::prelude::*;
-use gpui::{canvas, div, point, px, relative, rems, AnyElement, FontWeight, Hsla, PathBuilder, SharedString};
+use gpui::{
+    canvas, div, point, px, relative, rems, AnyElement, FontWeight, Hsla, PathBuilder, SharedString,
+};
 use runner_app::ui::list::LIST_PAGE_PADDING_X;
 use runner_app::ui::{Button, ButtonSize, ButtonVariant};
 use runner_core::protocol::{MissionRateInput, MissionUsageSummary, RatingVerdict};
 
 use super::usage_timeline::{
-    self as timeline, CurvePoint, Filter, Flag, Lane, Timeline, DAY_CHOICES, DEFAULT_EXPENSIVE, EXPENSIVE_CHOICES, FILTERS,
+    self as timeline, CurvePoint, Filter, Flag, Lane, Timeline, DAY_CHOICES, DEFAULT_EXPENSIVE,
+    EXPENSIVE_CHOICES, FILTERS,
 };
 use super::*;
 
@@ -77,7 +80,9 @@ fn flag_color(flag: Flag) -> Option<Hsla> {
 fn runtime_tint(runtime: Option<&str>) -> Hsla {
     runtime
         .and_then(runner_core::protocol::Runtime::parse)
-        .map_or_else(theme::accent, |runtime| crate::runtime_ui::runtime_ui(runtime).tint)
+        .map_or_else(theme::accent, |runtime| {
+            crate::runtime_ui::runtime_ui(runtime).tint
+        })
 }
 
 fn runtime_logo(runtime: Option<&str>, size: f32) -> AnyElement {
@@ -148,7 +153,12 @@ fn segmented<T: std::marker::Copy + PartialEq + 'static>(
 }
 
 fn icon(path: &'static str, size: f32, color: Hsla) -> AnyElement {
-    gpui::svg().path(path).size(px(size)).flex_none().text_color(color).into_any_element()
+    gpui::svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
+        .into_any_element()
 }
 
 fn card() -> gpui::Div {
@@ -213,7 +223,12 @@ impl NativeRoot {
 
     /// Rates a mission from the page and reads the list again. The note stays
     /// empty: the queue only offers this for a mission with no rating yet.
-    fn rate_from_usage(&mut self, mission_id: String, verdict: RatingVerdict, cx: &mut Context<Self>) {
+    fn rate_from_usage(
+        &mut self,
+        mission_id: String,
+        verdict: RatingVerdict,
+        cx: &mut Context<Self>,
+    ) {
         let core = self.core(cx).clone();
         let task = cx.background_spawn(async move {
             core.mission_rate(MissionRateInput {
@@ -230,7 +245,10 @@ impl NativeRoot {
     }
 
     /// The popover's pointer to the page, with how many missions need a look.
-    pub(super) fn render_mission_usage_link(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_mission_usage_link(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.mission_usage.loaded {
             return None;
         }
@@ -247,7 +265,10 @@ impl NativeRoot {
         } else {
             crate::i18n::tf(
                 "ui.usage_missions_summary",
-                &[("count", model.summary.measured.to_string()), ("flagged", flagged.to_string())],
+                &[
+                    ("count", model.summary.measured.to_string()),
+                    ("flagged", flagged.to_string()),
+                ],
             )
         };
         let root = cx.entity();
@@ -266,7 +287,11 @@ impl NativeRoot {
                 .child(
                     div()
                         .text_size(theme::text_ui())
-                        .text_color(if flagged > 0 { theme::warning() } else { theme::muted() })
+                        .text_color(if flagged > 0 {
+                            theme::warning()
+                        } else {
+                            theme::muted()
+                        })
                         .child(summary),
                 )
                 .child(
@@ -286,16 +311,27 @@ impl NativeRoot {
     /// The Usage page, laid out as the Mission Timeline block: a summary card
     /// with the allowance curve, a card of lanes on a shared clock, and a
     /// side panel of the missions that need a look.
-    pub(crate) fn render_usage_page(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_usage_page(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let root = cx.entity();
         let now = Utc::now();
         let (days, current_filter, expensive_at, loaded) = {
             let state = &self.mission_usage;
             (state.days, state.filter, state.expensive, state.loaded)
         };
-        let model = timeline::build(&self.mission_usage.list, days, now, expensive_at, current_filter);
+        let model = timeline::build(
+            &self.mission_usage.list,
+            days,
+            now,
+            expensive_at,
+            current_filter,
+        );
         let counts = model.counts;
-        let stacked = f32::from(window.viewport_size().width) / self.settings(cx).app_zoom < STACK_BELOW;
+        let stacked =
+            f32::from(window.viewport_size().width) / self.settings(cx).app_zoom < STACK_BELOW;
 
         // ---- header: the title, and one filter that drives everything below
         // Amber is for a small mark, not a paragraph: the description stays plain.
@@ -324,7 +360,12 @@ impl NativeRoot {
             "usage-filter",
             FILTERS
                 .iter()
-                .map(|filter| (*filter, format!("{} {}", filter_label(*filter), counts.of(*filter))))
+                .map(|filter| {
+                    (
+                        *filter,
+                        format!("{} {}", filter_label(*filter), counts.of(*filter)),
+                    )
+                })
                 .collect(),
             current_filter,
             move |filter, cx| {
@@ -456,13 +497,23 @@ impl NativeRoot {
 
     /// "Allowance used": the total, what it was made of, and the curve that
     /// shows the week's allowance being spent mission by mission.
-    fn render_usage_summary(&mut self, model: &Timeline, days: u32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_usage_summary(
+        &mut self,
+        model: &Timeline,
+        days: u32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let root = cx.entity();
         let period = segmented(
             "usage-period",
             DAY_CHOICES
                 .iter()
-                .map(|choice| (*choice, crate::i18n::tf("ui.usage_period", &[("days", choice.to_string())])))
+                .map(|choice| {
+                    (
+                        *choice,
+                        crate::i18n::tf("ui.usage_period", &[("days", choice.to_string())]),
+                    )
+                })
                 .collect(),
             days,
             move |choice, cx| {
@@ -493,9 +544,24 @@ impl NativeRoot {
             .items_center()
             .gap_x_4()
             .gap_y_1()
-            .child(stat("circle-check.svg", theme::muted(), summary.measured, "ui.usage_stat_measured"))
-            .child(stat("triangle-alert.svg", theme::warning(), summary.flagged, "ui.usage_stat_look"))
-            .child(stat("circle-alert.svg", theme::danger(), bad, "ui.usage_stat_bad"));
+            .child(stat(
+                "circle-check.svg",
+                theme::muted(),
+                summary.measured,
+                "ui.usage_stat_measured",
+            ))
+            .child(stat(
+                "triangle-alert.svg",
+                theme::warning(),
+                summary.flagged,
+                "ui.usage_stat_look",
+            ))
+            .child(stat(
+                "circle-alert.svg",
+                theme::danger(),
+                bad,
+                "ui.usage_stat_bad",
+            ));
         let total = div()
             .flex()
             .items_baseline()
@@ -542,7 +608,15 @@ impl NativeRoot {
                             )
                             .child(total),
                     )
-                    .child(div().flex().flex_col().items_end().gap_2().child(period).child(stats)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap_2()
+                            .child(period)
+                            .child(stats),
+                    ),
             )
             .child(allowance_curve(&model.curve, &model.grid))
             .child(
@@ -569,7 +643,10 @@ impl NativeRoot {
         let root = cx.entity();
         let line = segmented(
             "usage-expensive",
-            EXPENSIVE_CHOICES.iter().map(|choice| (*choice, points(*choice))).collect(),
+            EXPENSIVE_CHOICES
+                .iter()
+                .map(|choice| (*choice, points(*choice)))
+                .collect(),
             expensive_at,
             move |choice, cx| {
                 let _ = root.update(cx, |this, cx| {
@@ -606,7 +683,10 @@ impl NativeRoot {
                         div()
                             .text_size(theme::text_ui())
                             .text_color(theme::muted())
-                            .child(crate::i18n::tf("ui.usage_stat_measured", &[("count", model.summary.measured.to_string())])),
+                            .child(crate::i18n::tf(
+                                "ui.usage_stat_measured",
+                                &[("count", model.summary.measured.to_string())],
+                            )),
                     ),
             )
             .child(
@@ -637,10 +717,18 @@ impl NativeRoot {
                     .flex()
                     .justify_center()
                     .text_size(theme::text_caption())
-                    .text_color(if today { theme::accent() } else { theme::faint() })
+                    .text_color(if today {
+                        theme::accent()
+                    } else {
+                        theme::faint()
+                    })
                     .when(today, |cell| cell.font_weight(FontWeight::SEMIBOLD))
                     .when(index % label_every == 0 || today, |cell| {
-                        cell.child(if today { crate::i18n::text("ui.usage_today").to_owned() } else { label.clone() })
+                        cell.child(if today {
+                            crate::i18n::text("ui.usage_today").to_owned()
+                        } else {
+                            label.clone()
+                        })
                     }),
             );
         }
@@ -725,7 +813,12 @@ impl NativeRoot {
                             .bottom_0()
                             .left_0()
                             .right_0()
-                            .child(div().relative().size_full().child(self.mission_usage.scrollbar.clone())),
+                            .child(
+                                div()
+                                    .relative()
+                                    .size_full()
+                                    .child(self.mission_usage.scrollbar.clone()),
+                            ),
                     ),
             )
             .child(
@@ -757,17 +850,35 @@ impl NativeRoot {
             .as_deref()
             .and_then(runner_core::protocol::Runtime::parse)
             .map_or_else(String::new, |runtime| runtime.display_name().to_owned());
-        let subtitle = if runtime.is_empty() { when } else { format!("{runtime} · {when}") };
+        let subtitle = if runtime.is_empty() {
+            when
+        } else {
+            format!("{runtime} · {when}")
+        };
         // The status beside the name: what the person should know, nothing for the ordinary case.
         let chip = match (lane.flag, lane.verdict) {
-            (Flag::WentBadly, _) => Some(pill(crate::i18n::text("ui.usage_flag_bad_short"), theme::danger())),
-            (Flag::NotRated, _) => Some(pill(crate::i18n::text("ui.usage_needs_badge"), theme::warning())),
-            (Flag::None, Some(RatingVerdict::Down)) => Some(pill(crate::i18n::text("ui.rating_down"), theme::danger())),
-            (Flag::None, Some(RatingVerdict::Up)) => Some(pill(crate::i18n::text("ui.rating_up"), theme::accent())),
+            (Flag::WentBadly, _) => Some(pill(
+                crate::i18n::text("ui.usage_flag_bad_short"),
+                theme::danger(),
+            )),
+            (Flag::NotRated, _) => Some(pill(
+                crate::i18n::text("ui.usage_needs_badge"),
+                theme::warning(),
+            )),
+            (Flag::None, Some(RatingVerdict::Down)) => {
+                Some(pill(crate::i18n::text("ui.rating_down"), theme::danger()))
+            }
+            (Flag::None, Some(RatingVerdict::Up)) => {
+                Some(pill(crate::i18n::text("ui.rating_up"), theme::accent()))
+            }
             (Flag::None, None) => None,
         };
         let flagged = lane.flag != Flag::None;
-        let band_ink = if lane.flag == Flag::WentBadly { theme::danger() } else { theme::warning() };
+        let band_ink = if lane.flag == Flag::WentBadly {
+            theme::danger()
+        } else {
+            theme::warning()
+        };
         div()
             .id(SharedString::from(format!("usage-mission-{id}")))
             .flex()
@@ -934,7 +1045,10 @@ impl NativeRoot {
                                     .font_family(theme::UI_MONOSPACE_FONT)
                                     .text_size(theme::text_ui())
                                     .text_color(theme::text())
-                                    .child(crate::i18n::tf("ui.usage_mission_points", &[("value", points(lane.mid))])),
+                                    .child(crate::i18n::tf(
+                                        "ui.usage_mission_points",
+                                        &[("value", points(lane.mid))],
+                                    )),
                             )
                             .child(
                                 div()
@@ -961,18 +1075,30 @@ impl NativeRoot {
             let open_id = lane.mission_id.clone();
             let ink = flag_color(lane.flag).unwrap_or_else(theme::muted);
             let (status_icon, status_text) = match lane.flag {
-                Flag::WentBadly => ("circle-alert.svg", crate::i18n::text("ui.usage_flag_bad_short")),
-                _ => ("triangle-alert.svg", crate::i18n::text("ui.usage_flag_unrated_short")),
+                Flag::WentBadly => (
+                    "circle-alert.svg",
+                    crate::i18n::text("ui.usage_flag_bad_short"),
+                ),
+                _ => (
+                    "triangle-alert.svg",
+                    crate::i18n::text("ui.usage_flag_unrated_short"),
+                ),
             };
             let reason = match lane.flag {
-                Flag::WentBadly => crate::i18n::tf("ui.usage_reason_bad", &[("points", points(lane.mid))]),
+                Flag::WentBadly => {
+                    crate::i18n::tf("ui.usage_reason_bad", &[("points", points(lane.mid))])
+                }
                 _ => crate::i18n::tf("ui.usage_reason_unrated", &[("points", points(lane.mid))]),
             };
             let mut actions = div().flex().flex_wrap().items_center().gap_1();
             if lane.flag == Flag::NotRated {
                 for (verdict, label, key) in [
                     (RatingVerdict::Up, crate::i18n::text("ui.rating_up"), "up"),
-                    (RatingVerdict::Down, crate::i18n::text("ui.rating_down"), "down"),
+                    (
+                        RatingVerdict::Down,
+                        crate::i18n::text("ui.rating_down"),
+                        "down",
+                    ),
                 ] {
                     let root = root.clone();
                     let id = id.clone();
@@ -983,7 +1109,8 @@ impl NativeRoot {
                             .variant(ButtonVariant::Outline)
                             .on_press(move |_, cx| {
                                 let id = id.clone();
-                                let _ = root.update(cx, |this, cx| this.rate_from_usage(id, verdict, cx));
+                                let _ = root
+                                    .update(cx, |this, cx| this.rate_from_usage(id, verdict, cx));
                             }),
                     );
                 }
@@ -1012,7 +1139,11 @@ impl NativeRoot {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().flex_none().child(runtime_logo(lane.runtime.as_deref(), 16.)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .child(runtime_logo(lane.runtime.as_deref(), 16.)),
+                            )
                             .child(
                                 div()
                                     .min_w(px(0.))
@@ -1041,7 +1172,10 @@ impl NativeRoot {
                                     .text_color(theme::muted())
                                     .child(format!(
                                         "{status_text} · {}",
-                                        runner_app::text_util::format_relative_time(lane.started_at, now)
+                                        runner_app::text_util::format_relative_time(
+                                            lane.started_at,
+                                            now
+                                        )
                                     )),
                             ),
                     )
@@ -1064,7 +1198,10 @@ impl NativeRoot {
                             .px_1()
                             .text_size(theme::text_caption())
                             .text_color(theme::faint())
-                            .child(crate::i18n::tf("ui.usage_queue_more", &[("count", more.to_string())])),
+                            .child(crate::i18n::tf(
+                                "ui.usage_queue_more",
+                                &[("count", more.to_string())],
+                            )),
                     )
                 })
                 .into_any_element()

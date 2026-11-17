@@ -1479,7 +1479,10 @@ mod tests {
         let mut settings = AppSettings::default();
         let mut defaults = settings.usage_runtimes();
         defaults.sort_by_key(|runtime| runtime.key());
-        assert_eq!(defaults, [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse]);
+        assert_eq!(
+            defaults,
+            [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse]
+        );
         assert!(
             !settings.model_runtimes().contains(&Runtime::Muse),
             "Muse reports usage without discovering models"
