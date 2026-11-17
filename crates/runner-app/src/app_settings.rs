@@ -1450,6 +1450,7 @@ mod tests {
                 Runtime::Cursor,
                 Runtime::Grok,
                 Runtime::OpenCode,
+                Runtime::Muse,
             ]
         );
         settings.disabled_agents.extend([
@@ -1481,7 +1482,12 @@ mod tests {
         defaults.sort_by_key(|runtime| runtime.key());
         assert_eq!(
             defaults,
-            [Runtime::ClaudeCode, Runtime::Codex, Runtime::Muse]
+            [
+                Runtime::Antigravity,
+                Runtime::ClaudeCode,
+                Runtime::Codex,
+                Runtime::Muse
+            ]
         );
         assert!(
             !settings.model_runtimes().contains(&Runtime::Muse),

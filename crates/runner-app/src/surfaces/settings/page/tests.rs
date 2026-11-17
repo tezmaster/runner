@@ -1037,21 +1037,21 @@ fn agent_page_keyboard_tabs_from_executable_to_browse_and_back() {
     .unwrap();
     visual.simulate_keystrokes("shift-tab");
     visual.run_until_parked();
-    if visual.debug_bounds("AGENT_TOGGLE_opencode").is_some() {
+    if visual.debug_bounds("AGENT_TOGGLE_muse").is_some() {
         visual.simulate_keystrokes("space");
         visual.simulate_event(KeyUpEvent {
             keystroke: Keystroke::parse("space").unwrap(),
         });
         visual.run_until_parked();
         store.read_with(&visual, |store, _| {
-            assert!(store.settings.disabled_agents.contains("opencode"))
+            assert!(store.settings.disabled_agents.contains("muse"))
         });
-        assert!(visual.debug_bounds("AGENT_CARD_opencode").is_some());
+        assert!(visual.debug_bounds("AGENT_CARD_muse").is_some());
         visual.simulate_keystrokes("shift-tab");
     }
     visual.simulate_keystrokes("enter");
     visual.run_until_parked();
-    assert!(visual.debug_bounds("AGENT_PAGE_opencode").is_some());
+    assert!(visual.debug_bounds("AGENT_PAGE_muse").is_some());
 }
 
 #[test]
