@@ -357,7 +357,7 @@ mod tests {
         f.record(&m, vec![slot("coder", Some(1))]).unwrap();
         let mut conn = f.core.db.get().unwrap();
         let tx = conn.transaction().unwrap();
-        crate::ops::mission::delete_rows(&tx, &[m.clone()]).unwrap();
+        crate::ops::mission::delete_rows(&tx, std::slice::from_ref(&m)).unwrap();
         tx.commit().unwrap();
         let left: i64 = conn
             .query_row(

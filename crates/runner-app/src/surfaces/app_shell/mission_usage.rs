@@ -300,7 +300,7 @@ impl NativeRoot {
                             .size(ButtonSize::Sm)
                             .variant(ButtonVariant::Outline)
                             .on_press(move |window, cx| {
-                                let _ = root.update(cx, |this, cx| this.open_usage(window, cx));
+                                root.update(cx, |this, cx| this.open_usage(window, cx));
                             }),
                     ),
                 )
@@ -369,7 +369,7 @@ impl NativeRoot {
                 .collect(),
             current_filter,
             move |filter, cx| {
-                let _ = filter_root.update(cx, |this, cx| {
+                filter_root.update(cx, |this, cx| {
                     this.mission_usage.filter = filter;
                     cx.notify();
                 });
@@ -488,7 +488,7 @@ impl NativeRoot {
                     .gap(rems(20. / 16.))
                     .px(rems(LIST_PAGE_PADDING_X / 16.))
                     .pt(rems(36. / 16.))
-                    .pb(rems(16. / 16.))
+                    .pb(rems(1.))
                     .child(header)
                     .child(body),
             )
@@ -517,7 +517,7 @@ impl NativeRoot {
                 .collect(),
             days,
             move |choice, cx| {
-                let _ = root.update(cx, |this, cx| {
+                root.update(cx, |this, cx| {
                     this.mission_usage.days = choice;
                     this.refresh_mission_usage(cx);
                 });
@@ -649,7 +649,7 @@ impl NativeRoot {
                 .collect(),
             expensive_at,
             move |choice, cx| {
-                let _ = root.update(cx, |this, cx| {
+                root.update(cx, |this, cx| {
                     this.mission_usage.expensive = choice;
                     cx.notify();
                 });
@@ -1109,8 +1109,7 @@ impl NativeRoot {
                             .variant(ButtonVariant::Outline)
                             .on_press(move |_, cx| {
                                 let id = id.clone();
-                                let _ = root
-                                    .update(cx, |this, cx| this.rate_from_usage(id, verdict, cx));
+                                root.update(cx, |this, cx| this.rate_from_usage(id, verdict, cx));
                             }),
                     );
                 }
@@ -1125,7 +1124,7 @@ impl NativeRoot {
                 .variant(ButtonVariant::Ghost)
                 .on_press(move |window, cx| {
                     let id = open_id.clone();
-                    let _ = open_root.update(cx, |this, cx| this.open_mission(id, window, cx));
+                    open_root.update(cx, |this, cx| this.open_mission(id, window, cx));
                 }),
             );
             cards = cards.child(

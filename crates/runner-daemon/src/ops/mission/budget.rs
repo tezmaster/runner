@@ -723,7 +723,7 @@ pub fn mission_budgets(
             first_percent: first.used_percent,
             latest_percent: latest.used_percent,
             used_points: (state == BudgetState::Measured)
-                .then(|| latest.used_percent - first.used_percent),
+                .then_some(latest.used_percent - first.used_percent),
             first_read_at: first.read_at.clone(),
             latest_read_at: latest.read_at.clone(),
             readings: rows.len() as u32,
@@ -1568,7 +1568,7 @@ mod tests {
         );
         let mut conn = f.core.db.get().unwrap();
         let tx = conn.transaction().unwrap();
-        crate::ops::mission::delete_rows(&tx, &[m.clone()]).unwrap();
+        crate::ops::mission::delete_rows(&tx, std::slice::from_ref(&m)).unwrap();
         tx.commit().unwrap();
         let left: i64 = conn
             .query_row(

@@ -246,8 +246,8 @@ pub(super) fn build_chart(
             let group_value: f64 = members.iter().map(|call| value(call)).sum();
             let points = members
                 .iter()
-                .fold(Some(Pair::default()), |sum, call| {
-                    add_pair(sum, pair_of(call))
+                .try_fold(Pair::default(), |sum, call| {
+                    add_pair(Some(sum), pair_of(call))
                 })
                 .map(Pair::range);
             let tokens: i64 = members.iter().map(|call| token_total(call)).sum();
@@ -289,8 +289,8 @@ pub(super) fn build_chart(
                 rest_calls: rest.len(),
                 rest_points: rest
                     .iter()
-                    .fold(Some(Pair::default()), |sum, call| {
-                        add_pair(sum, pair_of(call))
+                    .try_fold(Pair::default(), |sum, call| {
+                        add_pair(Some(sum), pair_of(call))
                     })
                     .map(Pair::range),
                 rest_tokens: rest.iter().map(|call| token_total(call)).sum(),

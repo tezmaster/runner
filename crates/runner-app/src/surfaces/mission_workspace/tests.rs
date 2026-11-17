@@ -1592,9 +1592,9 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
     let mut visual = VisualTestContext::from_window(host.into(), &cx);
     visual.simulate_resize(size(px(960.), px(300.)));
     visual.run_until_parked();
-    for (view, viewport_selector, final_selector) in
-        [(PanelViewId::Info, "MISSION_META_SCROLL", "MISSION_META_END")]
     {
+        let (view, viewport_selector, final_selector) =
+            (PanelViewId::Info, "MISSION_META_SCROLL", "MISSION_META_END");
         host.update(&mut visual, |host, _, cx| {
             host.workspace
                 .update(cx, |workspace, _| workspace.rail_surfaces.open.open(view));

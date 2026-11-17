@@ -198,13 +198,16 @@ pub fn list_budget_samples(conn: &Connection, mission_id: &str) -> Result<Vec<Bu
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// A session's start, its stop (None while running) and whether it is live.
+pub type SessionSpan = (Option<String>, Option<String>, bool);
+
 /// The agent sessions that are not part of `mission_id`, on `runtime`: their
 /// start, their stop (None while running) and whether they are still live.
 pub fn other_sessions_on_runtime(
     conn: &Connection,
     mission_id: &str,
     runtime: &str,
-) -> Result<Vec<(Option<String>, Option<String>, bool)>> {
+) -> Result<Vec<SessionSpan>> {
     let mut stmt = conn.prepare(
         "SELECT started_at, stopped_at, status = 'running'
          FROM sessions

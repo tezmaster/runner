@@ -185,7 +185,7 @@ impl MissionWorkspace {
                     ButtonVariant::Outline
                 })
                 .on_press(move |_, cx| {
-                    let _ = root.update(cx, |this, cx| this.rate_mission(target, cx));
+                    root.update(cx, |this, cx| this.rate_mission(target, cx));
                 })
         };
 
@@ -426,7 +426,7 @@ impl MissionWorkspace {
                 })
                 .disabled(!enabled)
                 .on_press(move |_, cx| {
-                    let _ = root.update(cx, |this, cx| {
+                    root.update(cx, |this, cx| {
                         this.review.mode = target;
                         cx.notify();
                     });
@@ -488,7 +488,7 @@ impl MissionWorkspace {
                     .variant(ButtonVariant::Outline)
                     .on_press(move |_, cx| {
                         let handle = handle.clone();
-                        let _ = root.update(cx, |this, cx| {
+                        root.update(cx, |this, cx| {
                             // Opens the slot holding the largest call, or closes it again.
                             if !this.review.expanded.remove(&handle) {
                                 this.review.expanded.insert(handle);
@@ -706,7 +706,7 @@ fn slot_group(
     .variant(ButtonVariant::Outline)
     .on_press(move |_, cx| {
         let handle = handle.clone();
-        let _ = toggle_root.update(cx, |this, cx| {
+        toggle_root.update(cx, |this, cx| {
             if !this.review.expanded.remove(&handle) {
                 this.review.expanded.insert(handle);
             }
