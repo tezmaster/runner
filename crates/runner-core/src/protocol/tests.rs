@@ -521,6 +521,7 @@ record!(MissionStart {
     title,
     goal_override,
     cwd,
+    worktree,
     started_by_session_id,
     no_report
 });
@@ -638,6 +639,8 @@ record!(RuntimeCatalogOption {
     supported_efforts
 });
 variant!(RuntimeCommandSource => Self::Override);
+variant!(RuntimeSignInStatus => Self::SignedIn);
+variant!(RuntimeTaskKind => Self::Install);
 record!(RuntimeExecutableStatus {
     launch_options,
     name,
@@ -654,10 +657,15 @@ record!(RuntimeExecutableStatus {
     installed_version,
     available_version,
     min_version,
-    below_minimum
+    below_minimum,
+    sign_in
 });
 variant!(RuntimeRowState => Self::Detected);
-record!(RuntimeStatusResponse { shell, runtimes });
+record!(RuntimeStatusResponse {
+    shell,
+    runtimes,
+    npm_available
+});
 record!(RuntimeUsage { value, error });
 record!(Session {
     id,
@@ -747,10 +755,30 @@ record!(StartDirectSessionArgs {
     effort,
     speed,
     project_id,
-    cwd
+    cwd,
+    worktree,
+    scope,
+    cols,
+    rows,
+    initial_prompt
+});
+record!(OnboardingStatus {
+    completed,
+    completed_at,
+    has_crews
+});
+record!(StarterCrewSlotProposal {
+    handle,
+    display_name,
+    runtime
+});
+record!(StarterCrewProposal { name, slots });
+record!(CreateStarterCrewArgs {
+    default_runtime,
+    enabled_runtimes
 });
 record!(StartMissionOutput { mission, goal });
-variant!(Subject => Self::Mission(Sample::sample()));
+variant!(Subject => Self::RemoteChat { computer: Sample::sample(), session: Sample::sample() });
 variant!(TurnOutcome => Self::Completed);
 variant!(UnavailableReason => Self::SignIn);
 record!(UpdateCrewInput {
@@ -834,6 +862,49 @@ record!(WindowEntry {
     focused
 });
 variant!(WorkDetail => Self::UsingTools);
+impl Sample for files::WorktreeKind {
+    fn sample() -> Self {
+        Self::Linked
+    }
+}
+record!(WorktreeSpec { branch, base });
+record!(WorktreeDefaultBase {
+    branch,
+    main_checkout
+});
+variant!(WorktreeNameCheck => Self::NewBranch { base: Sample::sample(), path: Sample::sample() });
+record!(WorktreeItem {
+    path,
+    branch,
+    commit,
+    kind,
+    locked,
+    prunable,
+    managed
+});
+record!(WorktreeList {
+    main_checkout,
+    worktrees
+});
+record!(WorktreeCreated {
+    path,
+    branch,
+    main_checkout,
+    created
+});
+record!(WorktreeRemoved { path, branch });
+variant!(MissingWorktreeBranchState => Self::Surviving);
+variant!(WorktreeCheckout => Self::Git {
+    top: Sample::sample(),
+    main_checkout: Sample::sample(),
+    kind: files::WorktreeKind::sample(),
+    managed: Sample::sample(),
+    branch: Sample::sample(),
+    commit: Sample::sample(),
+    missing: Sample::sample(),
+    missing_branch: Sample::sample(),
+    candidate_branches: Sample::sample(),
+});
 #[test]
 fn a_full_file_index_of_the_costliest_paths_fits_a_frame() {
     for piece in ["\u{1}", "\"", "\\", "a"] {
@@ -1042,9 +1113,12 @@ impl Sample for files::FilesRootOutcome {
                 worktree: files::WorktreeKind::Linked,
                 branch: Some("feat/634".into()),
                 commit: None,
+                worktrees: Sample::sample(),
             }),
             cwd: Some("src/deep".into()),
             source: files::FilesRootSource::Saved,
+            own_checkout_top: Some(PathBuf::sample()),
+            removed_checkout: Some("feat/1345".into()),
         })
     }
 }
@@ -1080,6 +1154,7 @@ impl Sample for files::WorktreeEntry {
             kind: files::WorktreeKind::Main,
             locked: true,
             prunable: true,
+            uncommitted: Some(2),
         }
     }
 }
@@ -1125,8 +1200,28 @@ impl Sample for changes::ChangesCommits {
             branch: Sample::sample(),
             head_commit: Sample::sample(),
             base: Sample::sample(),
+            auto_base: Some("origin/main".into()),
+            base_missing: true,
             commits: Sample::sample(),
             total: Sample::sample(),
+            worktrees: Sample::sample(),
+        }
+    }
+}
+impl Sample for changes::RemoteBranches {
+    fn sample() -> Self {
+        Self {
+            remote: "origin".into(),
+            branches: vec!["origin/main".into(), "origin/feat/1345".into()],
+        }
+    }
+}
+impl Sample for changes::ChangesBranches {
+    fn sample() -> Self {
+        Self {
+            local: vec!["main".into(), "feat/1345".into()],
+            remotes: Sample::sample(),
+            upstream: Some("refs/remotes/origin/feat/1345".into()),
         }
     }
 }
@@ -1241,6 +1336,7 @@ impl Sample for changes::ChangesViewed {
 #[test]
 fn changes_variants_cross_json() {
     round_trip(changes::ChangesTarget::Uncommitted);
+    round_trip(changes::ChangesTarget::Branch);
     round_trip(changes::ChangesTarget::Commit("deadbeef".into()));
     round_trip(changes::DiffCounts::Binary);
     round_trip(changes::DiffBody::Binary {
@@ -1260,6 +1356,73 @@ fn changes_variants_cross_json() {
         new_commit: Some("def".into()),
     });
     round_trip(changes::ChangesViewed::sample());
+    round_trip(changes::ChangesBranches::sample());
+
+    let legacy_commits_req: Request = serde_json::from_value(serde_json::json!({
+        "changes_commits": { "root": "/repo" }
+    }))
+    .unwrap();
+    assert!(matches!(
+        legacy_commits_req,
+        Request::changes_commits { base: None, .. }
+    ));
+    let legacy_files_req: Request = serde_json::from_value(serde_json::json!({
+        "changes_files": { "root": "/repo", "target": { "kind": "branch" } }
+    }))
+    .unwrap();
+    assert!(matches!(
+        legacy_files_req,
+        Request::changes_files { base: None, .. }
+    ));
+    let legacy_diff_req: Request = serde_json::from_value(serde_json::json!({
+        "changes_diff": { "root": "/repo", "target": { "kind": "branch" }, "path": "a.rs" }
+    }))
+    .unwrap();
+    assert!(matches!(
+        legacy_diff_req,
+        Request::changes_diff { base: None, .. }
+    ));
+
+    let legacy_commits: changes::ChangesCommits = serde_json::from_value(serde_json::json!({
+        "checkout_top": "/repo",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "base": "origin/main",
+        "commits": [],
+        "total": 0
+    }))
+    .unwrap();
+    assert_eq!(legacy_commits.auto_base, None);
+    assert!(!legacy_commits.base_missing);
+    assert!(legacy_commits.worktrees.is_empty());
+
+    let legacy_worktree: files::WorktreeEntry = serde_json::from_value(serde_json::json!({
+        "path": "/repo",
+        "branch": "main",
+        "commit": "abc1234",
+        "kind": "main",
+        "locked": false,
+        "prunable": false
+    }))
+    .unwrap();
+    assert_eq!(legacy_worktree.uncommitted, None);
+
+    let legacy_root: files::FilesRoot = serde_json::from_value(serde_json::json!({
+        "path": "/repo",
+        "name": "repo",
+        "git": {
+            "top": "/repo",
+            "worktree": "main",
+            "branch": "main",
+            "commit": "abc1234"
+        },
+        "cwd": null,
+        "source": "own"
+    }))
+    .unwrap();
+    assert_eq!(legacy_root.own_checkout_top, None);
+    assert_eq!(legacy_root.removed_checkout, None);
+    assert!(legacy_root.git.unwrap().worktrees.is_empty());
 }
 
 impl Sample for RuntimeLaunchOptions {
@@ -1319,6 +1482,7 @@ variant!(RuntimeUpdateState => Self::Running);
 record!(RuntimeUpdateTask {
     id,
     runtime,
+    kind,
     from_version,
     to_version,
     state,
@@ -1328,3 +1492,103 @@ record!(RuntimeUpdateTask {
     installed_version,
     running_sessions
 });
+
+#[test]
+fn onboarding_and_install_protocol_fields_default_on_older_payloads() {
+    let legacy_task: RuntimeUpdateTask = serde_json::from_value(serde_json::json!({
+        "id": "task-1",
+        "runtime": "codex",
+        "from_version": "0.1.0",
+        "to_version": "0.2.0",
+        "state": "running",
+        "step": "Updating",
+        "message": null,
+        "exit_code": null,
+        "installed_version": null,
+        "running_sessions": 0
+    }))
+    .unwrap();
+    assert_eq!(legacy_task.kind, RuntimeTaskKind::Update);
+
+    let legacy_status: RuntimeStatusResponse = serde_json::from_value(serde_json::json!({
+        "shell": ShellDiscoveryStatus::sample(),
+        "runtimes": [{
+            "name": "claude-code",
+            "display_name": "Claude Code",
+            "command": "claude",
+            "default_model": null,
+            "default_effort": null,
+            "detected_path": null,
+            "override_path": null,
+            "effective_command": null,
+            "effective_source": null,
+            "state": "not_found",
+            "invalid_reason": null,
+            "installed_version": null,
+            "available_version": null
+        }]
+    }))
+    .unwrap();
+    assert!(!legacy_status.npm_available);
+    assert_eq!(
+        legacy_status.runtimes[0].sign_in,
+        RuntimeSignInStatus::Unknown
+    );
+
+    let legacy_direct: StartDirectSessionArgs =
+        serde_json::from_value(serde_json::json!({"runtime": "codex"})).unwrap();
+    assert_eq!(legacy_direct.scope, None);
+    assert_eq!(legacy_direct.worktree, None);
+    assert_eq!(legacy_direct.cols, None);
+    assert_eq!(legacy_direct.rows, None);
+    assert_eq!(legacy_direct.initial_prompt, None);
+
+    let legacy_mission_input: StartMissionInput = serde_json::from_value(serde_json::json!({
+        "crew_id": "c1",
+        "title": "legacy mission"
+    }))
+    .unwrap();
+    assert_eq!(legacy_mission_input.worktree, None);
+    assert_eq!(MissionStart::from(legacy_mission_input).worktree, None);
+
+    let legacy_shell: Request = serde_json::from_value(serde_json::json!({
+        "session_start_shell_in": {
+            "scope": "Infer",
+            "cwd": null,
+            "cols": null,
+            "rows": null
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        legacy_shell,
+        Request::session_start_shell_in { worktree: None, .. }
+    ));
+}
+
+#[test]
+fn window_subjects_preserve_adjacently_tagged_shapes_across_local_and_remote_variants() {
+    for (subject, expected) in [
+        (
+            Subject::Mission("m1".into()),
+            serde_json::json!({"type": "Mission", "value": "m1"}),
+        ),
+        (
+            Subject::DirectChat("s1".into()),
+            serde_json::json!({"type": "DirectChat", "value": "s1"}),
+        ),
+        (
+            Subject::RemoteChat {
+                computer: "host-a".into(),
+                session: "s1".into(),
+            },
+            serde_json::json!({
+                "type": "RemoteChat",
+                "value": {"computer": "host-a", "session": "s1"}
+            }),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&subject).unwrap(), expected);
+        round_trip(subject);
+    }
+}

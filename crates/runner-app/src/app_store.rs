@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash as _, Hasher as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,20 +36,22 @@ impl Global for GlobalAppStore {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StoreRefreshKind {
+    Windows,
     Activity,
     Nodes,
     Missions,
     Runtimes,
+    Onboarding,
     All,
 }
 
 impl StoreRefreshKind {
     pub(crate) fn for_event(event: &AppEvent) -> Option<Self> {
         match event.name.as_str() {
+            "window_focus_map" => Some(Self::Windows),
             "runtime/changed" => Some(Self::Runtimes),
-            "claude_accounts/changed" | "usage/updated" | "window_focus_map" | "session/status" => {
-                Some(Self::Activity)
-            }
+            "onboarding/changed" => Some(Self::Onboarding),
+            "claude_accounts/changed" | "usage/updated" | "session/status" => Some(Self::Activity),
             "chat/tab-attention-changed" | "chat/layout-changed" => Some(Self::Nodes),
             "event/appended"
                 if event
@@ -120,6 +122,7 @@ pub(crate) struct StoreRevisions {
     pub(crate) full_refresh: u64,
     pub(crate) error: u64,
     pub(crate) restart: u64,
+    pub(crate) onboarding: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -328,6 +331,7 @@ pub(crate) struct AppStore {
     pub(crate) nodes: Vec<NodeRow>,
     pub(crate) projects: Vec<ProjectRow>,
     pub(crate) missions: Vec<MissionSummary>,
+    pub(crate) mission_sessions: BTreeMap<String, Vec<runner_core::protocol::SessionRow>>,
     pub(crate) session_statuses: BTreeMap<String, runner_core::protocol::status::AgentStatus>,
     pub(crate) session_activity: BTreeMap<String, SessionActivityState>,
     mission_agent_ids: std::collections::BTreeSet<String>,
@@ -340,6 +344,7 @@ pub(crate) struct AppStore {
     pub(crate) claude_accounts: runner_core::protocol::ClaudeAccounts,
     pub(crate) claude_account_usage: BTreeMap<String, runner_core::protocol::RuntimeUsage>,
     pub(crate) file_link_environment: (String, std::collections::HashMap<String, bool>),
+    pub(crate) onboarding: runner_core::protocol::OnboardingStatus,
     command_install_support: Option<CommandInstallSupport>,
     runner_command_status: Option<runner_core::command_install::RunnerCommandStatus>,
     command_install_requires_escalation: bool,
@@ -600,6 +605,7 @@ impl AppStore {
                         }
                         if entity_refresh.crews() {
                             this.refresh_crews_inner();
+                            this.refresh_onboarding_inner();
                         }
                         cx.notify();
                     })
@@ -716,6 +722,7 @@ impl AppStore {
             nodes: Vec::new(),
             projects: Vec::new(),
             missions: Vec::new(),
+            mission_sessions: BTreeMap::new(),
             session_statuses: BTreeMap::new(),
             session_activity: BTreeMap::new(),
             mission_agent_ids: Default::default(),
@@ -728,6 +735,7 @@ impl AppStore {
             claude_accounts: Default::default(),
             claude_account_usage: Default::default(),
             file_link_environment: Default::default(),
+            onboarding: Default::default(),
             command_install_support,
             runner_command_status: None,
             command_install_requires_escalation: false,
@@ -757,11 +765,24 @@ impl AppStore {
         store.refresh_missions_blocking_inner();
         store.refresh_activity_inner();
         store.refresh_render_snapshots();
+        store.refresh_onboarding_inner();
         store.collecting_startup_errors = false;
         store
     }
 
     pub(crate) fn refresh(&mut self, refresh: StoreRefreshKind, cx: &mut Context<Self>) {
+        if refresh == StoreRefreshKind::Windows {
+            self.window_entries = self.client.window_snapshot().unwrap_or_default();
+            self.revisions.activity = self.revisions.activity.wrapping_add(1);
+            cx.notify();
+            return;
+        }
+        if matches!(
+            refresh,
+            StoreRefreshKind::Onboarding | StoreRefreshKind::All
+        ) {
+            self.refresh_onboarding_inner();
+        }
         if matches!(refresh, StoreRefreshKind::Runtimes | StoreRefreshKind::All) {
             self.initialize_mcp_removal();
             self.initialize_skill_defaults();
@@ -787,8 +808,11 @@ impl AppStore {
                 let _ = weak.update(cx, |this, cx| {
                     match result {
                         Ok(missions) => {
-                            match mission_agent_ids(&core, &missions) {
-                                Ok(ids) => this.mission_agent_ids = ids,
+                            match mission_sessions_and_agent_ids(&core, &missions) {
+                                Ok((ids, sessions)) => {
+                                    this.mission_agent_ids = ids;
+                                    this.mission_sessions = sessions;
+                                }
                                 Err(error) => this.record_error(error.to_string()),
                             }
                             this.missions = missions;
@@ -953,7 +977,7 @@ impl AppStore {
         }
     }
 
-    fn refresh_roles_inner(&mut self) {
+    pub(crate) fn refresh_roles_inner(&mut self) {
         match self.client.role_list() {
             Ok(roles) => {
                 self.roles = roles;
@@ -963,7 +987,7 @@ impl AppStore {
         }
     }
 
-    fn refresh_crews_inner(&mut self) {
+    pub(crate) fn refresh_crews_inner(&mut self) {
         let result = self.client.crew_list_all();
         match result {
             Ok(crews) => {
@@ -971,6 +995,23 @@ impl AppStore {
                 self.revisions.crews = self.revisions.crews.wrapping_add(1);
             }
             Err(error) => self.record_error(error.to_string()),
+        }
+    }
+
+    pub(crate) fn onboarding_completed(&self) -> bool {
+        self.onboarding.completed
+    }
+
+    pub(crate) fn has_crews(&self) -> bool {
+        self.onboarding.has_crews || !self.crews.is_empty()
+    }
+
+    pub(crate) fn refresh_onboarding_inner(&mut self) {
+        if let Ok(next) = self.client.onboarding_status() {
+            if self.onboarding != next {
+                self.onboarding = next;
+                self.revisions.onboarding = self.revisions.onboarding.wrapping_add(1);
+            }
         }
     }
 
@@ -999,8 +1040,11 @@ impl AppStore {
     fn refresh_missions_blocking_inner(&mut self) {
         match self.client.mission_list_summary_impl(None) {
             Ok(missions) => {
-                match mission_agent_ids(&self.client, &missions) {
-                    Ok(ids) => self.mission_agent_ids = ids,
+                match mission_sessions_and_agent_ids(&self.client, &missions) {
+                    Ok((ids, sessions)) => {
+                        self.mission_agent_ids = ids;
+                        self.mission_sessions = sessions;
+                    }
                     Err(error) => self.record_error(error.to_string()),
                 }
                 self.missions = missions;
@@ -1008,6 +1052,12 @@ impl AppStore {
             }
             Err(error) => self.record_error(error.to_string()),
         }
+    }
+
+    pub(crate) fn live_terminal_cwd(&self, session_id: &str) -> Option<&Path> {
+        self.terminal_labels
+            .get(session_id)
+            .and_then(|(_, cwd, _)| cwd.as_deref())
     }
 
     pub(crate) fn working_agent_count(&self) -> usize {
@@ -1084,19 +1134,27 @@ impl AppStore {
     }
 }
 
-fn mission_agent_ids(
+type MissionSessionIndex = (
+    BTreeSet<String>,
+    BTreeMap<String, Vec<runner_core::protocol::SessionRow>>,
+);
+
+fn mission_sessions_and_agent_ids(
     client: &DaemonClient,
     missions: &[MissionSummary],
-) -> runner_core::protocol::ClientResult<std::collections::BTreeSet<String>> {
+) -> runner_core::protocol::ClientResult<MissionSessionIndex> {
     let mut ids = std::collections::BTreeSet::new();
+    let mut by_mission = BTreeMap::new();
     for mission in missions {
-        for row in client.session_list(&mission.mission.id)? {
+        let rows = client.session_list(&mission.mission.id)?;
+        for row in &rows {
             if row.runtime != "shell" {
-                ids.insert(row.session.id);
+                ids.insert(row.session.id.clone());
             }
         }
+        by_mission.insert(mission.mission.id.clone(), rows);
     }
-    Ok(ids)
+    Ok((ids, by_mission))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1361,6 +1419,10 @@ mod tests {
     #[test]
     fn refresh_kinds_preserve_each_data_dependency() {
         assert_eq!(
+            StoreRefreshKind::for_event(&event("window_focus_map")),
+            Some(StoreRefreshKind::Windows)
+        );
+        assert_eq!(
             StoreRefreshKind::for_event(&event("session/status")),
             Some(StoreRefreshKind::Activity)
         );
@@ -1375,6 +1437,10 @@ mod tests {
         assert_eq!(
             StoreRefreshKind::for_event(&event("session/fork-started")),
             Some(StoreRefreshKind::All)
+        );
+        assert_eq!(
+            StoreRefreshKind::for_event(&event("onboarding/changed")),
+            Some(StoreRefreshKind::Onboarding)
         );
         assert_eq!(StoreRefreshKind::for_event(&event("unrelated")), None);
     }

@@ -768,6 +768,7 @@ mod tests {
                     title: "Budget".into(),
                     goal_override: None,
                     cwd: Some("/tmp".into()),
+                    worktree: None,
                     started_by_session_id: None,
                     no_report: false,
                 },

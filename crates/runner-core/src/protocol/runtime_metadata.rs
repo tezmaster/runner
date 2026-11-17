@@ -897,8 +897,8 @@ pub mod opencode {
     pub fn catalog() -> Option<RuntimeCatalog> {
         Some(RuntimeCatalog {
             name: Runtime::OpenCode,
-            min_version: None,
-            display_name: "OpenCode",
+            min_version: Some("2.0.0"),
+            display_name: Runtime::OpenCode.display_name(),
             command: "opencode",
             capabilities: RuntimeCapabilities {
                 effort_needs_launch_model: true,
@@ -906,7 +906,7 @@ pub mod opencode {
             },
             native_fork: false,
             description: "OpenCode v2 CLI (native smoke pending)",
-            install_url: "https://opencode.ai",
+            install_url: "https://opencode.ai/v2/docs",
             default_enabled: true,
             models: vec![default_model_option()],
             efforts: vec![default_effort()],
@@ -953,21 +953,20 @@ impl RuntimeMetadata {
     pub fn catalog(&self) -> Option<RuntimeCatalog> {
         catalog_for(self.0)
     }
-    /// Whether the composer reliably accepts and submits input typed during a turn, which the
-    /// agent then reads at its next tool call. Only a runtime shown to do so may be sent a
-    /// mission notice while it works; every other one waits for idle, because a notice typed
-    /// into a busy composer can sit unsubmitted there (#753, #1075).
-    pub fn queues_input_mid_turn(&self) -> bool {
+    /// Whether Enter during a busy turn submits composer input without cancelling, restarting
+    /// or corrupting the turn. Codex without steer accepts it for the next turn instead.
+    /// Runtimes that leave the text unsubmitted stay idle-only.
+    pub fn accepts_input_mid_turn(&self) -> bool {
         match self.0 {
-            Runtime::ClaudeCode => true,
-            Runtime::Codex
-            | Runtime::Antigravity
-            | Runtime::Copilot
+            Runtime::ClaudeCode
+            | Runtime::Codex
             | Runtime::Pi
+            | Runtime::Antigravity
+            | Runtime::OpenCode => true,
+            Runtime::Copilot
             | Runtime::Trae
             | Runtime::Cursor
             | Runtime::Grok
-            | Runtime::OpenCode
             | Runtime::Muse
             | Runtime::Shell => false,
         }
@@ -1108,16 +1107,23 @@ mod mid_turn_tests {
     use super::*;
 
     #[test]
-    fn only_claude_code_is_marked_for_mid_turn_delivery() {
+    fn only_qualifying_runtimes_accept_input_mid_turn() {
         for runtime in Runtime::ALL {
             assert_eq!(
-                for_key(runtime.key()).queues_input_mid_turn(),
-                runtime == Runtime::ClaudeCode,
+                for_key(runtime.key()).accepts_input_mid_turn(),
+                matches!(
+                    runtime,
+                    Runtime::ClaudeCode
+                        | Runtime::Codex
+                        | Runtime::Pi
+                        | Runtime::Antigravity
+                        | Runtime::OpenCode
+                ),
                 "{runtime:?}"
             );
         }
         for key in ["shell", "unknown", ""] {
-            assert!(!for_key(key).queues_input_mid_turn(), "{key}");
+            assert!(!for_key(key).accepts_input_mid_turn(), "{key}");
         }
     }
 }

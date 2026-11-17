@@ -32,13 +32,15 @@
 </p>
 
 <p align="center">
-  <img src="assets/hero.png" alt="Runner 起始页 — 一个启动器启动最近用过的 agent 和角色、终端或 crew mission" width="100%" />
+  <img src="assets/mission_feed.png" alt="Runner mission 工作区 — 共享 mission feed 中 @coder 将改动移交给 @reviewer，右侧是实时 crew 会话卡片" width="100%" />
 </p>
 
 <p align="center">
-  <a href="#功能">功能</a>
-  ·
   <a href="#演示">演示</a>
+  ·
+  <a href="#移动端">移动端</a>
+  ·
+  <a href="#功能">功能</a>
   ·
   <a href="#支持的-agent">Agent</a>
   ·
@@ -51,110 +53,47 @@
   <a href="./CONTRIBUTING.md">参与贡献</a>
 </p>
 
-> Alpha · 原生支持 macOS（Apple Silicon 和 Intel）和 Windows（x64），Linux（ARM64、x86_64）处于 beta 阶段。
-
-Linux 支持自 Runner 0.18.2 起进入 beta：提供 ARM64 和 x86_64 的签名 `.deb` 与 tarball 包，并支持应用内更新。目前已在 Ubuntu 26.04 ARM64 虚拟机上试用，原生硬件、x86_64 和其他发行版尚未验证。请参阅 [Linux 构建与安装说明](docs/arch/linux.md) 和 [验证状态](docs/tests/archive/823-linux-support.md)。
+> 原生支持 macOS（Apple Silicon 和 Intel）和 Windows（x64），Linux（ARM64、x86_64）处于 beta 阶段。
 
 Runner 让命令行编码 agent 通过可复用的 crew、真实终端和共享 mission feed 一起工作。会话和历史记录都保存在你的机器上。
 
+## 演示
+
+从第一次打开开始：设置会找到你的 agent 并组建入门 crew，mission 在真实终端里运行并向你提问，你在侧边栏查看改动，还能在手机上继续跟进。
+
+https://github.com/user-attachments/assets/a45d2440-da17-4be4-8de5-0902f59eb1da
+
+## 移动端
+
+**Runner iOS 版**已开放公开 TestFlight：[通过 TestFlight 加入 →](https://testflight.apple.com/join/CRdfZzmS)
+
+在 iPhone 上查看已配对电脑的实时终端、发起 chat 和 mission，随时回复你的 crew。
+
+> **需要内测资格：** 仅安装 TestFlight 应用目前还无法直接使用——登录并连接电脑需要已获邀请的内测账号，因为中继服务器仍处于内测阶段（目前仅面向中国大陆，海外地区的 Tailscale 支持正在开发中）。[前往官方网站加入内测候补名单 →](https://runnersh.dev/zh-CN/beta/)
+
+<p align="center">
+  <img src="assets/ios-sessions-0.1.0.png" alt="Runner iOS 版的项目概览，展示会话和嵌套的 mission" width="250" />
+  &nbsp;&nbsp;
+  <img src="assets/ios-mission-feed-0.1.0.png" alt="Runner iOS 版的 mission feed，展示等待你回答的 crew 问题" width="250" />
+  &nbsp;&nbsp;
+  <img src="assets/ios-terminal-0.1.0.png" alt="Runner iOS 版的实时 agent 终端与快捷按键" width="250" />
+</p>
+
 ## 功能
 
-<table>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/crews.png"><img src="assets/crews.png" alt="Crew 详情页展示 coder 和 reviewer 槽位、单槽位配置覆盖和共享团队约定" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>可复用的 Crew</h3>
-      <p>把保存的角色组合成 crew，并设定共享的团队约定。查看各槽位使用的 agent 和模型，按需覆盖配置，之后随时用同一支团队发起 mission。</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/mission_feed.png"><img src="assets/mission_feed.png" alt="mission feed 中的目标和 coder 交给 reviewer 的评审请求，旁边是 crew 的会话卡片" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>Mission 与协作</h3>
-      <p>每个 mission 为 crew 的各个槽位提供实时终端和共享 feed，agent 在这里协作，需要你决定的问题也会出现在这里。单个槽位可以单独停止、恢复或重启，不影响其他槽位。<a href="./docs/arch/arch.md">架构 →</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/mission-link-reports.png"><img src="assets/mission-link-reports.png" alt="Claude Code chat 收到两条 [runner] 汇报并逐条回答，两个 mission 分组显示在侧边栏的 chat 下面" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>Mission 向 chat 汇报</h3>
-      <p>从 chat 启动的 mission 会关联到这个 chat，并在侧边栏归到它下面，agent 可以直接结束这一轮，不用再盯着。mission 需要你处理、失败或进入稳定状态时，Runner 会向 chat 输入一行提示，agent 再去读 mission 发生了什么。别处启动的 mission 也可以拖到 chat 上关联。<a href="./docs/guide/zh-CN/concepts/missions.md#关联聊天与汇报">关联聊天与汇报 →</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/remote_control.png"><img src="assets/remote_control.png" alt="侧边栏底部的主机按钮已展开，这台 Mac 排在首位，下面是同一账号下的其他电脑" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>远程控制</h3>
-      <p>在侧边栏切换到另一台电脑，操作它的实时终端、发起 chat 和 mission，随时回复 crew。连接采用端到端加密。<a href="./docs/guide/guides/remote-access.md">远程访问指南 →</a></p>
-      <p><strong>内测中：</strong>需要邀请码，目前仅限中国大陆使用。</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/mission_terminal.png"><img src="assets/mission_terminal.png" alt="mission 里一个槽位自己的终端：coder 的 Claude Code 会话，旁边是 crew 的会话卡片" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>真实终端</h3>
-      <p>每个 agent 都在真实 PTY 里保留自己的 TUI，跑在 GPU 绘制的 <code>alacritty_terminal</code> 网格上：鼠标上报、输入法（包括拼音）、文件路径粘贴和点击打开，每个 mission 下面还有一个终端抽屉。</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/chat_split.png"><img src="assets/chat_split.png" alt="一个标签页分成四栏：Codex、Claude Code、Grok 和 pi，每栏各自是一个岛屿" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>分栏与多窗口</h3>
-      <p>标签页可以一直分栏到窗口放不下为止，拖动各栏重新排列，把标签页归进文件夹，用 <code>⇧⌘N</code> 或 <code>Ctrl+Shift+N</code> 打开更多窗口。</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <a href="assets/files_view.png"><img src="assets/files_view.png" alt="Claude Code chat 旁边是侧面板的 Files 视图：worktree 的文件树带着 git 状态，一个文件在标签页中打开" width="100%" /></a>
-    </td>
-    <td width="50%" valign="middle">
-      <h3>在 agent 旁边看文件</h3>
-      <p>侧面板的 Files 视图显示 agent 所在的 checkout 及其 git 状态，不离开 Runner 就能看清改了什么：代码带语法高亮，Markdown 直接渲染，<code>⇧⌘O</code> 按文件名查找。在终端里 ⌘-点击文件路径，会在对应行打开。文件只读，编辑仍交给 agent 和你的编辑器。<a href="./docs/guide/zh-CN/guides/chats-and-windows.md#在侧面板中浏览文件">文件指南 →</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="middle">
-      <pre><code>runner crew list
-runner mission start \
-  --crew "Pair coding crew" \
-  --title "Fix the login bug" \
-  --goal-file brief.md
-runner mission feed &lt;mission-id&gt; --follow
-runner help agents</code></pre>
-    </td>
-    <td width="50%" valign="middle">
-      <a name="runner-cli"></a>
-      <h3><code>runner</code> 命令行</h3>
-      <p>你的 agent、脚本和终端都能通过 <code>runner</code> 命令发起 chat、启动 crew、跟踪 mission，应用关闭时也照样可用。加上 <code>--json</code> 即可输出机器可读的结果。Runner 会为检测到的 agent 安装 skill，让它们也能直接驱动 Runner。<a href="./docs/guide/guides/drive-runner-from-agents.md">CLI 指南 →</a></p>
-    </td>
-  </tr>
-</table>
-
-**更多功能：**
-
+- **可复用的 Crew** — 把保存的角色组合成 crew，设定共享的团队约定，按需覆盖各槽位的 agent 和模型配置，随时用同一支团队发起 mission。
+- **Mission 与协作** — 每个 mission 为 crew 的各个槽位提供实时终端和共享 feed，agent 在这里协作，需要你决定的问题也会出现在这里。单个槽位可以单独停止、恢复或重启，不影响其他槽位。[架构 →](./docs/arch/arch.md)
+- **Mission 向 chat 汇报** — 从 chat 启动的 mission 会关联到这个 chat，并在侧边栏归到它下面，agent 可以直接结束这一轮，不用再盯着。mission 需要你处理、失败或进入稳定状态时，Runner 会向 chat 输入一行提示，agent 再去读 mission 发生了什么。[关联聊天与汇报 →](./docs/guide/zh-CN/concepts/missions.md#关联聊天与汇报)
+- **远程控制** — 在侧边栏切换到另一台电脑，或从 iPhone 连接，操作实时终端、发起 chat 和 mission，随时回复 crew，连接采用端到端加密。由于中继服务器目前处于仅面向中国大陆的内测阶段，远程控制整体仍在内测中；海外用户的 Tailscale 支持正在开发中。[加入内测候补名单 →](https://runnersh.dev/zh-CN/beta/) · [远程访问指南 →](./docs/guide/guides/remote-access.md)
+- **真实终端** — 每个 agent 都在真实 PTY 里保留自己的 TUI，跑在 GPU 绘制的 `alacritty_terminal` 网格上：鼠标上报、输入法（包括拼音）、文件路径粘贴和点击打开，每个 mission 下面还有一个终端抽屉。
+- **分栏与多窗口** — 标签页可以一直分栏到窗口放不下为止，拖动各栏重新排列，把标签页归进文件夹，用 `⇧⌘N` 或 `Ctrl+Shift+N` 打开更多窗口。
+- **在 agent 旁边看文件** — 侧面板的 Files 视图显示 agent 所在的 checkout 及其 git 状态，不离开 Runner 就能看清改了什么：代码带语法高亮，Markdown 直接渲染，`⇧⌘O` 按文件名查找，在终端里 `⌘`-点击文件路径即可在对应行打开。[文件指南 →](./docs/guide/zh-CN/guides/chats-and-windows.md#在侧面板中浏览文件)
+- <a id="runner-cli"></a>**`runner` 命令行** — 你的 agent、脚本和终端都能通过 `runner` 命令发起 chat、启动 crew、跟踪 mission，应用关闭时也照样可用（支持 `--json` 输出）。Runner 会为检测到的 agent 安装 skill，让它们也能直接驱动 Runner。[CLI 指南 →](./docs/guide/guides/drive-runner-from-agents.md)
 - **Runner 关闭后 agent 照样工作** — 会话跑在 Runner 的后台服务 `runnerd` 里。退出应用或者应用崩溃，重新打开后会接回同一批正在运行的终端；停止的 agent 会在下次启动时各自接着原来的对话。
 - **在一个地方管理 MCP 服务与技能** — **Settings → MCP** 和 **Settings → Skills** 按 agent 列出它自己的配置，可以按 agent 单独关掉某一项，只改动你碰过的那一条。
 - **桌面通知** — agent 需要输入、完成一轮回复或失败时收到通知，点击即可打开对应的 chat 或 mission。在 **Settings → Notifications** 中选择通知事件。
 - **项目** — 绑定一次工作目录；在项目里发起的 chat 和 mission 会继承它的 cwd，并在侧边栏里归在一起。
 - **浅色与深色** — Runner Light 与 Runner，外加 Catppuccin、Rosé Pine、Tokyo Night、Gruvbox 与 Solarized，为每种模式选择一个主题即可同时设置应用和终端配色。Claude Code 会实时跟着切换。
-
-## 演示
-
-快速展示可复用角色、crew 配置、终端分屏，以及 mission 中 coder、reviewer 和 QA 的协作。
-
-https://github.com/user-attachments/assets/c2209015-1497-403a-98bd-cdc5502bee47
 
 ## 支持 Runner
 
@@ -168,13 +107,17 @@ https://github.com/user-attachments/assets/c2209015-1497-403a-98bd-cdc5502bee47
 - 加入 [Runner Discord](https://discord.gg/6BrfZdHKNf)，交流使用问题、工作流、Bug 和代码贡献。
 - Bug 和功能建议：[GitHub Issues](https://github.com/yicheng47/runner/issues)。
 - 感谢 [LINUX DO](https://linux.do) 社区提供交流与开源推广平台。
-- 扫码加入 Runner 微信用户群。群二维码 7 天过期，如果扫码提示失效，请[提一个 issue](https://github.com/yicheng47/runner/issues/new) 提醒我更新。
+- 扫码加入 Runner 微信用户群，交流使用问题、工作流和反馈。二维码于 2026-11-17 更新，7 天后过期；如果扫码提示失效，请[提一个 issue](https://github.com/yicheng47/runner/issues/new) 提醒我更新。
 
 <img src="assets/wechat_group_qr.png" alt="Runner 微信用户群二维码" width="200" />
 
 ## 支持的 Agent
 
-Runner 集成了 **Codex、Claude Code、Antigravity CLI、GitHub Copilot CLI、pi、Cursor、Grok Build 和 OpenCode v2**。**TRAE CLI** 可按需启用。各 agent 的功能和平台支持有所不同。
+**一级支持：** Claude Code、Codex、Antigravity CLI、Grok Build 和 pi。Runner 针对这些 agent 开发和测试。
+
+**社区支持：** GitHub Copilot CLI、Cursor、OpenCode v2 和 TRAE CLI（按需启用）。它们可以运行聊天和任务，Runner 依靠使用者发现问题，遇到故障请[提交 issue](https://github.com/yicheng47/runner/issues/new)。
+
+各 agent 的功能和平台支持有所不同。
 
 [Agent 安装、功能对比与平台说明 →](./docs/guide/reference/supported-agents.md)
 

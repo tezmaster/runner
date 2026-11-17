@@ -26,6 +26,7 @@ pub mod crew;
 pub mod mcp;
 pub mod mission;
 pub mod node;
+pub mod onboarding;
 pub mod project;
 pub mod role;
 pub mod runtime;
@@ -36,5 +37,7 @@ pub mod window;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_tests;
 
 pub mod runtime_tasks;

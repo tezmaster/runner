@@ -49,6 +49,7 @@ mod capture;
 mod direct_spawn;
 mod events;
 mod fork;
+mod input_writer;
 mod lifecycle;
 mod mission_spawn;
 mod output;
@@ -128,6 +129,8 @@ struct SessionHandle {
     /// cleanup stalled — observed live as a stuck "Archiving…" pill
     /// on the chat page.
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// This process's PTY input; dropping the handle drops whatever it has not written.
+    input: input_writer::InputQueue,
 }
 
 #[cfg(windows)]
@@ -213,7 +216,7 @@ struct SessionState {
     controller: terminal::Controller,
     terminal: Option<Arc<runner_terminal::terminal::TerminalModel>>,
     terminal_started_at: Option<terminal::TerminalStartedAt>,
-    terminal_input: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    terminal_input: Option<terminal::TerminalInput>,
     terminal_input_worker: Option<thread::JoinHandle<()>>,
     subscribers: Vec<(u64, Arc<terminal::FrameQueue>)>,
     companion_terminals: Vec<Weak<terminal::CompanionTerminal>>,
@@ -285,16 +288,20 @@ impl SessionState {
                 _ => R::Drafting,
             };
         }
+        // Preserve Claude Code's existing queueing during a synthetic Busy, but every newly
+        // qualifying runtime must keep its unconfirmed-submit hold.
+        if self.model.unconfirmed_busy()
+            && (report || self.delivery_runtime != Runtime::ClaudeCode.key())
+        {
+            return R::Unconfirmed;
+        }
         let idle = self.model.activity() == Some(SessionActivityState::Idle);
         if !idle
             && !report
             && runner_core::protocol::runtime_metadata::for_key(&self.delivery_runtime)
-                .queues_input_mid_turn()
+                .accepts_input_mid_turn()
         {
             return R::Working;
-        }
-        if self.model.unconfirmed_busy() {
-            return R::Unconfirmed;
         }
         R::Ready { idle }
     }
@@ -338,6 +345,7 @@ pub struct SessionManager {
     /// way Terminal.app's children would (issues #109 / #152).
     shell_env: Arc<RwLock<crate::shell_path::LoginShellEnv>>,
     discovery_state: crate::runtime_status::SharedDiscoveryState,
+    runtime_events: RwLock<Option<crate::events::EventChannel>>,
     launch_gate: Mutex<Option<Instant>>,
     /// Cancellation flags for in-flight background mission spawns,
     /// keyed by `mission_id`. `mission_start` registers a fresh flag
@@ -358,6 +366,7 @@ pub struct SessionManager {
     pub(crate) session_end: Arc<windows_shutdown::SessionEnd>,
     resize_settle_ms: AtomicU64,
     resize_generation: AtomicU64,
+    input_deadline_ms: AtomicU64,
     terminal_palette: Mutex<runner_terminal::palette::TerminalPalette>,
     terminal_control: Mutex<terminal::ControlState>,
     #[cfg(test)]
@@ -459,6 +468,10 @@ impl SessionManager {
         *self.hook_endpoint.write().unwrap() = Some(endpoint);
     }
 
+    pub fn set_runtime_events(&self, events: crate::events::EventChannel) {
+        *self.runtime_events.write().unwrap() = Some(events);
+    }
+
     pub(crate) fn admit_hook(
         &self,
         report: runner_core::protocol::HookReport,
@@ -477,6 +490,7 @@ impl SessionManager {
             delivery_listeners: Mutex::new(HashMap::new()),
             shell_env,
             discovery_state,
+            runtime_events: RwLock::new(None),
             launch_gate: Mutex::new(None),
             pending_mission_cancels: Mutex::new(HashMap::new()),
             runtime,
@@ -486,6 +500,7 @@ impl SessionManager {
             session_end: Arc::default(),
             resize_settle_ms: AtomicU64::new(RESIZE_SETTLE_MS),
             resize_generation: AtomicU64::new(0),
+            input_deadline_ms: AtomicU64::new(input_writer::INPUT_WRITE_DEADLINE.as_millis() as u64),
             terminal_palette: Mutex::new(runner_terminal::palette::RUNNER),
             terminal_control: Mutex::default(),
             #[cfg(test)]
@@ -529,6 +544,38 @@ impl SessionManager {
     #[cfg(test)]
     pub(crate) fn set_resize_settle_ms(&self, ms: u64) {
         self.resize_settle_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Applies to the writers of handles that have not written input yet.
+    #[cfg(test)]
+    pub(crate) fn set_input_deadline(&self, deadline: Duration) {
+        self.input_deadline_ms
+            .store(deadline.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_queued_input(&self, session_id: &str, queued: usize) {
+        self.test_input_writer(session_id).wait_until_queued(queued);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_idle_input(&self, session_id: &str) {
+        self.test_input_writer(session_id).wait_until_idle();
+    }
+
+    #[cfg(test)]
+    fn test_input_writer(&self, session_id: &str) -> Arc<input_writer::InputWriter> {
+        let state = self.session_state(session_id).expect("session state");
+        let state = state.lock().unwrap();
+        self.input_writer(state.handle.as_ref().expect("live session"))
+    }
+
+    fn input_writer(&self, handle: &SessionHandle) -> Arc<input_writer::InputWriter> {
+        handle.input.writer(
+            &self.runtime,
+            &handle.runtime_session,
+            Duration::from_millis(self.input_deadline_ms.load(Ordering::Relaxed)),
+        )
     }
 }
 

@@ -19,14 +19,14 @@ use alacritty_terminal::term::{point_to_viewport, viewport_to_point, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use gpui::{
     fill, outline, point, px, relative, size, AnyTooltip, AnyView, App, Bounds, ClipboardItem,
-    ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementInputHandler, Entity,
-    FocusHandle, Font, FontFallbacks, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton as GpuiMouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine,
-    SharedString, Style, Task, TextAlign, TextRun, UnderlineStyle, Window,
+    ContentMask, Context, CursorStyle, DispatchPhase, Element, Entity, FocusHandle, Font,
+    FontFallbacks, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, Style, Task, TextAlign,
+    TextRun, UnderlineStyle, Window,
 };
 
-use runner_app::terminal_ime::TerminalInput;
+use runner_app::terminal_ime::{TerminalInput, TerminalInputHandler};
 use runner_app::terminal_resize::{
     size_push_verdict, terminal_grid_size, SizePushVerdict, TerminalGridSize,
 };
@@ -773,6 +773,21 @@ fn wants_text_presentation(c: char, wide: bool, zerowidth: Option<&[char]>) -> b
     !wide && !c.is_ascii() && !zerowidth.is_some_and(|zw| zw.contains(&'\u{fe0f}'))
 }
 
+/// The text shaped for a cell, or `None` when the cell draws nothing.
+/// alacritty stores `'\t'` in the blank cell where a tab starts, keeping any
+/// underline color, hyperlink or combining mark. Shaping a tab lays it out to
+/// the font's tab stops instead of one cell and pushes what follows off the
+/// grid (#1356), so it is shaped as a space.
+fn cell_text(c: char, zerowidth: Option<&[char]>) -> Option<String> {
+    let c = if c == '\t' { ' ' } else { c };
+    if c == ' ' && zerowidth.is_none() {
+        return None;
+    }
+    let mut text = String::from(c);
+    text.extend(zerowidth.into_iter().flatten());
+    Some(text)
+}
+
 fn text_presentation_font(base: &Font) -> Font {
     let symbols = runner_app::platform_fonts::TERMINAL_SYMBOL_FALLBACKS;
     if symbols.is_empty() {
@@ -1357,11 +1372,10 @@ impl Element for TerminalElement {
                     }
                 }
 
-                if cell.flags.contains(Flags::HIDDEN)
-                    || (cell.c == ' ' && cell.zerowidth().is_none())
-                {
-                    continue;
-                }
+                let text = match cell_text(cell.c, cell.zerowidth()) {
+                    Some(text) if !cell.flags.contains(Flags::HIDDEN) => text,
+                    _ => continue,
+                };
 
                 let link_underlined = hovered_link
                     .as_ref()
@@ -1463,11 +1477,6 @@ impl Element for TerminalElement {
                     None
                 };
 
-                let mut text = String::new();
-                text.push(cell.c);
-                if let Some(zw) = cell.zerowidth() {
-                    text.extend(zw.iter());
-                }
                 let run = TextRun {
                     len: text.len(),
                     font: cell_font,
@@ -1521,7 +1530,7 @@ impl Element for TerminalElement {
                                 }
                                 _ => span.runs.push(run.clone()),
                             }
-                            span.text.push(cell.c);
+                            span.text.push_str(&text);
                             true
                         }
                         _ => false,
@@ -1761,7 +1770,7 @@ impl Element for TerminalElement {
         });
         window.handle_input(
             &self.focus_handle,
-            ElementInputHandler::new(input_bounds, self.input.clone()),
+            TerminalInputHandler::new(input_bounds, self.input.clone()),
             cx,
         );
         let cursor_style = if prepaint.hovered_link.is_some() && prepaint.link_modifier_held {
@@ -1820,9 +1829,10 @@ mod tests {
     use runner_terminal::terminal::TerminalMirror;
 
     use super::{
-        accumulate_scroll, autoscroll_amount, cell_and_side, link_modifier, point_for_viewport,
-        push_match_cell, text_presentation_font, viewport_cell, wants_text_presentation,
-        TerminalElement, TerminalGeometry, TerminalInput, TerminalInteraction, TerminalStyle,
+        accumulate_scroll, autoscroll_amount, cell_and_side, cell_text, link_modifier,
+        point_for_viewport, push_match_cell, text_presentation_font, viewport_cell,
+        wants_text_presentation, TerminalElement, TerminalGeometry, TerminalInput,
+        TerminalInteraction, TerminalStyle,
     };
     use alacritty_terminal::term::TermMode;
     use runner_terminal::mappings::encode_scroll;
@@ -2624,6 +2634,34 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_cell_left_behind_a_redraw_never_shapes_a_tab() {
+        // Each tab leaves `'\t'` in column 2, and the redraw fills columns
+        // 3-7 without overwriting it. The second and third keep a colored
+        // underline and a combining mark on the tab cell.
+        for (bytes, tab_cell) in [
+            (&b"ab\t\rab\x1b[Ccdefg"[..], None),
+            (
+                b"ab\x1b[4;58;5;1m \x1b[0m\r\x1b[2C\t\r\x1b[3Ccdefg",
+                Some(" "),
+            ),
+            (b"ab\t\rab\x1b[C\xcc\x81cdefg", Some(" \u{301}")),
+        ] {
+            let term = runner_terminal::replay::replay_bytes(20, 2, bytes);
+            let row = &term.grid()[alacritty_terminal::index::Line(0)];
+            assert_eq!(row[Column(2)].c, '\t');
+            let texts = (0..8)
+                .map(|col| cell_text(row[Column(col)].c, row[Column(col)].zerowidth()))
+                .collect::<Vec<_>>();
+            assert_eq!(texts[2].as_deref(), tab_cell);
+            let letters = [0, 1, 3, 4, 5, 6, 7]
+                .map(|col| texts[col].as_deref().unwrap())
+                .concat();
+            assert_eq!(letters, "abcdefg");
+            assert!(texts.iter().flatten().all(|text| !text.contains('\t')));
+        }
+    }
+
+    #[test]
     fn text_presentation_font_adds_the_platform_symbol_fallbacks() {
         let mut base = gpui::font("JetBrainsMono Nerd Font Mono");
         base.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
@@ -2712,5 +2750,55 @@ mod tests {
         assert_eq!(autoscroll_amount(bounds, point(px(20.), px(110.))), -4);
         assert_eq!(autoscroll_amount(bounds, point(px(20.), px(220.))), -15);
         assert_eq!(autoscroll_amount(bounds, point(px(20.), px(500.))), -15);
+    }
+
+    #[test]
+    fn focused_terminal_element_routes_input_through_terminal_input_handler() {
+        use gpui::EntityInputHandler as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(RecordingRuntime::default());
+        let core = test_core(temp.path(), Arc::clone(&runtime));
+        let role = probe_role(&core);
+        let left_terminal = spawn_terminal(&core, &runtime, &role, temp.path());
+        let right_terminal = spawn_terminal(&core, &runtime, &role, temp.path());
+        let session_id = left_terminal.session_id().to_owned();
+        let mut cx = TestAppContext::single();
+        let left = wheel_pane(&mut cx, &left_terminal);
+        let right = wheel_pane(&mut cx, &right_terminal);
+        let focus = left.focus.clone();
+        let input = left.input.clone();
+        let window = cx.add_window(|_, _| WheelHost {
+            left,
+            right,
+            left_interactive: true,
+            right_interactive: true,
+            right_scrollable: true,
+            font_size: 14.,
+            gap: 20.,
+            line_height_factor: crate::app_settings::TERMINAL_LINE_HEIGHT_DEFAULT,
+            copy_on_select: false,
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), &cx);
+        visual.simulate_resize(gpui::size(px(700.), px(300.)));
+        visual.update(|window, cx| focus.focus(window, cx));
+        visual.refresh().unwrap();
+
+        // Typing reaches TerminalElement's registered TerminalInputHandler, while IME composition still works.
+        visual.simulate_input("k");
+        visual.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                assert!(!input.apple_press_and_hold_enabled());
+                input.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                assert_eq!(input.marked_text_range(window, cx), Some(0..2));
+                input.unmark_text(window, cx);
+                assert_eq!(input.marked_text_range(window, cx), None);
+            });
+        });
+
+        runtime.wait_for_writes(2);
+        let writes = runtime.writes.lock().unwrap();
+        assert_eq!(writes[0], (session_id.clone(), b"k".to_vec()));
+        assert_eq!(writes[1], (session_id, b"ni".to_vec()));
     }
 }

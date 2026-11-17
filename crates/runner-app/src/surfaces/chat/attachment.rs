@@ -253,9 +253,10 @@ impl NativeRoot {
 
     pub(crate) fn session_is_interactive(&self, session_id: &str, cx: &App) -> bool {
         if self.remote_client.is_active() {
-            return self
-                .remote_client
-                .remote_terminal_interactive(session_id, cx);
+            return !self.chat_secondary_state(session_id, cx).secondary
+                && self
+                    .remote_client
+                    .remote_terminal_interactive(session_id, cx);
         }
 
         self.route == AppRoute::Chat
@@ -276,9 +277,10 @@ impl NativeRoot {
 
     pub(crate) fn cached_session_is_interactive(&self, session_id: &str, cx: &App) -> bool {
         if self.remote_client.is_active() {
-            return self
-                .remote_client
-                .remote_terminal_interactive(session_id, cx);
+            return !self.cached_chat_secondary_state(session_id).secondary
+                && self
+                    .remote_client
+                    .remote_terminal_interactive(session_id, cx);
         }
 
         self.route == AppRoute::Chat
@@ -305,8 +307,11 @@ impl NativeRoot {
             if let Some(id) = self
                 .front_page_layout()
                 .and_then(PaneLayout::focused_session_id)
+                .filter(|id| !self.chat_secondary_state(id, cx).secondary)
             {
                 self.remote_client.focus_remote_terminal(id, window, cx);
+            } else {
+                self.chat_focus.focus(window, cx);
             }
             return;
         }
@@ -348,7 +353,11 @@ impl NativeRoot {
                 self.remember_active_role(cx);
                 self.sync_active_chat_detail(cx);
                 self.mark_active_tab_viewed(window, cx);
-                self.focus_active_terminal(window, cx);
+                if self.chat_panel_effectively_maximized(cx) {
+                    self.focus_chat_panel_shown(window, cx);
+                } else {
+                    self.focus_active_terminal(window, cx);
+                }
             }
             Err(error) => self.chat_error = Some(error.to_string().into()),
         }
@@ -439,6 +448,7 @@ impl NativeRoot {
             return;
         };
         let (pane_id, session_id) = &leaves[next];
+        self.chat_panel_maximized = false;
         if let Some(session_id) = session_id {
             self.focus_terminal(pane_id, session_id, window, cx);
         } else {
@@ -455,8 +465,12 @@ impl NativeRoot {
     ) {
         if self.remote_client.is_active() {
             self.focus_pane(pane_id, cx);
-            self.remote_client
-                .focus_remote_terminal(session_id, window, cx);
+            if !self.chat_secondary_state(session_id, cx).secondary {
+                self.remote_client
+                    .focus_remote_terminal(session_id, window, cx);
+            } else {
+                self.chat_focus.focus(window, cx);
+            }
             return;
         }
 
@@ -645,7 +659,7 @@ impl NativeRoot {
         cx: &mut Context<Self>,
     ) {
         let remote = self.front_page_client(cx).is_remote();
-        if !remote && self.chat_secondary_state(session_id, cx).secondary {
+        if self.chat_secondary_state(session_id, cx).secondary {
             return;
         }
         if !remote && self.chat_transitions.contains_key(session_id) {

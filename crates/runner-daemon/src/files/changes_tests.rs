@@ -14,6 +14,23 @@ fn commit_all(dir: &Path, message: &str) -> String {
     git(dir, &["rev-parse", "HEAD"]).trim().to_owned()
 }
 
+fn changes_commits(core: &AppCore, root: &Path) -> Result<ChangesCommits> {
+    super::changes_commits(core, root, None)
+}
+
+fn changes_files(core: &AppCore, root: &Path, target: &ChangesTarget) -> Result<ChangesFiles> {
+    super::changes_files(core, root, target, None)
+}
+
+fn changes_diff(
+    core: &AppCore,
+    root: &Path,
+    target: &ChangesTarget,
+    path: &str,
+) -> Result<ChangesDiff> {
+    super::changes_diff(core, root, target, path, None)
+}
+
 fn hash_object(dir: &Path, path: &Path) -> String {
     git(dir, &["hash-object", path.to_str().unwrap()])
         .trim()
@@ -772,9 +789,13 @@ fn protocol_dispatch_serves_all_four_changes_requests() {
     let root = fixture.path().to_path_buf();
     std::fs::write(root.join("a.txt"), "edited via dispatch\n").unwrap();
 
-    let Response::changes_commits(Ok(commits)) =
-        crate::daemon::dispatch(&core, Request::changes_commits { root: root.clone() })
-    else {
+    let Response::changes_commits(Ok(commits)) = crate::daemon::dispatch(
+        &core,
+        Request::changes_commits {
+            root: root.clone(),
+            base: None,
+        },
+    ) else {
         panic!("expected changes_commits Ok");
     };
     assert_eq!(commits.branch.as_deref(), Some("main"));
@@ -784,6 +805,7 @@ fn protocol_dispatch_serves_all_four_changes_requests() {
         Request::changes_files {
             root: root.clone(),
             target: ChangesTarget::Uncommitted,
+            base: None,
         },
     ) else {
         panic!("expected changes_files Ok");
@@ -796,6 +818,7 @@ fn protocol_dispatch_serves_all_four_changes_requests() {
             root: root.clone(),
             target: ChangesTarget::Uncommitted,
             path: "a.txt".into(),
+            base: None,
         },
     ) else {
         panic!("expected changes_diff Ok");
@@ -821,6 +844,7 @@ fn protocol_dispatch_serves_all_four_changes_requests() {
         Request::changes_files {
             root,
             target: ChangesTarget::Uncommitted,
+            base: None,
         },
     ) else {
         panic!("expected changes_files Ok after mark");
@@ -1698,4 +1722,600 @@ fn in_memory_viewed_marks_cover_set_clear_sticky_uncommitted_carry_over_and_chan
     marks.clear(repo_a, "added.rs", Some(""), Some("b1"));
     marks.clear(repo_a, "commit_only.rs", Some("c0"), Some("c1"));
     assert!(marks.by_checkout.lock().unwrap().is_empty());
+}
+
+#[test]
+fn branch_target_matches_git_diff_and_tracks_viewed_marks() {
+    let core = test_core();
+
+    // 1. Unborn HEAD and isolated branch with no base return empty for Branch.
+    let unborn_dir = tempfile::tempdir().unwrap();
+    git(unborn_dir.path(), &["init", "-q", "-b", "main"]);
+    git(unborn_dir.path(), &["config", "core.autocrlf", "false"]);
+    std::fs::write(unborn_dir.path().join("u.txt"), "unborn\n").unwrap();
+    assert!(
+        changes_files(&core, unborn_dir.path(), &ChangesTarget::Branch)
+            .unwrap()
+            .files
+            .is_empty()
+    );
+
+    let no_base_dir = tempfile::tempdir().unwrap();
+    git(no_base_dir.path(), &["init", "-q", "-b", "topic"]);
+    git(no_base_dir.path(), &["config", "core.autocrlf", "false"]);
+    std::fs::write(no_base_dir.path().join("t.txt"), "topic\n").unwrap();
+    commit_all(no_base_dir.path(), "only commit");
+    assert!(
+        changes_files(&core, no_base_dir.path(), &ChangesTarget::Branch)
+            .unwrap()
+            .files
+            .is_empty()
+    );
+
+    // 2. Repository with origin/main and a linked branch worktree two commits ahead.
+    let main_dir = tempfile::tempdir().unwrap();
+    let main_root = main_dir.path();
+    git(main_root, &["init", "-q", "-b", "main"]);
+    git(main_root, &["config", "core.autocrlf", "false"]);
+    std::fs::create_dir_all(main_root.join("sub")).unwrap();
+    std::fs::write(main_root.join("keep.txt"), "keep\n").unwrap();
+    std::fs::write(main_root.join("mod.txt"), "line1\nline2\n").unwrap();
+    std::fs::write(main_root.join("del.txt"), "gone1\ngone2\n").unwrap();
+    std::fs::write(
+        main_root.join("old_name.txt"),
+        "same1\nsame2\nsame3\nsame4\n",
+    )
+    .unwrap();
+    std::fs::write(main_root.join("sub/nested.txt"), "n1\n").unwrap();
+    let base_sha = commit_all(main_root, "initial main");
+    git(
+        main_root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+    );
+    git(
+        main_root,
+        &["update-ref", "refs/remotes/origin/main", &base_sha],
+    );
+
+    // Main checkout level with origin/main has 0 commits since base and empty Branch files.
+    assert_eq!(changes_commits(&core, main_root).unwrap().total, 0);
+    assert!(changes_files(&core, main_root, &ChangesTarget::Branch)
+        .unwrap()
+        .files
+        .is_empty());
+
+    let wt_parent = tempfile::tempdir().unwrap();
+    let wt_raw = wt_parent.path().join("feat-wt");
+    git(
+        main_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/1141-m2",
+            wt_raw.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    let wt = wt_raw.canonicalize().unwrap();
+
+    // Commit 1 on worktree: modify mod.txt, delete del.txt, add sub/added.txt.
+    std::fs::write(wt.join("mod.txt"), "line1\nline2-c1\n").unwrap();
+    git(&wt, &["rm", "-q", "del.txt"]);
+    std::fs::write(wt.join("sub/added.txt"), "a1\na2\n").unwrap();
+    commit_all(&wt, "feat commit 1");
+
+    // Commit 2 on worktree: rename old_name.txt -> new_name.txt, modify sub/nested.txt.
+    git(&wt, &["mv", "old_name.txt", "new_name.txt"]);
+    std::fs::write(wt.join("sub/nested.txt"), "n1\nn2\n").unwrap();
+    commit_all(&wt, "feat commit 2");
+
+    // Add uncommitted working-tree edits (staged + unstaged + untracked) that must stay out of Branch.
+    std::fs::write(wt.join("mod.txt"), "UNCOMMITTED OVERRIDE\n").unwrap();
+    std::fs::write(wt.join("staged_only.txt"), "staged\n").unwrap();
+    git(&wt, &["add", "staged_only.txt"]);
+    std::fs::write(wt.join("untracked_only.txt"), "untracked\n").unwrap();
+
+    let commits = changes_commits(&core, &wt).unwrap();
+    assert_eq!(commits.branch.as_deref(), Some("feat/1141-m2"));
+    assert_eq!(commits.base.as_deref(), Some("origin/main"));
+    assert_eq!(commits.total, 2);
+
+    let merge_base = git(&wt, &["merge-base", "HEAD", "origin/main"])
+        .trim()
+        .to_owned();
+    let expected_numstat = parse_numstat_z(
+        git(&wt, &["diff", "--numstat", "-M", "-z", &merge_base, "HEAD"]).as_bytes(),
+    )
+    .unwrap();
+
+    let branch_files = changes_files(&core, &wt, &ChangesTarget::Branch).unwrap();
+    assert_eq!(branch_files.files.len(), expected_numstat.len());
+    for exp in &expected_numstat {
+        let got = branch_files
+            .files
+            .iter()
+            .find(|f| f.path == exp.path)
+            .unwrap_or_else(|| panic!("missing {} in Branch target", exp.path));
+        assert_eq!(got.counts, exp.counts);
+        if let Some(old_path) = &exp.old_path {
+            assert_eq!(
+                got.status,
+                FileStatus::Renamed {
+                    from: old_path.clone()
+                }
+            );
+        }
+    }
+    assert!(
+        branch_files
+            .files
+            .iter()
+            .all(|f| f.path != "staged_only.txt" && f.path != "untracked_only.txt"),
+        "uncommitted files must stay out of Branch"
+    );
+
+    // Branch diff reads HEAD's committed bytes, ignoring uncommitted working-tree edits.
+    let mod_diff = changes_diff(&core, &wt, &ChangesTarget::Branch, "mod.txt").unwrap();
+    let mod_entry = branch_files
+        .files
+        .iter()
+        .find(|f| f.path == "mod.txt")
+        .unwrap();
+    assert_diff_consistent(Some(mod_entry), &mod_diff);
+    let DiffBody::Text { old, new, .. } = mod_diff.body else {
+        panic!("expected Text for mod.txt");
+    };
+    assert_eq!(old.0, b"line1\nline2\n");
+    assert_eq!(new.0, b"line1\nline2-c1\n");
+
+    // Subfolder root lists only paths under sub/.
+    let sub_branch = changes_files(&core, &wt.join("sub"), &ChangesTarget::Branch).unwrap();
+    let sub_paths: Vec<&str> = sub_branch.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(sub_paths, vec!["added.txt", "nested.txt"]);
+
+    // Clean up uncommitted working-tree scratch before viewed-mark commit/merge transitions.
+    git(&wt, &["reset", "-q", "--hard", "HEAD"]);
+    std::fs::remove_file(wt.join("untracked_only.txt")).unwrap();
+
+    // 3. Viewed marks on Branch: watch client gets `changes/viewed`, new commit turns it changed_since_viewed.
+    let mut rx_watch = core.events.subscribe();
+    core.files.watch(77, wt.clone()).unwrap();
+
+    let nested_entry = branch_files
+        .files
+        .iter()
+        .find(|f| f.path == "sub/nested.txt")
+        .unwrap();
+    changes_set_viewed(
+        &core,
+        &wt,
+        &ChangesTarget::Branch,
+        "mod.txt",
+        mod_entry.old_blob_id.as_deref(),
+        mod_entry.new_blob_id.as_deref(),
+        true,
+    )
+    .unwrap();
+    changes_set_viewed(
+        &core,
+        &wt,
+        &ChangesTarget::Branch,
+        "sub/nested.txt",
+        nested_entry.old_blob_id.as_deref(),
+        nested_entry.new_blob_id.as_deref(),
+        true,
+    )
+    .unwrap();
+
+    let mut viewed_events = Vec::new();
+    while let Ok(ev) = rx_watch.try_recv() {
+        if ev.name == CHANGES_VIEWED_EVENT {
+            viewed_events.push(serde_json::from_value::<ChangesViewed>(ev.payload).unwrap());
+        }
+    }
+    assert_eq!(viewed_events.len(), 2);
+    assert_eq!(viewed_events[0].path, "mod.txt");
+    assert!(viewed_events[0].viewed);
+    assert_eq!(viewed_events[1].path, "sub/nested.txt");
+    assert!(viewed_events[1].viewed);
+
+    let after_mark = changes_files(&core, &wt, &ChangesTarget::Branch).unwrap();
+    assert_eq!(after_mark.totals.viewed, 2);
+    let mod_marked = after_mark
+        .files
+        .iter()
+        .find(|f| f.path == "mod.txt")
+        .unwrap();
+    assert!(mod_marked.viewed);
+    assert!(!mod_marked.changed_since_viewed);
+
+    // Commit 3 touches mod.txt -> mod.txt clears `viewed` and turns `changed_since_viewed = true`.
+    std::fs::write(wt.join("mod.txt"), "line1\nline2-c3\n").unwrap();
+    commit_all(&wt, "feat commit 3");
+
+    let after_c3 = changes_files(&core, &wt, &ChangesTarget::Branch).unwrap();
+    let mod_c3 = after_c3.files.iter().find(|f| f.path == "mod.txt").unwrap();
+    assert!(!mod_c3.viewed);
+    assert!(mod_c3.changed_since_viewed);
+    let nested_c3 = after_c3
+        .files
+        .iter()
+        .find(|f| f.path == "sub/nested.txt")
+        .unwrap();
+    assert!(nested_c3.viewed, "untouched file keeps its Branch mark");
+
+    // 4. Merging advanced origin/main that touches sub/nested.txt moves the merge base,
+    // clearing sub/nested.txt's viewed mark and marking it changed_since_viewed.
+    std::fs::write(main_root.join("sub/nested.txt"), "n0-upstream\nn1\n").unwrap();
+    std::fs::write(main_root.join("upstream_only.txt"), "upstream\n").unwrap();
+    let main2 = commit_all(main_root, "upstream advance");
+    git(
+        main_root,
+        &["update-ref", "refs/remotes/origin/main", &main2],
+    );
+
+    git(&wt, &["merge", "-q", "--no-edit", "origin/main"]);
+    let merge_base_after = git(&wt, &["merge-base", "HEAD", "origin/main"])
+        .trim()
+        .to_owned();
+    assert_eq!(merge_base_after, main2);
+
+    let after_merge = changes_files(&core, &wt, &ChangesTarget::Branch).unwrap();
+    assert!(
+        after_merge
+            .files
+            .iter()
+            .all(|f| f.path != "upstream_only.txt"),
+        "base's own changes must not appear in Branch after merging base in"
+    );
+    let nested_after_merge = after_merge
+        .files
+        .iter()
+        .find(|f| f.path == "sub/nested.txt")
+        .unwrap();
+    assert!(!nested_after_merge.viewed);
+    assert!(nested_after_merge.changed_since_viewed);
+
+    // 5. Detached HEAD keeps the same Branch diff against merge base.
+    git(&wt, &["checkout", "-q", "--detach", "HEAD"]);
+    let detached_branch = changes_files(&core, &wt, &ChangesTarget::Branch).unwrap();
+    assert_eq!(detached_branch.files.len(), after_merge.files.len());
+
+    core.files.client_gone(77);
+}
+
+#[test]
+fn base_resolution_with_chosen_ref_handles_local_remote_upstream_deleted_tag_and_sha() {
+    let core = test_core();
+    let origin_bare = tempfile::tempdir().unwrap();
+    let upstream_bare = tempfile::tempdir().unwrap();
+    git(origin_bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+    git(
+        upstream_bare.path(),
+        &["init", "-q", "--bare", "-b", "main"],
+    );
+
+    let fixture = repo();
+    let root = fixture.path();
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin_bare.path().to_str().unwrap(),
+        ],
+    );
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            upstream_bare.path().to_str().unwrap(),
+        ],
+    );
+    git(root, &["push", "-q", "-u", "origin", "main"]);
+    git(root, &["push", "-q", "upstream", "main"]);
+    git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/main",
+        ],
+    );
+
+    git(root, &["checkout", "-q", "-b", "feat/umbrella"]);
+    std::fs::write(root.join("umbrella1.txt"), "u1\n").unwrap();
+    commit_all(root, "umbrella 1");
+    std::fs::write(root.join("umbrella2.txt"), "u2\n").unwrap();
+    let umbrella_sha = commit_all(root, "umbrella 2");
+    git(root, &["tag", "v1.0-umbrella"]);
+    git(root, &["push", "-q", "origin", "feat/umbrella"]);
+    git(root, &["push", "-q", "upstream", "feat/umbrella"]);
+
+    git(root, &["checkout", "-q", "-b", "feat/child"]);
+    git(root, &["push", "-q", "-u", "origin", "feat/child"]);
+    for i in 1..=3 {
+        std::fs::write(root.join(format!("child{i}.txt")), format!("c{i}\n")).unwrap();
+        commit_all(root, &format!("child {i}"));
+    }
+
+    // None -> Auto (origin/main), 5 commits total.
+    let auto = super::changes_commits(&core, root, None).unwrap();
+    assert_eq!(auto.base.as_deref(), Some("origin/main"));
+    assert_eq!(auto.auto_base.as_deref(), Some("origin/main"));
+    assert!(!auto.base_missing);
+    assert_eq!(auto.total, 5);
+
+    // Local branch -> 3 commits, auto_base still reported as origin/main.
+    let local = super::changes_commits(&core, root, Some("feat/umbrella")).unwrap();
+    assert_eq!(local.base.as_deref(), Some("feat/umbrella"));
+    assert_eq!(local.auto_base.as_deref(), Some("origin/main"));
+    assert!(!local.base_missing);
+    assert_eq!(local.total, 3);
+
+    // Remote-tracking branch on origin.
+    let origin_ref = super::changes_commits(&core, root, Some("origin/feat/umbrella")).unwrap();
+    assert_eq!(origin_ref.base.as_deref(), Some("origin/feat/umbrella"));
+    assert_eq!(origin_ref.auto_base.as_deref(), Some("origin/main"));
+    assert!(!origin_ref.base_missing);
+    assert_eq!(origin_ref.total, 3);
+
+    // Remote-tracking branch on upstream remote.
+    let upstream_ref = super::changes_commits(&core, root, Some("upstream/feat/umbrella")).unwrap();
+    assert_eq!(upstream_ref.base.as_deref(), Some("upstream/feat/umbrella"));
+    assert_eq!(upstream_ref.auto_base.as_deref(), Some("origin/main"));
+    assert!(!upstream_ref.base_missing);
+    assert_eq!(upstream_ref.total, 3);
+
+    // Tag, commit SHA, revision suffix, and symref are all refused -> Auto with base_missing.
+    for invalid in [
+        "v1.0-umbrella",
+        "refs/tags/v1.0-umbrella",
+        umbrella_sha.as_str(),
+        "feat/umbrella~1",
+        "origin/HEAD",
+        "refs/remotes/origin/HEAD",
+    ] {
+        let fallback = super::changes_commits(&core, root, Some(invalid)).unwrap();
+        assert_eq!(fallback.base.as_deref(), Some("origin/main"), "{invalid}");
+        assert_eq!(
+            fallback.auto_base.as_deref(),
+            Some("origin/main"),
+            "{invalid}"
+        );
+        assert!(fallback.base_missing, "{invalid}");
+        assert_eq!(fallback.total, 5, "{invalid}");
+    }
+
+    // `changes_branches` groups local and both remotes without `origin/HEAD` or `upstream/HEAD`,
+    // and reports the checked-out branch's full canonical upstream ref.
+    let branches = super::changes_branches(&core, root).unwrap();
+    assert_eq!(branches.local, vec!["feat/child", "feat/umbrella", "main"]);
+    assert_eq!(
+        branches.upstream.as_deref(),
+        Some("refs/remotes/origin/feat/child")
+    );
+    assert_eq!(branches.remotes.len(), 2);
+    assert_eq!(branches.remotes[0].remote, "origin");
+    assert_eq!(
+        branches.remotes[0].branches,
+        vec!["origin/feat/child", "origin/feat/umbrella", "origin/main"]
+    );
+    assert_eq!(branches.remotes[1].remote, "upstream");
+    assert_eq!(
+        branches.remotes[1].branches,
+        vec!["upstream/feat/umbrella", "upstream/main"]
+    );
+
+    // Local upstream (`branch.<name>.remote = .`) reports `refs/heads/feat/umbrella`.
+    git(root, &["branch", "--set-upstream-to=feat/umbrella"]);
+    let local_up = super::changes_branches(&core, root).unwrap();
+    assert_eq!(
+        local_up.upstream.as_deref(),
+        Some("refs/heads/feat/umbrella")
+    );
+
+    // Colliding short name: a local branch literally named `origin/main` at `feat/umbrella`
+    // (3 commits behind HEAD) vs remote-tracking `refs/remotes/origin/main` (5 commits behind HEAD).
+    git(root, &["branch", "origin/main", &umbrella_sha]);
+    let local_colliding =
+        super::changes_commits(&core, root, Some("refs/heads/origin/main")).unwrap();
+    assert_eq!(local_colliding.base.as_deref(), Some("origin/main"));
+    assert!(!local_colliding.base_missing);
+    assert_eq!(local_colliding.total, 3);
+    let local_colliding_files = super::changes_files(
+        &core,
+        root,
+        &ChangesTarget::Branch,
+        Some("refs/heads/origin/main"),
+    )
+    .unwrap();
+    assert!(local_colliding_files
+        .files
+        .iter()
+        .all(|f| !f.path.starts_with("umbrella")));
+
+    let remote_colliding =
+        super::changes_commits(&core, root, Some("refs/remotes/origin/main")).unwrap();
+    assert_eq!(remote_colliding.base.as_deref(), Some("origin/main"));
+    assert!(!remote_colliding.base_missing);
+    assert_eq!(remote_colliding.total, 5);
+    let remote_colliding_files = super::changes_files(
+        &core,
+        root,
+        &ChangesTarget::Branch,
+        Some("refs/remotes/origin/main"),
+    )
+    .unwrap();
+    assert!(remote_colliding_files
+        .files
+        .iter()
+        .any(|f| f.path == "umbrella1.txt"));
+
+    // Deleting the selected local `refs/heads/origin/main` reports `base_missing = true`
+    // instead of silently switching to the surviving `refs/remotes/origin/main` without notice.
+    git(root, &["branch", "-D", "origin/main"]);
+    let deleted_local_colliding =
+        super::changes_commits(&core, root, Some("refs/heads/origin/main")).unwrap();
+    assert!(deleted_local_colliding.base_missing);
+    assert_eq!(deleted_local_colliding.base.as_deref(), Some("origin/main"));
+    assert_eq!(deleted_local_colliding.total, 5);
+
+    // Deleted local branch falls back to Auto with `base_missing = true`.
+    git(root, &["branch", "-D", "feat/umbrella"]);
+    let deleted = super::changes_commits(&core, root, Some("refs/heads/feat/umbrella")).unwrap();
+    assert_eq!(deleted.base.as_deref(), Some("origin/main"));
+    assert_eq!(deleted.auto_base.as_deref(), Some("origin/main"));
+    assert!(deleted.base_missing);
+    assert_eq!(deleted.total, 5);
+}
+
+#[test]
+fn all_changes_against_chosen_base_in_umbrella_worktree_matches_git_diff_numstat() {
+    use runner_core::protocol::api::{Request, Response};
+
+    let core = test_core();
+    let origin_bare = tempfile::tempdir().unwrap();
+    git(origin_bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+
+    let fixture = repo();
+    let root = fixture.path();
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin_bare.path().to_str().unwrap(),
+        ],
+    );
+    git(root, &["push", "-q", "-u", "origin", "main"]);
+    git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+
+    // Umbrella two commits ahead of main.
+    git(root, &["checkout", "-q", "-b", "feat/umbrella"]);
+    std::fs::write(root.join("umbrella_only.txt"), "u1\nu2\n").unwrap();
+    commit_all(root, "umbrella 1");
+    std::fs::write(root.join("a.txt"), "a\numbrella edit\n").unwrap();
+    commit_all(root, "umbrella 2");
+    git(root, &["checkout", "-q", "main"]);
+
+    // Worktree cut from the umbrella with three commits of its own.
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".worktrees/feat-child",
+            "-b",
+            "feat/child",
+            "feat/umbrella",
+        ],
+    );
+    let wt = root.join(".worktrees/feat-child");
+    std::fs::write(wt.join("child1.txt"), "one\n").unwrap();
+    commit_all(&wt, "child 1");
+    std::fs::write(wt.join("a.txt"), "a\numbrella edit\nchild line\n").unwrap();
+    commit_all(&wt, "child 2");
+    std::fs::write(wt.join("child3.txt"), "three\nfour\n").unwrap();
+    commit_all(&wt, "child 3");
+
+    let commits = super::changes_commits(&core, &wt, Some("feat/umbrella")).unwrap();
+    assert_eq!(commits.total, 3);
+    assert_eq!(
+        commits
+            .commits
+            .iter()
+            .map(|c| c.subject.as_str())
+            .collect::<Vec<_>>(),
+        vec!["child 3", "child 2", "child 1"]
+    );
+    assert_eq!(commits.worktrees.len(), 2);
+
+    let branch_files =
+        super::changes_files(&core, &wt, &ChangesTarget::Branch, Some("feat/umbrella")).unwrap();
+    let merge_base = git(&wt, &["merge-base", "HEAD", "feat/umbrella"])
+        .trim()
+        .to_owned();
+    let numstat = git(&wt, &["diff", "--numstat", &merge_base, "HEAD"]);
+    let expected: Vec<(String, u64, u64)> = numstat
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.split('\t');
+            let added = parts.next().unwrap().parse::<u64>().unwrap();
+            let removed = parts.next().unwrap().parse::<u64>().unwrap();
+            let path = parts.next().unwrap().to_owned();
+            (path, added, removed)
+        })
+        .collect();
+    let actual: Vec<(String, u64, u64)> = branch_files
+        .files
+        .iter()
+        .map(|f| match f.counts {
+            DiffCounts::Lines { added, removed } => (f.path.clone(), added, removed),
+            DiffCounts::Binary => panic!("unexpected binary"),
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    assert!(
+        branch_files
+            .files
+            .iter()
+            .all(|f| f.path != "umbrella_only.txt"),
+        "umbrella-only file must not appear when comparing against umbrella"
+    );
+
+    // `changes_diff` against `feat/umbrella` sees only child's addition on `a.txt`.
+    let diff = super::changes_diff(
+        &core,
+        &wt,
+        &ChangesTarget::Branch,
+        "a.txt",
+        Some("feat/umbrella"),
+    )
+    .unwrap();
+    assert_eq!(
+        diff.counts,
+        DiffCounts::Lines {
+            added: 1,
+            removed: 0
+        }
+    );
+
+    // Protocol dispatch for `changes_branches`.
+    let Response::changes_branches(Ok(dispatched_branches)) =
+        crate::daemon::dispatch(&core, Request::changes_branches { root: wt.clone() })
+    else {
+        panic!("expected changes_branches Ok");
+    };
+    assert!(dispatched_branches
+        .local
+        .contains(&"feat/umbrella".to_owned()));
 }

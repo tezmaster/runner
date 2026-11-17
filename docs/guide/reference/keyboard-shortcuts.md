@@ -36,7 +36,7 @@ In Projects, number shortcuts follow the visible tabs and missions, with a linke
 | Next chat pane | ⌘] | Ctrl+] |
 | Split right | ⌘D | Ctrl+Shift+D |
 | Split down | ⇧⌘D | Alt+Shift+D |
-| Maximize the focused pane of a split tab, or restore the split | ⇧⌘↩ | Ctrl+Shift+Enter |
+| Maximize the focused pane of a split tab or the focused side panel, or restore it | ⇧⌘↩ | Ctrl+Shift+Enter |
 | Hide focused mission drawer, close focused pane, close chat tab, or close the launcher page | ⌘W | Ctrl+Shift+W |
 | Stop focused chat or mission slot | ⇧⌘X | Ctrl+Shift+X |
 | Resume focused stopped chat or mission slot | ⇧⌘R | Ctrl+Shift+R |
@@ -56,7 +56,19 @@ On Windows and Linux, **Settings → Keyboard shortcuts → Ctrl keys in termina
 
 With Terminal first, Ctrl+. sends a plain period in legacy terminal programs. Programs that enable Kitty keyboard disambiguation receive Ctrl+. as a distinct key.
 
-Copy with a selection, paste and zoom work in a terminal in both modes. The setting takes effect immediately. macOS has no such setting, because ⌘ shortcuts never reach a terminal.
+Copy with a selection, paste and zoom work in a terminal in both modes. The setting takes effect immediately. macOS has no such setting because Runner shortcuts use ⌘ rather than Control, so bare Control keys already reach the terminal; on macOS only the three line-editing chords below reach a terminal when no Runner shortcut uses them.
+
+## macOS terminal editing keys
+
+When a terminal pane has focus on macOS (chat pane, terminal tab, mission slot, mission drawer or remote terminal), these standard macOS line-editing chords send control bytes to the terminal:
+
+| Action | macOS | Sends |
+| --- | --- | --- |
+| Move to start of line | ⌘← | `^A` (`\x01`) |
+| Move to end of line | ⌘→ | `^E` (`\x05`) |
+| Delete to start of line | ⌘⌫ | `^U` (`\x15`) |
+
+If you bind a Runner shortcut to one of these chords in **Settings → Keyboard shortcuts**, that shortcut wins over the terminal key. Other `⌘` chords continue to route to Runner.
 
 ## Find in terminal
 
@@ -75,6 +87,7 @@ Find in terminal can be changed in **Settings → Keyboard shortcuts**; the keys
 | --- | --- |
 | Open Info, or switch to it | I |
 | Open Files, or switch to it | F |
+| Open Changes, or switch to it | C |
 | Move through the surfaces | ↑ / ↓ |
 | Open the highlighted surface | Return (Enter) |
 | Close the **+** list | Esc |
@@ -94,6 +107,23 @@ These keys act only while the **+** list of a side panel, or a panel's **Open a 
 | Larger or smaller text in the viewer | ⌘+ / ⌘− | Ctrl+= / Ctrl+− |
 
 These keys act while the side panel's Files view has focus and, except for zoom, are fixed. With focus elsewhere, or no file open, ⌘W (Ctrl+Shift+W) closes the pane as usual. In the file's find bar, Return and ⇧Return step through the matches and Esc closes the bar. The zoom keys change the viewer's text only while the file, its find bar or a rendered page has focus, and follow any rebinding of **Zoom in** and **Zoom out**; in the tree and elsewhere they zoom the app. **Reset zoom** resets the app's zoom everywhere, the viewer included. ⌘-click (Ctrl+click) on a file path in a terminal opens the file in a tab at its line when it is inside the Files view's folder. See [Read a file in the side panel](../guides/chats-and-windows.md#read-a-file-in-the-side-panel).
+
+## Changes in the side panel
+
+| Action | macOS | Windows / Linux |
+| --- | --- | --- |
+| Select previous / next file or commit; in the diff, move the cursor line | ↑ / ↓ or k / j | ↑ / ↓ or k / j |
+| Move focus through the changed files, Commits, Base and the checkout controls | Tab / ⇧Tab | Tab / Shift+Tab |
+| Move focus into the diff | Return | Enter |
+| Return focus from the diff to the list | Esc | Esc |
+| Mark or unmark the selected file as viewed, in the files list | Space | Space |
+| Next / previous hunk | ] / [ | ] / [ |
+| Scroll the diff sideways | ← / → | ← / → |
+| Copy the selected diff text | ⌘C | Ctrl+C |
+| Larger or smaller text in the diff | ⌘+ / ⌘− | Ctrl+= / Ctrl+− |
+| Maximize or restore the side panel | ⇧⌘↩ | Ctrl+Shift+Enter |
+
+These keys act only while the side panel's Changes view has focus and, except for zoom and maximize, are fixed; when a terminal has focus, `j`, `k`, `Space`, `[` and `]` reach the terminal as usual. Clicking a line in the diff also moves focus into the diff at that line, and **Mark <file> viewed** at the end of a diff is toggled by clicking rather than **Space**. **⇧⌘↩** (**Ctrl+Shift+Enter**) maximizes or restores the side panel across any of its views and follows any rebinding of **Toggle Maximize Pane**. The zoom keys change the viewer's text size only while the diff has focus, shared with Files, and follow any rebinding of **Zoom in** and **Zoom out**. See [Review changes in the side panel](../guides/chats-and-windows.md#review-changes-in-the-side-panel).
 
 ## Dialogs
 

@@ -283,6 +283,7 @@ impl SessionManager {
             },
             rollout_capture: None,
             forwarder: None,
+            input: Default::default(),
             stop: Default::default(),
         });
     }
@@ -434,6 +435,57 @@ impl SessionManager {
                 (!session.key_only).then(|| (id, session.model.status().clone()))
             })
             .collect()
+    }
+
+    pub(crate) fn clear_obsolete_startup_errors(
+        &self,
+        runtime: Runtime,
+        events: &dyn SessionEvents,
+    ) {
+        if crate::runtimes::adapter(runtime)
+            .catalog()
+            .is_none_or(|catalog| !crate::runtime_status::withholds_below_minimum(&catalog))
+        {
+            return;
+        }
+        let sessions: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect();
+        for (session_id, session) in sessions {
+            let cleared = {
+                let mut session = session.lock().unwrap();
+                let matches = session.handle.is_none()
+                    && session
+                        .model
+                        .status()
+                        .startup_error
+                        .as_ref()
+                        .is_some_and(|error| error.runtime == runtime);
+                if !matches {
+                    None
+                } else {
+                    let effects = session.model.apply(
+                        SessionEvent::ClearStartupError,
+                        super::super::clock::state_now(),
+                    );
+                    effects
+                        .publication
+                        .map(|(state, source)| SessionActivityEvent {
+                            session_id: session_id.clone(),
+                            state,
+                            source,
+                            status: session.model.status().clone(),
+                        })
+                }
+            };
+            if let Some(ev) = cleared {
+                events.status(&ev);
+            }
+        }
     }
 
     /// A submit or delivery marks the session busy before its agent has said anything. If no turn

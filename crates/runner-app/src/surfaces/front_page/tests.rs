@@ -152,6 +152,7 @@ fn typed_remote_requests_keep_computer_scope_dimensions_defaults_and_host_paths(
         project: None,
         cwd: None,
         size: (83, 29),
+        initial_prompt: None,
     };
     assert_eq!(a.start_chat(input).unwrap(), "same-id");
     b.start_shell(Some("project".into()), Some("C:\\work".into()), (91, 31))
@@ -454,6 +455,7 @@ fn local_workspace_mutations_keep_daemon_requests_arguments_and_errors() {
         project: Some("project".into()),
         cwd: Some("/work".into()),
         size: (101, 37),
+        initial_prompt: None,
     };
     dispatch!(
         client.start_chat(input.clone()),
@@ -474,7 +476,7 @@ fn local_workspace_mutations_keep_daemon_requests_arguments_and_errors() {
             role: None,
             speed: None,
             project: None,
-            ..input
+            ..input.clone()
         }),
         Request::session_start_runtime_with_speed {
             runtime: "codex".into(),
@@ -488,12 +490,61 @@ fn local_workspace_mutations_keep_daemon_requests_arguments_and_errors() {
         }
     );
     dispatch!(
+        client.start_chat(ChatStart {
+            project: None,
+            initial_prompt: Some("Check workspace".into()),
+            ..input.clone()
+        }),
+        Request::session_start_chat {
+            args: runner_core::protocol::StartDirectSessionArgs {
+                role_id: Some("role".into()),
+                runtime: Some(runner_core::protocol::model::Runtime::Codex),
+                model: Some("model".into()),
+                effort: Some("low".into()),
+                speed: Some(CodexSpeed::Fast),
+                project_id: None,
+                cwd: Some("/work".into()),
+                worktree: None,
+                scope: Some(ProjectScope::Root),
+                cols: Some(101),
+                rows: Some(37),
+                initial_prompt: Some("Check workspace".into()),
+            },
+        }
+    );
+    dispatch!(
+        client.start_chat(ChatStart {
+            role: None,
+            speed: None,
+            project: None,
+            initial_prompt: Some("Check workspace".into()),
+            ..input
+        }),
+        Request::session_start_chat {
+            args: runner_core::protocol::StartDirectSessionArgs {
+                role_id: None,
+                runtime: Some(runner_core::protocol::model::Runtime::Codex),
+                model: Some("model".into()),
+                effort: Some("low".into()),
+                speed: None,
+                project_id: None,
+                cwd: Some("/work".into()),
+                worktree: None,
+                scope: Some(ProjectScope::Root),
+                cols: Some(101),
+                rows: Some(37),
+                initial_prompt: Some("Check workspace".into()),
+            },
+        }
+    );
+    dispatch!(
         client.start_shell(Some("project".into()), Some("/work".into()), (99, 31)),
         Request::session_start_shell_in {
             scope: scope.clone(),
             cwd: Some("/work".into()),
             cols: Some(99),
             rows: Some(31),
+            worktree: None,
         }
     );
     dispatch!(
@@ -571,6 +622,7 @@ fn local_workspace_mutations_keep_daemon_requests_arguments_and_errors() {
                 title: "Mission".into(),
                 goal_override: Some("Goal".into()),
                 cwd: Some("/work".into()),
+                worktree: None,
                 started_by_session_id: None,
                 no_report: false,
             },

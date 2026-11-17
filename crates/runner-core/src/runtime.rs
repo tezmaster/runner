@@ -34,6 +34,26 @@ impl Runtime {
         Self::Shell,
     ];
 
+    /// Priority order used in onboarding and starter-crew ranking.
+    pub const SETUP_ORDER: [Self; 9] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Antigravity,
+        Self::Pi,
+        Self::Copilot,
+        Self::Cursor,
+        Self::OpenCode,
+        Self::Grok,
+        Self::Trae,
+    ];
+
+    pub fn setup_rank(self) -> usize {
+        Self::SETUP_ORDER
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(Self::SETUP_ORDER.len())
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
@@ -60,7 +80,7 @@ impl Runtime {
             Self::Trae => "TRAE CLI",
             Self::Cursor => "Cursor",
             Self::Grok => "Grok",
-            Self::OpenCode => "OpenCode",
+            Self::OpenCode => "OpenCode v2",
             Self::Muse => "Muse Code",
             Self::Shell => "Shell",
         }
@@ -143,5 +163,20 @@ mod tests {
         assert_eq!(roots.len(), crate::RUNNER_SKILL_ROOTS.len());
         assert_eq!(Runtime::parse("aider-future"), None);
         assert!(serde_json::from_str::<Runtime>("\"aider-future\"").is_err());
+    }
+
+    #[test]
+    fn opencode_v2_display_and_catalog_metadata_keep_wire_ids_intact() {
+        assert_eq!(Runtime::OpenCode.display_name(), "OpenCode v2");
+        assert_eq!(Runtime::OpenCode.key(), "opencode");
+        let catalog = crate::protocol::runtime_metadata::opencode::catalog().unwrap();
+        assert_eq!(catalog.display_name, "OpenCode v2");
+        assert_eq!(catalog.min_version, Some("2.0.0"));
+        assert_eq!(catalog.install_url, "https://opencode.ai/v2/docs");
+        assert!(catalog.update_args.is_empty());
+        let client = crate::protocol::McpClientId::OpenCode;
+        assert_eq!(client.key(), "opencode");
+        assert_eq!(client.label(), "OpenCode v2");
+        assert_eq!(serde_json::to_string(&client).unwrap(), "\"OpenCode\"");
     }
 }

@@ -10,9 +10,9 @@ use gpui::{
     FontWeight, KeyDownEvent, MouseButton, Pixels, Window,
 };
 use runner_app::ui::menu::popup_layer;
-use runner_app::ui::{IconButton, IconButtonSize};
+use runner_app::ui::{ButtonVariant, IconButton, IconButtonSize};
 
-use crate::app_settings::AppSettings;
+use crate::app_settings::{AppSettings, DiffViewMode};
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -21,6 +21,7 @@ pub(crate) enum PanelViewId {
     Sessions,
     Info,
     Files,
+    Changes,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,11 +53,12 @@ impl PanelView {
             PanelViewId::Sessions => true,
             PanelViewId::Info => settings.info_view,
             PanelViewId::Files => settings.files_view,
+            PanelViewId::Changes => settings.changes_view,
         }
     }
 }
 
-pub(crate) const VIEWS: [PanelView; 3] = [
+pub(crate) const VIEWS: [PanelView; 4] = [
     PanelView {
         id: PanelViewId::Sessions,
         label: "ui.sessions",
@@ -76,6 +78,17 @@ pub(crate) const VIEWS: [PanelView; 3] = [
         label: "ui.files",
         icon: "folder.svg",
         key: Some("F"),
+        surfaces: &[
+            PanelSurface::Chat,
+            PanelSurface::Terminal,
+            PanelSurface::Mission,
+        ],
+    },
+    PanelView {
+        id: PanelViewId::Changes,
+        label: "ui.changes",
+        icon: "git-compare.svg",
+        key: Some("C"),
         surfaces: &[
             PanelSurface::Chat,
             PanelSurface::Terminal,
@@ -113,6 +126,22 @@ pub(crate) struct PanelContext {
 pub(crate) const MAIN_MIN_WIDTH: f32 = 420.;
 /// From this width the mission's Sessions roster places two cards per row.
 pub(crate) const ROSTER_TWO_UP_WIDTH: f32 = 560.;
+/// Each side of a Split diff takes at least this much unmaximized; narrower
+/// panels maximize on picking Split and fall back to Unified on Restore chat.
+pub(crate) const SPLIT_SIDE_MIN_WIDTH: f32 = 360.;
+pub(crate) const SPLIT_MIN_DIFF_WIDTH: f32 = SPLIT_SIDE_MIN_WIDTH * 2.;
+
+pub(crate) fn effective_diff_mode(
+    preferred: DiffViewMode,
+    diff_width: f32,
+    panel_maximized: bool,
+) -> DiffViewMode {
+    if preferred == DiffViewMode::Split && (panel_maximized || diff_width >= SPLIT_MIN_DIFF_WIDTH) {
+        DiffViewMode::Split
+    } else {
+        DiffViewMode::Unified
+    }
+}
 
 /// A panel widened by an open file: the file's width, whether the tree
 /// beside it is on, the tree's width, and the panel's standard width.
@@ -208,10 +237,14 @@ impl OpenSurfaces {
             .iter()
             .filter(|view| !view.on(settings))
             .map(|view| view.id)
-            .filter(|id| self.open.contains(id))
             .collect::<Vec<_>>();
-        for id in off {
-            self.close(id, permanent);
+        for id in &off {
+            if self.open.contains(id) {
+                self.close(*id, permanent);
+            }
+        }
+        if self.active.is_some_and(|active| off.contains(&active)) {
+            self.active = None;
         }
     }
 
@@ -226,6 +259,8 @@ impl OpenSurfaces {
 pub(crate) struct SavedPanel {
     pub(crate) surfaces: OpenSurfaces,
     pub(crate) open: Option<bool>,
+    pub(crate) maximized: bool,
+    pub(crate) widened_tree: Option<bool>,
 }
 
 /// The surfaces `surface` offers to open: those Settings turns on, a
@@ -236,21 +271,28 @@ fn offered(surface: PanelSurface, settings: &AppSettings) -> Vec<&'static PanelV
         .collect()
 }
 
-/// The tab that cannot close: a mission's Sessions, or the one surface on
-/// offer.
-fn permanent(surface: PanelSurface, settings: &AppSettings) -> Option<PanelViewId> {
-    if surface == PanelSurface::Mission {
-        return Some(PanelViewId::Sessions);
-    }
-    match offered(surface, settings).as_slice() {
-        [only] => Some(only.id),
-        _ => None,
+/// The tabs that cannot close: a mission's Sessions, a terminal tab's
+/// offered surfaces, or the one surface on offer.
+fn permanents(surface: PanelSurface, settings: &AppSettings) -> Vec<PanelViewId> {
+    match surface {
+        PanelSurface::Mission => vec![PanelViewId::Sessions],
+        PanelSurface::Terminal => offered(surface, settings)
+            .into_iter()
+            .map(|view| view.id)
+            .collect(),
+        PanelSurface::Chat => match offered(surface, settings).as_slice() {
+            [only] => vec![only.id],
+            _ => Vec::new(),
+        },
     }
 }
 
 /// What the `+` menu and the empty list offer; nothing where a surface's
-/// one tab is permanent.
+/// tabs are permanent.
 pub(crate) fn menu_views(surface: PanelSurface, settings: &AppSettings) -> Vec<&'static PanelView> {
+    if surface == PanelSurface::Terminal {
+        return Vec::new();
+    }
     let offered = offered(surface, settings);
     if surface != PanelSurface::Mission && offered.len() < 2 {
         return Vec::new();
@@ -258,23 +300,23 @@ pub(crate) fn menu_views(surface: PanelSurface, settings: &AppSettings) -> Vec<&
     offered
 }
 
-/// The header's tabs, each with whether it closes: the permanent one
+/// The header's tabs, each with whether it closes: the permanent ones
 /// first, then the open surfaces on offer.
 pub(crate) fn tabs(
     surface: PanelSurface,
     settings: &AppSettings,
     surfaces: &OpenSurfaces,
 ) -> Vec<(PanelViewId, bool)> {
-    let permanent = permanent(surface, settings);
+    let permanents = permanents(surface, settings);
     let offered = offered(surface, settings);
-    permanent
-        .map(|id| (id, false))
-        .into_iter()
+    permanents
+        .iter()
+        .map(|id| (*id, false))
         .chain(
             surfaces
                 .open
                 .iter()
-                .filter(|id| Some(**id) != permanent && offered.iter().any(|view| view.id == **id))
+                .filter(|id| !permanents.contains(id) && offered.iter().any(|view| view.id == **id))
                 .map(|id| (*id, true)),
         )
         .collect()
@@ -312,6 +354,7 @@ pub(crate) type SurfaceHandler = Rc<dyn Fn(SurfaceAction, &mut Window, &mut App)
 /// keyboard highlights there and in the empty list, and their focus.
 pub(crate) struct PanelSurfaces {
     pub(crate) open: OpenSurfaces,
+    widened_tree: Cell<Option<bool>>,
     menu_open: bool,
     menu_highlighted: usize,
     list_highlighted: usize,
@@ -325,6 +368,7 @@ impl PanelSurfaces {
     pub(crate) fn new(open: OpenSurfaces, cx: &mut App) -> Self {
         Self {
             open,
+            widened_tree: Cell::new(None),
             menu_open: false,
             menu_highlighted: 0,
             list_highlighted: 0,
@@ -335,16 +379,35 @@ impl PanelSurfaces {
         }
     }
 
-    /// Starts over on `open`, with the menu closed.
+    /// Starts over on `open`, with the menu closed and widened state cleared.
     pub(crate) fn reset(&mut self, open: OpenSurfaces) {
         self.open = open;
+        self.widened_tree.set(None);
         self.menu_open = false;
         self.return_focus = None;
         self.list_highlighted = 0;
     }
 
+    /// Restores a saved panel's surfaces and retained widened state.
+    pub(crate) fn restore(&mut self, open: OpenSurfaces, widened_tree: Option<bool>) {
+        self.reset(open);
+        self.widened_tree.set(widened_tree);
+    }
+
+    pub(crate) fn widened_tree(&self) -> Option<bool> {
+        self.widened_tree.get()
+    }
+
+    pub(crate) fn set_widened_tree(&self, tree: Option<bool>) {
+        self.widened_tree.set(tree);
+    }
+
     pub(crate) fn list_focus(&self) -> &FocusHandle {
         &self.list_focus
+    }
+
+    pub(crate) fn menu_focused(&self, window: &Window) -> bool {
+        self.menu_open && self.menu_focus.is_focused(window)
     }
 
     pub(crate) fn apply(
@@ -440,15 +503,23 @@ fn surface_key(
     }
 }
 
+pub(crate) type PanelCallback = Rc<dyn Fn(&mut Window, &mut App)>;
+
+pub(crate) struct MaximizeControl {
+    pub(crate) maximized: bool,
+    pub(crate) on_toggle: PanelCallback,
+}
+
 /// The header (Jason, 2026-11-05, after t3code): the open surfaces as tabs,
 /// the shown one raised with a × where it closes, then `+` for the surface
-/// menu, then `collapse` on the right.
+/// menu, then `maximize` and `collapse` on the right.
 pub(crate) fn header_tabs(
     surface: PanelSurface,
     settings: &AppSettings,
     surfaces: &OpenSurfaces,
     (menu, window): (&PanelSurfaces, &Window),
     handler: SurfaceHandler,
+    maximize: Option<MaximizeControl>,
     collapse: impl IntoElement,
 ) -> Div {
     let shown = shown(surface, settings, surfaces);
@@ -486,7 +557,45 @@ pub(crate) fn header_tabs(
                     surface_menu(&rows, surfaces, menu, anchor, handler.clone(), window)
                 }))
         });
-    // Tabs shrink, their names first, so `+` and collapse always show.
+    let maximize = maximize.map(|control| {
+        let maximized = control.maximized;
+        let on_toggle = control.on_toggle;
+        let label = crate::i18n::text(if maximized {
+            "ui.restore_chat"
+        } else {
+            "ui.maximize_side_panel"
+        });
+        let tooltip =
+            crate::keymap::effective_binding("toggle-maximize-pane", &settings.keymap_overrides)
+                .map_or_else(
+                    || label.to_owned(),
+                    |combo| format!("{label} · {}", crate::keymap::format_combo(&combo)),
+                );
+        div()
+            .flex_none()
+            .debug_selector(move || {
+                if maximized {
+                    "SIDE_PANEL_MAXIMIZE active".into()
+                } else {
+                    "SIDE_PANEL_MAXIMIZE".into()
+                }
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                IconButton::new(
+                    "side-panel-maximize",
+                    if maximized {
+                        "minimize-2.svg"
+                    } else {
+                        "maximize-2.svg"
+                    },
+                )
+                .when(maximized, |button| button.variant(ButtonVariant::Secondary))
+                .tooltip(tooltip)
+                .on_press(move |window, cx| on_toggle(window, cx)),
+            )
+    });
+    // Tabs shrink, their names first, so `+`, maximize and collapse always show.
     div()
         .flex_1()
         .min_w(px(0.))
@@ -504,6 +613,7 @@ pub(crate) fn header_tabs(
         )
         .children(add)
         .child(div().flex_1().min_w(px(0.)).h_full())
+        .children(maximize)
         .child(
             div()
                 .flex_none()
@@ -858,9 +968,9 @@ mod tests {
     fn views_keep_one_order_and_filter_by_surface() {
         use PanelSurface::*;
         use PanelViewId::*;
-        assert_eq!(ids(Mission), [Sessions, Info, Files]);
-        assert_eq!(ids(Chat), [Info, Files]);
-        assert_eq!(ids(Terminal), [Files]);
+        assert_eq!(ids(Mission), [Sessions, Info, Files, Changes]);
+        assert_eq!(ids(Chat), [Info, Files, Changes]);
+        assert_eq!(ids(Terminal), [Files, Changes]);
         assert!(VIEWS.iter().all(|view| view.on(&AppSettings::default())));
     }
 
@@ -871,6 +981,7 @@ mod tests {
         let off = AppSettings {
             info_view: false,
             files_view: false,
+            changes_view: false,
             ..AppSettings::default()
         };
         assert_eq!(ids_with(&off, Mission), [Sessions]);
@@ -878,6 +989,7 @@ mod tests {
         assert_eq!(views(Terminal, &off).count(), 0);
         let files_only = AppSettings {
             info_view: false,
+            changes_view: false,
             ..AppSettings::default()
         };
         assert_eq!(ids_with(&files_only, Mission), [Sessions, Files]);
@@ -961,7 +1073,7 @@ mod tests {
         use PanelSurface::*;
         use PanelViewId::*;
         let settings = AppSettings::default();
-        assert_eq!(menu_ids(Chat, &settings), [Info, Files]);
+        assert_eq!(menu_ids(Chat, &settings), [Info, Files, Changes]);
         let both = open(&[Info, Files], Some(Files));
         assert_eq!(tabs(Chat, &settings, &both), [(Info, true), (Files, true)]);
         assert_eq!(shown(Chat, &settings, &both), Some(Files));
@@ -970,7 +1082,7 @@ mod tests {
         assert_eq!(shown(Chat, &settings, &none), None, "the empty list");
         assert_eq!(
             VIEWS.iter().map(|view| view.key).collect::<Vec<_>>(),
-            [None, Some("I"), Some("F")]
+            [None, Some("I"), Some("F"), Some("C")]
         );
     }
 
@@ -979,7 +1091,7 @@ mod tests {
         use PanelSurface::*;
         use PanelViewId::*;
         let settings = AppSettings::default();
-        assert_eq!(menu_ids(Mission, &settings), [Info, Files]);
+        assert_eq!(menu_ids(Mission, &settings), [Info, Files, Changes]);
         let none = OpenSurfaces::default();
         assert_eq!(tabs(Mission, &settings, &none), [(Sessions, false)]);
         assert_eq!(shown(Mission, &settings, &none), Some(Sessions));
@@ -991,12 +1103,14 @@ mod tests {
         // A mission with one surface on offer still has `+` for it.
         let files_only = AppSettings {
             info_view: false,
+            changes_view: false,
             ..AppSettings::default()
         };
         assert_eq!(menu_ids(Mission, &files_only), [Files]);
         let off = AppSettings {
             info_view: false,
             files_view: false,
+            changes_view: false,
             ..AppSettings::default()
         };
         assert!(menu_ids(Mission, &off).is_empty());
@@ -1011,10 +1125,25 @@ mod tests {
         let settings = AppSettings::default();
         let info = open(&[Info], Some(Info));
         assert!(menu_ids(Terminal, &settings).is_empty());
-        assert_eq!(tabs(Terminal, &settings, &info), [(Files, false)]);
+        assert_eq!(
+            tabs(Terminal, &settings, &info),
+            [(Files, false), (Changes, false)]
+        );
         assert_eq!(shown(Terminal, &settings, &info), Some(Files));
+        let mut terminal = OpenSurfaces::default();
+        terminal.select(Changes);
+        assert_eq!(shown(Terminal, &settings, &terminal), Some(Changes));
+        let changes_off = AppSettings {
+            changes_view: false,
+            ..AppSettings::default()
+        };
+        terminal.close_off(&changes_off, false);
+        assert_eq!(tabs(Terminal, &changes_off, &terminal), [(Files, false)]);
+        assert_eq!(shown(Terminal, &changes_off, &terminal), Some(Files));
+
         let files_only = AppSettings {
             info_view: false,
+            changes_view: false,
             ..AppSettings::default()
         };
         assert!(menu_ids(Chat, &files_only).is_empty());
@@ -1023,9 +1152,16 @@ mod tests {
         assert_eq!(shown(Chat, &files_only, &none), Some(Files));
         let info_only = AppSettings {
             files_view: false,
+            changes_view: false,
             ..AppSettings::default()
         };
         assert_eq!(tabs(Chat, &info_only, &none), [(Info, false)]);
+        let changes_only = AppSettings {
+            info_view: false,
+            files_view: false,
+            ..AppSettings::default()
+        };
+        assert_eq!(tabs(Chat, &changes_only, &none), [(Changes, false)]);
     }
 
     #[test]
@@ -1094,14 +1230,15 @@ mod tests {
         assert_eq!(key("i", 0, true), Some(Open(Info)));
         assert_eq!(key("f", 0, false), Some(Open(Files)));
         assert_eq!(key("shift-f", 0, true), Some(Open(Files)));
-        assert_eq!(key("c", 0, true), None, "no Changes yet");
+        assert_eq!(key("c", 0, true), Some(Open(Changes)));
+        assert_eq!(key("c", 0, false), Some(Open(Changes)));
         assert_eq!(key("cmd-f", 0, true), None);
         assert_eq!(key("ctrl-f", 0, false), None);
         assert_eq!(key("escape", 0, true), Some(DismissMenu));
         assert_eq!(key("escape", 0, false), None);
         assert_eq!(key("down", 0, true), Some(HighlightMenu(1)));
-        assert_eq!(key("down", 1, false), Some(HighlightList(0)));
-        assert_eq!(key("up", 0, true), Some(HighlightMenu(1)));
-        assert_eq!(key("enter", 1, true), Some(Open(Files)));
+        assert_eq!(key("down", 2, false), Some(HighlightList(0)));
+        assert_eq!(key("up", 0, true), Some(HighlightMenu(2)));
+        assert_eq!(key("enter", 2, true), Some(Open(Changes)));
     }
 }

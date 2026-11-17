@@ -2034,10 +2034,11 @@ fn mission_panel_header_keeps_sessions_first_and_adds_info_and_files_from_plus()
         assert_text(&mut visual, "PANEL_TAB_INK Sessions", theme::text());
     }
 
-    // `+` offers Info and Files, never Sessions, with nothing checked.
+    // `+` offers Info, Files and Changes, never Sessions, with nothing checked.
     click(&mut visual, "PANEL_ADD_SURFACE");
     assert!(visual.debug_bounds("PANEL_MENU_ROW Info").is_some());
     assert!(visual.debug_bounds("PANEL_MENU_ROW Files").is_some());
+    assert!(visual.debug_bounds("PANEL_MENU_ROW Changes").is_some());
     assert!(visual.debug_bounds("PANEL_MENU_ROW Sessions").is_none());
     assert!(visual.debug_bounds("PANEL_MENU_CHECK Info").is_none());
     click(&mut visual, "PANEL_MENU_ROW Files");
@@ -2096,7 +2097,7 @@ fn mission_panel_header_keeps_sessions_first_and_adds_info_and_files_from_plus()
     assert!(visual.debug_bounds("MISSION_ROLES_SCROLL").is_some());
     assert!(visual.debug_bounds("PANEL_EMPTY").is_none(), "never empty");
 
-    // Settings → Side panel turning Info and Files off leaves Sessions,
+    // Settings → Side panel turning Info, Files and Changes off leaves Sessions,
     // with no `+`, and closes an open Files tab.
     click(&mut visual, "PANEL_ADD_SURFACE");
     click(&mut visual, "PANEL_MENU_ROW Files");
@@ -2105,6 +2106,7 @@ fn mission_panel_header_keeps_sessions_first_and_adds_info_and_files_from_plus()
             |settings| {
                 settings.info_view = false;
                 settings.files_view = false;
+                settings.changes_view = false;
                 true
             },
             false,
@@ -2121,6 +2123,7 @@ fn mission_panel_header_keeps_sessions_first_and_adds_info_and_files_from_plus()
             |settings| {
                 settings.info_view = true;
                 settings.files_view = true;
+                settings.changes_view = true;
                 true
             },
             false,
@@ -5023,8 +5026,9 @@ fn a_file_link_in_a_mission_terminal_opens_the_rails_preview() {
         "the closed Files tab opens"
     );
 
-    // A file left open keeps the rail wide behind Sessions; closing Files, or
-    // re-entering the mission, gives the width back and keeps the file's tab.
+    // Opening a file widens the rail across surfaces and after closing Files;
+    // resetting the mission's surface state starts back at standard width,
+    // while keeping the file's tab for when Files opens again.
     let widened = |visual: &mut gpui::VisualTestContext| {
         workspace.read_with(visual, |workspace, cx| {
             workspace.rail_layout(cx).1.is_some()
@@ -5038,7 +5042,7 @@ fn a_file_link_in_a_mission_terminal_opens_the_rails_preview() {
     workspace.update(&mut visual, |workspace, _| {
         workspace.rail_surfaces.open.close(PanelViewId::Files, true)
     });
-    assert!(!widened(&mut visual), "Files closed");
+    assert!(widened(&mut visual), "Files closed keeps the widened rail");
     workspace.update(&mut visual, |workspace, _| {
         workspace.rail_surfaces.open.open(PanelViewId::Files);
         workspace.rail_surfaces.reset(Default::default());
@@ -5199,4 +5203,317 @@ fn remote_mission_refusals_keep_resume_and_restart_distinct_through_update() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn maximized_mission_rail_hides_center_toggles_on_shortcut_and_restores_when_selecting_session() {
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let (_temp, mut cx, host, _fake) = suspended_mission_test();
+    host.update(&mut cx, |root, window, cx| {
+        root.open_mission("test-mission".into(), window, cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
+    visual.run_until_parked();
+
+    let max_btn = visual
+        .debug_bounds("SIDE_PANEL_MAXIMIZE")
+        .expect("mission rail maximize button");
+    visual.simulate_click(max_btn.center(), Default::default());
+    visual.run_until_parked();
+
+    host.read_with(&visual, |root, cx| {
+        let ws = root.mission_workspace.read(cx);
+        assert!(ws.rail_maximized);
+        assert!(ws.shown_terminals("test-mission", cx).is_empty());
+    })
+    .unwrap();
+    assert!(
+        visual.debug_bounds("SIDE_PANEL_MAXIMIZE active").is_some(),
+        "Restore chat button stays active while rail is maximized"
+    );
+
+    // Clicking a session card in maximized Sessions exits rail maximize, reveals center,
+    // selects that session tab, and focuses its visible terminal.
+    let card = visual
+        .debug_bounds("MISSION_CARD mission-agent")
+        .expect("session card in maximized Sessions");
+    visual.simulate_click(card.center(), Default::default());
+    visual.run_until_parked();
+
+    host.update(&mut visual, |root, window, cx| {
+        let ws = root.mission_workspace.read(cx);
+        assert!(!ws.rail_maximized);
+        assert_eq!(ws.active_tab, MissionTab::Session("mission-agent".into()));
+        assert_eq!(ws.shown_terminals("test-mission", cx), ["mission-agent"]);
+        let terminal_focus = &ws
+            .attached
+            .get("mission-agent")
+            .expect("attached mission-agent")
+            .terminal_focus;
+        assert!(terminal_focus.is_focused(window));
+    })
+    .unwrap();
+
+    // Focusing the mission rail and dispatching ToggleMaximizePane (⇧⌘↩) maximizes again,
+    // and pressing Enter on a session card also restores the center and focuses its terminal.
+    host.update(&mut visual, |root, window, cx| {
+        let focus = root.mission_workspace.read(cx).rail_focus.clone();
+        focus.focus(window, cx);
+    })
+    .unwrap();
+    visual.dispatch_action(crate::ToggleMaximizePane);
+    visual.run_until_parked();
+    host.read_with(&visual, |root, cx| {
+        assert!(root.mission_workspace.read(cx).rail_maximized);
+    })
+    .unwrap();
+
+    host.update(&mut visual, |root, window, cx| {
+        root.mission_workspace.update(cx, |ws, cx| {
+            ws.select_mission_session("mission-shell", window, cx);
+        });
+        let ws = root.mission_workspace.read(cx);
+        assert!(!ws.rail_maximized);
+        assert_eq!(ws.active_tab, MissionTab::Session("mission-shell".into()));
+        assert!(ws
+            .attached
+            .get("mission-shell")
+            .expect("attached mission-shell")
+            .terminal_focus
+            .is_focused(window));
+    })
+    .unwrap();
+
+    host.update(&mut visual, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn mission_rail_retains_widened_width_across_surfaces_closes_and_divider_drag() {
+    use std::process::Command;
+
+    let _theme = crate::theme_snapshot::ThemeGuard::new();
+    let (temp, mut cx, host, _fake) = suspended_mission_test();
+    let repo = temp.path().join("mission-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(repo.join("lib.rs"), "pub fn mission() {}\n").unwrap();
+    std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+    for args in [
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.name=Runner",
+            "-c",
+            "user.email=runner@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ][..],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success());
+    }
+    let canonical = repo.canonicalize().unwrap();
+    host.update(&mut cx, |root, window, cx| {
+        root.app_store.update(cx, |store, cx| {
+            store
+                .test_core
+                .db
+                .get()
+                .unwrap()
+                .execute(
+                    "UPDATE missions SET cwd = ?1, files_root = ?1 WHERE id = 'test-mission'",
+                    [canonical.to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            store.refresh(crate::app_store::StoreRefreshKind::All, cx);
+        });
+        root.open_mission("test-mission".into(), window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), &cx);
+    visual.simulate_resize(gpui::size(px(1600.), px(900.)));
+    visual.run_until_parked();
+
+    let rail_width = |visual: &mut gpui::VisualTestContext| -> f32 {
+        f32::from(visual.debug_bounds("MISSION_RAIL").unwrap().size.width)
+    };
+    let click = |visual: &mut gpui::VisualTestContext, selector: &'static str| {
+        let bounds = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing {selector}"));
+        visual.simulate_click(bounds.center(), gpui::Modifiers::default());
+        visual.run_until_parked();
+    };
+    let wait = |visual: &mut gpui::VisualTestContext,
+                what: &str,
+                ready: &dyn Fn(&mut gpui::VisualTestContext) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !ready(visual) {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            visual.run_until_parked();
+        }
+    };
+
+    // Fresh mission rail starts at standard 288 px (single-column session cards).
+    assert!((rail_width(&mut visual) - 288.).abs() <= 1.);
+    let card_agent = visual.debug_bounds("MISSION_CARD mission-agent").unwrap();
+    let card_shell = visual.debug_bounds("MISSION_CARD mission-shell").unwrap();
+    assert!(card_agent.top() < card_shell.top());
+
+    // Opening Changes widens to 680 px; switching to Sessions/Info and closing Changes retains 680 px and two-up cards.
+    click(&mut visual, "PANEL_ADD_SURFACE");
+    click(&mut visual, "PANEL_MENU_ROW Changes");
+    wait(&mut visual, "Changes widens rail", &|v| {
+        (rail_width(v) - 680.).abs() <= 1.
+    });
+    click(&mut visual, "PANEL_TAB Sessions");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+    let card_agent = visual.debug_bounds("MISSION_CARD mission-agent").unwrap();
+    let card_shell = visual.debug_bounds("MISSION_CARD mission-shell").unwrap();
+    assert_eq!(card_agent.top(), card_shell.top(), "two-up session cards");
+
+    click(&mut visual, "PANEL_ADD_SURFACE");
+    click(&mut visual, "PANEL_MENU_ROW Info");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+    click(&mut visual, "PANEL_TAB Changes");
+    click(&mut visual, "PANEL_TAB_CLOSE Changes");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+    click(&mut visual, "PANEL_TAB Info");
+    click(&mut visual, "PANEL_TAB_CLOSE Info");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+
+    // Resetting surfaces returns to 288 px; opening Files, closing the last file tab, and closing Files retains 680 px.
+    host.update(&mut visual, |root, _, cx| {
+        root.mission_workspace.update(cx, |ws, cx| {
+            ws.rail_surfaces.reset(Default::default());
+            cx.notify();
+        });
+    })
+    .unwrap();
+    visual.run_until_parked();
+    assert!((rail_width(&mut visual) - 288.).abs() <= 1.);
+
+    click(&mut visual, "PANEL_ADD_SURFACE");
+    click(&mut visual, "PANEL_MENU_ROW Files");
+    wait(&mut visual, "Files widens rail", &|v| {
+        v.debug_bounds("FILES_ROW lib.rs").is_some() && (rail_width(v) - 680.).abs() <= 1.
+    });
+    click(&mut visual, "FILES_ROW lib.rs");
+    wait(&mut visual, "lib.rs open", &|v| {
+        v.debug_bounds("FILE_CODE").is_some()
+    });
+    click(&mut visual, "FILE_TAB_CLOSE lib.rs");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+
+    // Combined Files (open file + tree hidden = 440 px) -> Changes (680 px) -> Sessions/Info & close Changes:
+    // inactive Files must not shrink the rail back to 440 px, and outer divider drags smoothly from 680 px.
+    wait(&mut visual, "main.rs row", &|v| {
+        v.debug_bounds("FILES_ROW main.rs").is_some()
+    });
+    click(&mut visual, "FILES_ROW main.rs");
+    wait(&mut visual, "main.rs open", &|v| {
+        v.debug_bounds("FILE_CODE").is_some()
+    });
+    click(&mut visual, "FILE_TREE_TOGGLE");
+    assert!((rail_width(&mut visual) - 440.).abs() <= 1.);
+    click(&mut visual, "PANEL_ADD_SURFACE");
+    click(&mut visual, "PANEL_MENU_ROW Info");
+    assert!((rail_width(&mut visual) - 440.).abs() <= 1.);
+    click(&mut visual, "PANEL_ADD_SURFACE");
+    click(&mut visual, "PANEL_MENU_ROW Changes");
+    wait(&mut visual, "Changes widens rail back to 680", &|v| {
+        (rail_width(v) - 680.).abs() <= 1.
+    });
+    click(&mut visual, "PANEL_TAB Sessions");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+    click(&mut visual, "PANEL_TAB Info");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+    click(&mut visual, "PANEL_TAB Changes");
+    click(&mut visual, "PANEL_TAB_CLOSE Changes");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+    click(&mut visual, "PANEL_TAB Sessions");
+    assert!((rail_width(&mut visual) - 680.).abs() <= 1.);
+
+    // Dragging the outer rail divider on Sessions (with tree-hidden Files still open behind it)
+    // resizes smoothly without snapping to 440 px or 480 px.
+    let start = visual.debug_bounds("MISSION_RAIL_GUTTER").unwrap().center();
+    visual.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+    for _ in 0..3 {
+        visual.simulate_mouse_move(
+            start + gpui::point(px(60.), px(0.)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        visual.run_until_parked();
+    }
+    assert!((rail_width(&mut visual) - 620.).abs() <= 1.);
+    for _ in 0..3 {
+        visual.simulate_mouse_move(
+            start + gpui::point(px(-40.), px(0.)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        visual.run_until_parked();
+    }
+    visual.simulate_mouse_up(
+        start + gpui::point(px(-40.), px(0.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    visual.run_until_parked();
+    assert!((rail_width(&mut visual) - 720.).abs() <= 1.);
+
+    // Explicitly showing Files reflects its tree-hidden toggle (480 px) and toggling tree back on restores 720 px.
+    click(&mut visual, "PANEL_TAB Files");
+    assert!((rail_width(&mut visual) - 480.).abs() <= 1.);
+    click(&mut visual, "FILE_TREE_TOGGLE");
+    assert!((rail_width(&mut visual) - 720.).abs() <= 1.);
+    click(&mut visual, "PANEL_TAB_CLOSE Files");
+    assert!((rail_width(&mut visual) - 720.).abs() <= 1.);
+
+    // Narrowing the window preserves MAIN_MIN_WIDTH = 420 px for the mission column.
+    visual.simulate_resize(gpui::size(px(1260.), px(900.)));
+    visual.run_until_parked();
+    let mission_col = visual.debug_bounds("MISSION_COLUMN").unwrap();
+    assert!(
+        f32::from(mission_col.size.width) >= 419.5,
+        "mission column preserves MAIN_MIN_WIDTH: {mission_col:?}"
+    );
+    assert!(rail_width(&mut visual) > 528.);
+
+    host.update(&mut visual, |_, window, _| window.remove_window())
+        .unwrap();
 }
