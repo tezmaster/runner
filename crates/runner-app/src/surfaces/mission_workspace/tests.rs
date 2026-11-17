@@ -1659,6 +1659,7 @@ fn mission_rail_info_still_scrolls_to_its_end_with_a_usage_card_and_open_calls()
     }
 }
 
+#[cfg(unix)]
 fn usage_card_fixture() -> runner_core::protocol::MissionReview {
     use runner_core::protocol::{BudgetState, CallUsage, MissionBudget, MissionReview};
     let call = |index: usize, key: &str| CallUsage {

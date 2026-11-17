@@ -48,6 +48,7 @@ Runner 在全平台都按 shell 词法拆分 **自定义参数**，且不展开 
 | Grok Build | `grok` | [Grok Build 设置](https://docs.x.ai/build/overview)；使用已有 grok.com 登录；自动更新 |
 | OpenCode v2 | `opencode` | [OpenCode](https://opencode.ai)；配置可用提供商与模型 |
 | TRAE CLI | `trae` | 需主动启用；安装配置 CLI 后在设置 → 智能体中开启 |
+| Muse Code | `muse` | Meta Muse；在 Runner 中启动前先通过 `muse` CLI 登录 |
 
 除 TRAE 外，列出的运行时被检测到后默认启用。运行时名称是 Runner 标识，不一定等于可执行文件名称。例如 Claude Code 的运行时为 `claude-code`，可执行文件为 `claude`。
 
@@ -81,6 +82,8 @@ Runner 在全平台都按 shell 词法拆分 **自定义参数**，且不展开 
 **OpenCode v2** 支持聊天、角色、小队、精确会话标识、动态模型与模型变体、钩子状态、技能目录、MCP 设置和 Runner 技能。没有聊天分叉、用量指示器、全局技能开关或更新控制。后端/原生数据检查覆盖回复、协调与停止/恢复；完整 GUI 和 Windows 检查尚未验证。任务使用其自动权限模式。
 
 **TRAE CLI** 仍需主动启用。提供技能目录、MCP 配置与任务权限支持。不要假定它与主要运行时具有相同功能或平台支持。
+
+**Muse Code** 支持聊天、角色、小队、任务权限绕过，以及通过 `muse resume` 恢复已保存的会话。模型选择沿用 CLI 默认值；推理强度映射到 `--reasoning-effort`。提供技能目录，但没有全局技能开关、MCP 设置、用量指示、分叉或更新控制。状态基于终端活动（无钩子或 OSC 7501）。macOS 为已验证平台；Windows 尚未验证。
 
 ## 平台与恢复说明
 

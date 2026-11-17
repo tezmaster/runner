@@ -57,7 +57,7 @@ fn costliest(slots: &[SlotUsage]) -> Option<&str> {
         .map(|slot| slot.handle.as_str())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl MissionWorkspace {
     /// Puts a review in place without reading the daemon, with some slots' calls open.
     pub(super) fn set_review_for_test(&mut self, review: MissionReview, expanded: &[&str]) {

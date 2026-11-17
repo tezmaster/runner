@@ -846,10 +846,14 @@ fn empty_state(description: impl Into<String>) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use gpui::{point, px, size, Modifiers, TestAppContext, VisualTestContext};
     use runner_core::protocol::mission_control::{
-        MissionControlCard, MissionControlEvidence, MissionControlLane, MissionControlMission,
-        MissionControlSourceKind,
+        MissionControlCard, MissionControlLane, MissionControlMission,
+    };
+    #[cfg(unix)]
+    use runner_core::protocol::mission_control::{
+        MissionControlEvidence, MissionControlSourceKind,
     };
 
     #[test]

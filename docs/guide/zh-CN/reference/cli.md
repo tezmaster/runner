@@ -62,6 +62,11 @@
 - [runner mission move](#runner-mission-move)
 - [runner mission link](#runner-mission-link)
 - [runner mission unlink](#runner-mission-unlink)
+- [runner mission rate](#runner-mission-rate)
+- [runner mission review](#runner-mission-review)
+- [runner mission usage-backfill](#runner-mission-usage-backfill)
+- [runner mission usage](#runner-mission-usage)
+- [runner mission usage-record](#runner-mission-usage-record)
 - [runner mission feed](#runner-mission-feed)
 - [runner mission answer](#runner-mission-answer)
 - [runner chat](#runner-chat)
@@ -891,23 +896,28 @@ Manage crew missions
 Usage: runner mission [OPTIONS] <COMMAND>
 
 Commands:
-  list         List active missions
-  show         Show an operational mission snapshot
-  start        Start a mission
-  add-role     Add a configured worker role to a running mission (person only)
-  remove-role  Remove a worker from a running mission (person only)
-  stop         Stop a running mission
-  resume       Resume every stopped session in a mission
-  archive      Archive a mission
-  unarchive    Restore an archived mission to active lists
-  rename       Rename a mission
-  pin          Pin a mission
-  unpin        Unpin a mission
-  move         Move a mission into a project or unfile it
-  link         Link a mission to a chat, which Runner then tells when it needs you, fails or settles
-  unlink       Remove a mission's link to its chat
-  feed         Print a window from the mission event feed
-  answer       Answer a pending person question
+  list            List active missions
+  show            Show an operational mission snapshot
+  start           Start a mission
+  add-role        Add a configured worker role to a running mission (person only)
+  remove-role     Remove a worker from a running mission (person only)
+  stop            Stop a running mission
+  resume          Resume every stopped session in a mission
+  archive         Archive a mission
+  unarchive       Restore an archived mission to active lists
+  rename          Rename a mission
+  pin             Pin a mission
+  unpin           Unpin a mission
+  move            Move a mission into a project or unfile it
+  link            Link a mission to a chat, which Runner then tells when it needs you, fails or settles
+  unlink          Remove a mission's link to its chat
+  rate            Rate a finished mission up or down, or clear its rating (person only)
+  review          Show a mission's rating, its share of the plan allowance and what each slot used
+  usage-backfill  Measure missions that already ran against the week that is still open (person only)
+  usage           List recent missions by the share of the weekly allowance they used
+  usage-record    Record what each slot used, from JSON (person only)
+  feed            Print a window from the mission event feed
+  answer          Answer a pending person question
 
 Options:
       --json  Print the tool result as exact JSON
@@ -1170,6 +1180,87 @@ Options:
       --json  Print the tool result as exact JSON
   -q          Print only result IDs
   -h, --help  Print help
+```
+
+## runner mission rate
+
+```text
+Rate a finished mission up or down, or clear its rating (person only)
+
+Usage: runner mission rate [OPTIONS] <MISSION> [VERDICT]
+
+Arguments:
+  <MISSION>
+  [VERDICT]  `up` or `down`; leave out with --clear
+
+Options:
+      --json         Print the tool result as exact JSON
+      --note <NOTE>  One line on what went well or badly. Never customer or service-user data
+      --clear        Remove the mission's rating
+  -q                 Print only result IDs
+  -h, --help         Print help
+```
+
+## runner mission review
+
+```text
+Show a mission's rating, its share of the plan allowance and what each slot used
+
+Usage: runner mission review [OPTIONS] [MISSION]
+
+Arguments:
+  [MISSION]
+
+Options:
+      --json    Print the tool result as exact JSON
+      --sample  Take a fresh allowance reading first (only while the mission is running)
+  -q            Print only result IDs
+  -h, --help    Print help
+```
+
+## runner mission usage-backfill
+
+```text
+Measure missions that already ran against the week that is still open (person only)
+
+Usage: runner mission usage-backfill [OPTIONS]
+
+Options:
+      --days <DAYS>  How many days back to look (1 to 90) [default: 14]
+      --json         Print the tool result as exact JSON
+  -q                 Print only result IDs
+  -h, --help         Print help
+```
+
+## runner mission usage
+
+```text
+List recent missions by the share of the weekly allowance they used
+
+Usage: runner mission usage [OPTIONS]
+
+Options:
+      --days <DAYS>  How many days back to look (1 to 90) [default: 7]
+      --json         Print the tool result as exact JSON
+  -q                 Print only result IDs
+  -h, --help         Print help
+```
+
+## runner mission usage-record
+
+```text
+Record what each slot used, from JSON (person only)
+
+Usage: runner mission usage-record [OPTIONS] --file <FILE> <MISSION>
+
+Arguments:
+  <MISSION>
+
+Options:
+      --file <FILE>  Read `{"slots": [...]}` (or a bare array of slots) from a file, or - for stdin
+      --json         Print the tool result as exact JSON
+  -q                 Print only result IDs
+  -h, --help         Print help
 ```
 
 ## runner mission feed
